@@ -146,6 +146,20 @@ function _crearEsquema(d) {
       updated_at         TEXT NOT NULL DEFAULT ''
     );
 
+    -- ── Mapeo de proyectos hacia tesorería (solo local) ──────────────────────
+    -- Los nombres de tesorería ("0378 IZZI 96") no coinciden con los códigos de
+    -- oc-automation ("CT25-202 Micropilotes IZZI 96"), así que el emparejamiento
+    -- lo hace una persona al enviar la primera OC del proyecto. Acá se recuerda
+    -- esa elección para preseleccionarla la próxima vez — es una sugerencia,
+    -- siempre editable, nunca un automatismo.
+    CREATE TABLE IF NOT EXISTS mapeo_proyectos_tesoreria (
+      proyecto         TEXT PRIMARY KEY,
+      tesoreria_id     TEXT NOT NULL,
+      tesoreria_nombre TEXT NOT NULL DEFAULT '',
+      actualizado_por  TEXT NOT NULL DEFAULT '',
+      updated_at       TEXT NOT NULL DEFAULT ''
+    );
+
     -- ── Sesiones (solo local, nunca va a SharePoint) ─────────────────────────
     CREATE TABLE IF NOT EXISTS sesiones (
       id         TEXT PRIMARY KEY,
@@ -627,6 +641,35 @@ function setConsecutivoProyecto(proyecto, valor) {
   `).run(proyecto, valor, now, valor, now);
 }
 
+// ── Mapeo de proyectos hacia tesorería ────────────────────────────────────────
+
+/**
+ * Última elección humana de proyecto de tesorería para un proyecto del ERP.
+ * @returns {{tesoreria_id, tesoreria_nombre, actualizado_por, updated_at}|null}
+ */
+function getMapeoTesoreria(proyecto) {
+  if (!proyecto) return null;
+  return db().prepare(`
+    SELECT tesoreria_id, tesoreria_nombre, actualizado_por, updated_at
+    FROM mapeo_proyectos_tesoreria WHERE proyecto = ?
+  `).get(String(proyecto)) || null;
+}
+
+function setMapeoTesoreria({ proyecto, tesoreriaId, tesoreriaNombre = '', actualizadoPor = '' }) {
+  if (!proyecto || !tesoreriaId) return;
+  const now = new Date().toISOString();
+  db().prepare(`
+    INSERT INTO mapeo_proyectos_tesoreria
+      (proyecto, tesoreria_id, tesoreria_nombre, actualizado_por, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(proyecto) DO UPDATE SET
+      tesoreria_id = excluded.tesoreria_id,
+      tesoreria_nombre = excluded.tesoreria_nombre,
+      actualizado_por = excluded.actualizado_por,
+      updated_at = excluded.updated_at
+  `).run(String(proyecto), String(tesoreriaId), String(tesoreriaNombre), String(actualizadoPor), now);
+}
+
 // ── Conteo ────────────────────────────────────────────────────────────────────
 
 function counts() {
@@ -689,4 +732,6 @@ module.exports = {
   norm,
   getNextConsecutivoProyecto,
   setConsecutivoProyecto,
+  getMapeoTesoreria,
+  setMapeoTesoreria,
 };
