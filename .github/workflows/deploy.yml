@@ -89,10 +89,21 @@ jobs:
       # Sin --delete: esta llamada no puede borrar nada, ni siquiera en teoria.
       # --inplace evita el temporal+rename que exigiria permiso de escritura
       # sobre el directorio data/, que pertenece al UID 10001.
+      #
+      # --omit-dir-times y --no-perms son obligatorios aca. El usuario del
+      # deploy puede sobrescribir las plantillas porque le pertenecen, pero no
+      # es dueno del directorio data/, y cambiar la fecha o los permisos de un
+      # directorio exige ser su dueno. Sin estos flags rsync falla con
+      # "failed to set times on data/." y termina en codigo 23, aunque el
+      # contenido se haya sincronizado bien.
+      #
+      # En data/ solo importa que el contenido coincida: la fecha y los
+      # permisos no aportan nada y cada intento de tocarlos es un fallo
+      # potencial siendo no-dueno.
       - name: Sincronizar plantillas (solo data/)
         run: |
           rsync -az -c --inplace --itemize-changes \
-            --no-owner --no-group \
+            --no-owner --no-group --no-perms --omit-dir-times \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_PORT || 22 }}" \
             --exclude 'local.db*' \
             ./data/ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_PATH }}/data/"
