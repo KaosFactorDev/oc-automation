@@ -209,6 +209,84 @@ El `.env` y el volumen de datos (`data/`) no se tocan durante la actualización.
 
 ---
 
+## Integración con tesorería (Pagos Diarios)
+*(Opcional. Solo se configura una vez, y solo el administrador)*
+
+Permite que, sobre una OC ya aprobada, una persona envíe la solicitud de pago a
+Pagos Diarios sin re-teclear los datos. El flujo **no es automático**: quien
+envía elige el proyecto de tesorería y escribe el concepto, y queda registrado
+su correo en la solicitud.
+
+Si estas variables no están configuradas, la integración no aparece en la
+consola (ni la columna "Tesorería" ni el botón). No hay nada que desactivar.
+
+### Paso 1 — Crear el usuario en Supabase
+
+En Supabase Studio del proyecto de Cash_Flow:
+
+1. **Authentication → Users → Add user → Create new user**. Correo
+   `oc-automation@thekaosfaktor.com` y una contraseña.
+   **Marcar "Auto Confirm User"** — si el usuario queda sin confirmar, el login
+   falla con `email_not_confirmed`.
+2. **SQL editor** — asignar el rol (debe correr *después* de crear el usuario;
+   si no existe, inserta 0 filas sin dar error):
+   ```sql
+   insert into public.user_roles (user_id, role)
+   select id, 'solicitante' from auth.users
+   where email = 'oc-automation@thekaosfaktor.com';
+   ```
+3. Verificar:
+   ```sql
+   select u.email, r.role
+   from auth.users u
+   left join public.user_roles r on r.user_id = u.id
+   where u.email = 'oc-automation@thekaosfaktor.com';
+   ```
+   Debe salir una fila con `solicitante`. Si `role` sale null, el insert no
+   corrió; si no sale nada, el usuario no existe o el correo quedó distinto.
+
+El rol `solicitante` es lo que garantiza que la integración no pueda fijar banco
+ni fecha de pago, ni crear nada como ya pagado.
+
+### Paso 2 — Configurar el .env
+
+Agregar al `.env` (los valores están en `.env.example`):
+
+```
+TESORERIA_URL=https://<project-ref>.supabase.co
+TESORERIA_ANON_KEY=<anon / publishable key>
+TESORERIA_EMAIL=oc-automation@thekaosfaktor.com
+TESORERIA_PASSWORD=<contraseña>
+```
+
+**En producción el `.env` se edita directamente en el VPS.** El despliegue por
+GitHub Actions lo excluye del rsync a propósito, así que editarlo en el
+repositorio no tiene ningún efecto sobre el servidor:
+
+```bash
+ssh usuario@vps
+cd /ruta/del/proyecto
+nano .env
+docker compose up -d   # recargar la configuración
+```
+
+La contraseña y el token nunca llegan al navegador: el front solo habla con las
+rutas `/tesoreria/*` del propio ERP.
+
+### Paso 3 — Verificar
+
+En la pestaña de Órdenes de Compra debe aparecer una columna **Tesorería**. Al
+abrir una OC aprobada, un botón **Enviar a tesorería**. Tras enviar, la columna
+muestra el consecutivo de egreso (`CE-26070042`) y la solicitud aparece en Pagos
+Diarios en estado `SOLICITUD`.
+
+Si la columna no aparece, falta alguna de las cuatro variables o el contenedor
+no se reinició. Si aparece pero el desplegable de proyectos sale vacío, revisar
+los logs (`docker compose logs -f`) — casi siempre es el usuario sin confirmar o
+sin el rol `solicitante`.
+
+---
+
 ## Preparación de la copia maestra en OneDrive
 *(Solo lo hace el administrador una vez — los demás usuarios saltan al Paso 1)*
 
