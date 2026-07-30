@@ -1,0 +1,79 @@
+name: (SIMULACION) Deploy por rsync - dry run
+
+# Workflow TEMPORAL de validacion. No modifica nada en el VPS.
+# Corre en paralelo al deploy real para comparar que haria el metodo rsync
+# antes de reemplazar el metodo actual (git pull en el VPS).
+#
+# Objetivo: revisar en el log que NO aparezca ninguna linea "*deleting"
+# sobre .env ni sobre data/local.db*
+#
+# Una vez validado, su contenido se integra a deploy.yml y este archivo se borra.
+
+on:
+  push:
+    branches:
+      - main
+
+# Grupo distinto al del deploy real para no bloquearlo
+concurrency:
+  group: deploy-vps-dryrun
+  cancel-in-progress: true
+
+jobs:
+  simulacion:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar clave SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "${{ secrets.VPS_PORT || 22 }}" -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Verificar permisos de data/ en el VPS
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${{ secrets.VPS_PORT || 22 }}" \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            'ls -ld "${{ secrets.VPS_PATH }}/data" && \
+             test -w "${{ secrets.VPS_PATH }}/data" \
+               && echo "OK: el usuario del deploy puede escribir en data/" \
+               || { echo "ERROR: data/ NO es escribible. Corre: sudo chown deploy:10001 data && sudo chmod 775 data"; exit 1; }'
+
+      # --dry-run: rsync calcula y reporta, pero NO escribe ni borra nada.
+      # --itemize-changes: imprime una linea por cada cambio que haria.
+      - name: SIMULAR sincronizacion (no modifica nada)
+        run: |
+          rsync -az --delete --dry-run --itemize-changes \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_PORT || 22 }}" \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude 'data/local.db*' \
+            --exclude 'node_modules' \
+            --exclude 'logs/' \
+            --exclude 'temp/' \
+            ./ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_PATH }}/" \
+            | tee /tmp/rsync-plan.txt
+
+      - name: Auditar que no se borre nada critico
+        run: |
+          echo "=============================================="
+          echo "  ARCHIVOS QUE SE BORRARIAN EN EL VPS"
+          echo "=============================================="
+          if grep -q '^\*deleting' /tmp/rsync-plan.txt; then
+            grep '^\*deleting' /tmp/rsync-plan.txt
+          else
+            echo "(ninguno)"
+          fi
+          echo ""
+
+          # Falla el job si algo critico aparece en la lista de borrado
+          if grep -E '^\*deleting .*(\.env|local\.db)' /tmp/rsync-plan.txt; then
+            echo "PELIGRO: la simulacion borraria un archivo critico."
+            echo "NO integrar este workflow a deploy.yml. Revisar los excludes."
+            exit 1
+          fi
+
+          echo "OK: ni .env ni data/local.db* aparecen en la lista de borrado."
