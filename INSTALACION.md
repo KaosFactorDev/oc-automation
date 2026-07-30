@@ -139,7 +139,7 @@ nuevo más adelante) en `README.md`, sección **"Reverse proxy compartido (`edge
 
 ```bash
 # Clonar el repositorio en el VPS
-git clone <url-del-repositorio> oc-automation
+git clone https://github.com/KaosFactorDev/oc-automation.git oc-automation
 cd oc-automation
 
 # Desde el equipo que sí tiene el .env y el local.db reales, copiarlos al VPS:
