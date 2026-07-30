@@ -1,5 +1,46 @@
 name: Deploy a VPS
 
+# El runner empuja el codigo al VPS por rsync sobre SSH.
+#
+# Antes el VPS jalaba el codigo con "git fetch", lo que obliga a tener
+# credenciales de GitHub en el servidor. La organizacion tiene las deploy keys
+# deshabilitadas por politica, asi que se invirtio el flujo: ahora el VPS no
+# necesita hablar con GitHub y el repo puede pasar a privado sin romper nada.
+#
+# Secrets usados (los mismos de siempre):
+#   VPS_HOST, VPS_USER, VPS_SSH_KEY, VPS_PATH y VPS_PORT (opcional, default 22)
+#
+# ---------------------------------------------------------------------------
+# Por que hay DOS llamadas a rsync
+# ---------------------------------------------------------------------------
+# El directorio data/ pertenece al UID 10001 (el usuario del contenedor) con
+# modo 755, asi que el usuario del deploy NO puede crear ni borrar archivos
+# dentro. Si puede sobrescribir los archivos que ya existen ahi, porque esos
+# si le pertenecen.
+#
+#   1. Codigo    -> todo menos data/, con --delete y escritura atomica.
+#   2. Plantillas-> solo data/, con --inplace (escribe sobre el archivo sin
+#                   crear temporales) y SIN --delete.
+#
+# La llamada 2 no lleva --delete a proposito: la base de datos no depende de
+# que la lista de excludes este bien escrita, sino de que la operacion de
+# borrar no exista en esa llamada.
+#
+# ---------------------------------------------------------------------------
+# Rollback manual
+# ---------------------------------------------------------------------------
+# .git/ esta excluido del rsync, asi que el clon del VPS sigue intacto y sirve
+# de via de escape. Si un deploy sale mal:
+#
+#   cd <VPS_PATH>
+#   git fetch origin main && git reset --hard origin/main
+#   docker compose up -d --build
+#
+# (requiere que el repo siga siendo publico, o credenciales en el VPS)
+#
+# Los archivos que un deploy sobrescriba o borre quedan copiados en
+# ../deploy-backups/<sha-del-commit>/ dentro del VPS.
+
 on:
   push:
     branches:
@@ -14,18 +55,76 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Desplegar por SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          script: |
-            set -e
-            cd ${{ secrets.VPS_PATH }}
-            git fetch origin main
-            git reset --hard origin/main
-            docker compose build
-            docker compose up -d
-            docker compose ps
+      - name: Checkout del codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar clave SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "${{ secrets.VPS_PORT || 22 }}" -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # -c compara por checksum de contenido en vez de tamano+fecha.
+      #    actions/checkout reescribe la mtime de todos los archivos en cada
+      #    run, asi que sin -c rsync marcaria los 65 archivos como cambiados
+      #    siempre y el log seria inservible para detectar cambios reales.
+      # --no-owner --no-group: el usuario del deploy no es root y no puede
+      #    hacer chown; sin esto rsync lo intenta y ensucia el log.
+      # --backup: lo que se sobrescriba o borre se guarda en vez de perderse.
+      - name: Sincronizar codigo (todo menos data/)
+        run: |
+          rsync -az -c --delete --itemize-changes \
+            --no-owner --no-group \
+            --backup --backup-dir="../deploy-backups/${{ github.sha }}" \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_PORT || 22 }}" \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude 'data/' \
+            --exclude 'node_modules' \
+            --exclude 'logs/' \
+            --exclude 'temp/' \
+            ./ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_PATH }}/"
+
+      # Sin --delete: esta llamada no puede borrar nada, ni siquiera en teoria.
+      # --inplace evita el temporal+rename que exigiria permiso de escritura
+      # sobre el directorio data/, que pertenece al UID 10001.
+      - name: Sincronizar plantillas (solo data/)
+        run: |
+          rsync -az -c --inplace --itemize-changes \
+            --no-owner --no-group \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_PORT || 22 }}" \
+            --exclude 'local.db*' \
+            ./data/ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_PATH }}/data/"
+
+      - name: Reconstruir y levantar contenedores
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${{ secrets.VPS_PORT || 22 }}" \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            'set -e
+             cd "${{ secrets.VPS_PATH }}"
+             docker compose build
+             docker compose up -d
+             docker compose ps'
+
+      # El deploy anterior corria "docker compose ps" de inmediato y siempre
+      # daba verde, aunque la app no llegara a arrancar. Aca se espera al
+      # healthcheck y se falla con logs si no levanta.
+      - name: Verificar que la app quede healthy
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${{ secrets.VPS_PORT || 22 }}" \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            'cd "${{ secrets.VPS_PATH }}"
+             for i in $(seq 1 24); do
+               estado=$(docker inspect --format="{{.State.Health.Status}}" oc-automation-app 2>/dev/null || echo desconocido)
+               echo "intento $i/24: $estado"
+               if [ "$estado" = "healthy" ]; then
+                 echo "La app respondio correctamente."
+                 exit 0
+               fi
+               sleep 5
+             done
+             echo "ERROR: la app no llego a healthy en 2 minutos."
+             docker compose ps
+             docker compose logs --tail=80 app
+             exit 1'
