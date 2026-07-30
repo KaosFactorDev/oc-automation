@@ -1325,6 +1325,10 @@ const ESTADO = {
   // Módulo 1.2 (requerimiento)
   requerimientoActivo: null,
   comparativa:         null,
+  // Integración con tesorería (Pagos Diarios): { habilitado, proyectos }
+  tesoreria:    null,
+  // Estado vivo por # de OC traído de tesorería: { 'OC-0042': {egreso_id, estado} }
+  tesEnviadas:  {},
 };
 
 // OS items state
@@ -1575,6 +1579,74 @@ async function cargarOrdenes(){
   }catch{ ESTADO.ordenes = []; }
   $('#cnt-oc').textContent = ESTADO.ordenes.length;
   renderOrdenes();
+  refrescarEstadoTesoreria(); // sin await: repinta los badges cuando llegue
+}
+
+// ─── Integración con tesorería (Pagos Diarios) ───────────────────────────────
+
+// Se pide una sola vez al arrancar: sirve de caché del desplegable de proyectos
+// y de bandera para saber si mostrar la columna y el botón. Sin credenciales en
+// el .env del servidor, habilitado llega en false y la integración se oculta.
+async function cargarTesoreria(){
+  try {
+    ESTADO.tesoreria = await fetch('/tesoreria/proyectos').then(r => r.json());
+  } catch { ESTADO.tesoreria = { habilitado: false, proyectos: [] }; }
+}
+
+// Tope de OC por consulta: los # de OC van en la URL y la lista crece para
+// siempre (con ~160 OC ya son 2.4 KB), así que sin tope acabaría en un 414. Se
+// consultan las más recientes, que es lo que el usuario está viendo. Las viejas
+// no pierden el badge — el egreso_id sigue guardado en la propia OC; lo único
+// que no se refresca es su estado, que en la práctica ya no cambia.
+const TES_MAX_CONSULTA = 80;
+
+// Superpone el estado vivo (SOLICITUD/APROBADO/PAGADO) sobre los badges ya
+// pintados. Best-effort: si tesorería no responde, la columna se queda con el
+// egreso_id que cada OC tiene guardado. Parchea celda por celda en vez de
+// re-renderizar, para no borrar la selección de OC para remisiones.
+async function refrescarEstadoTesoreria(){
+  if (!ESTADO.tesoreria?.habilitado) return;
+  // ESTADO.ordenes viene ordenado por fecha descendente desde el servidor
+  const ocs = ESTADO.ordenes
+    .filter(o => ['aprobada','finalizada'].includes(o.estado))
+    .map(o => String(o.numeroOC || '').trim())
+    .filter(Boolean)
+    .slice(0, TES_MAX_CONSULTA);
+  if (!ocs.length) return;
+  try {
+    const data = await fetch('/tesoreria/enviadas?ocs=' + encodeURIComponent(ocs.join(','))).then(r => r.json());
+    if (!data?.enviadas || !Object.keys(data.enviadas).length) return;
+    ESTADO.tesEnviadas = data.enviadas;
+    for (const o of ESTADO.ordenes) {
+      const celda = document.getElementById('oc-tes-' + o.id);
+      if (celda) celda.innerHTML = badgeTesoreria(o);
+    }
+  } catch { /* best-effort, no molestar al usuario */ }
+}
+
+// Datos de tesorería de una OC: lo guardado en la OC (siempre disponible, sin
+// latencia) más el estado vivo si la consulta batch alcanzó a llegar.
+function tesoreriaDeOC(o){
+  const num   = String(o.numeroOC || '').trim();
+  const vivo  = ESTADO.tesEnviadas?.[num] || null;
+  const egreso = o.solicitudTesoreriaId || vivo?.egreso_id || '';
+  return {
+    egresoId: egreso,
+    estado:   vivo?.estado || '',
+    enviada:  !!egreso,
+    enviable: ['aprobada','finalizada'].includes(o.estado) && !!num,
+  };
+}
+
+function badgeTesoreria(o){
+  const t = tesoreriaDeOC(o);
+  if (t.enviada) {
+    const est = t.estado ? ` · ${esc(t.estado)}` : '';
+    return `<span class="tag tag-pagada" style="white-space:nowrap" title="Enviada a tesorería${est}">${esc(t.egresoId)}</span>`
+         + (t.estado ? `<div style="font-size:10px;color:var(--txt-2);margin-top:2px;white-space:nowrap">${esc(t.estado)}</div>` : '');
+  }
+  if (t.enviable) return '<span class="tag tag-borrador" style="white-space:nowrap">Sin enviar</span>';
+  return '<span style="color:var(--txt-2)">—</span>';
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // 1.4 ÓRDENES DE SERVICIO
@@ -3543,6 +3615,8 @@ function renderOrdenes(){
   $('#oc-stats-aprobadas').textContent = `${ocBase.filter(o => o.estado === 'aprobada').length} Aprobadas`;
   $('#oc-stats-borrador').textContent  = `${ocBase.filter(o => o.estado === 'borrador').length} Borradores`;
 
+  const tesHabilitada = !!ESTADO.tesoreria?.habilitado;
+
   if (!filtradas.length){
     cont.innerHTML = `
       <div class="empty">
@@ -3573,6 +3647,7 @@ function renderOrdenes(){
               <th>Número OC</th><th>Fecha</th><th>Proyecto</th><th>Proveedor</th>
               <th style="text-align:right">Total</th>
               <th>Estado</th><th>Pago</th><th>Entrega</th>
+              ${tesHabilitada ? '<th style="white-space:nowrap">Tesorería</th>' : ''}
             </tr></thead>
             <tbody>
               ${filtradas.map(o => {
@@ -3588,6 +3663,7 @@ function renderOrdenes(){
                   <td><span class="tag tag-${esc(o.estado || 'borrador')}">${capFirst(o.estado || 'borrador')}</span></td>
                   <td>${o.pagado ? '<span class="tag tag-pagada">✓ Pagada</span>' : '<span class="tag tag-borrador">Pendiente</span>'}</td>
                   <td>${o.entregado ? '<span class="tag tag-entregada">✓ Entregada</span>' : '<span class="tag tag-borrador">Pendiente</span>'}</td>
+                  ${tesHabilitada ? `<td id="oc-tes-${esc(o.id)}">${badgeTesoreria(o)}</td>` : ''}
                 </tr>`;}).join('')}
             </tbody>
           </table>
@@ -3730,6 +3806,8 @@ function verOrden(id) {
   const puedePagar    = o.estado === 'aprobada' && !o.pagado;
   const puedeEntregar = o.estado === 'aprobada' && !o.entregado;
   const puedeVincular = (o.estado === 'borrador' || o.estado === 'aprobada') && !o.requerimientoId;
+  const tes           = tesoreriaDeOC(o);
+  const puedeEnviarTes = !!ESTADO.tesoreria?.habilitado && tes.enviable && !tes.enviada;
 
   let itemsOC = [];
   try { itemsOC = JSON.parse(o.itemsJson || '[]'); } catch {}
@@ -3772,7 +3850,7 @@ function verOrden(id) {
           </tbody>
         </table>
       </div>` : ''}
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;font-size:13px">
+      <div style="display:grid;grid-template-columns:repeat(${ESTADO.tesoreria?.habilitado && tes.enviada ? 4 : 3},1fr);gap:10px;margin-bottom:16px;font-size:13px">
         <div>
           <span style="color:var(--txt-2);font-size:11px;text-transform:uppercase;letter-spacing:.05em">Total</span>
           <div style="margin-top:4px"><strong class="mono">${fmt$(o.total)}</strong></div>
@@ -3785,6 +3863,15 @@ function verOrden(id) {
           <span style="color:var(--txt-2);font-size:11px;text-transform:uppercase;letter-spacing:.05em">Entrega</span>
           <div style="margin-top:4px">${o.entregado ? '<span class="tag tag-entregada">✓ Entregada</span>' : '<span class="tag tag-borrador">Pendiente</span>'}</div>
         </div>
+        ${ESTADO.tesoreria?.habilitado && tes.enviada ? `
+        <div>
+          <span style="color:var(--txt-2);font-size:11px;text-transform:uppercase;letter-spacing:.05em">Tesorería</span>
+          <div style="margin-top:4px">
+            <span class="tag tag-pagada">${esc(tes.egresoId)}</span>
+            ${tes.estado ? `<div style="font-size:10px;color:var(--txt-2);margin-top:2px">${esc(tes.estado)}</div>` : ''}
+            ${o.solicitudTesoreriaPor ? `<div style="font-size:10px;color:var(--txt-2);margin-top:2px">por ${esc(o.solicitudTesoreriaPor)}</div>` : ''}
+          </div>
+        </div>` : ''}
       </div>
       </div>
       <div class="modal-actions">
@@ -3794,6 +3881,7 @@ function verOrden(id) {
         ${o.pdfUrl ? `<a class="btn btn-ghost" href="${esc(o.pdfUrl)}" target="_blank" rel="noopener">☁️ PDF SharePoint</a>` : ''}
         ${puedeVincular  ? `<button class="btn btn-ghost btn-sm" id="oc-ver-vincular">Vincular req.</button>` : ''}
         ${puedeAnular    ? `<button class="btn btn-danger"  id="oc-ver-anular">Anular</button>` : ''}
+        ${puedeEnviarTes ? `<button class="btn btn-primary" id="oc-ver-tesoreria">Enviar a tesorería</button>` : ''}
         ${puedePagar     ? `<button class="btn btn-primary" id="oc-ver-pagar">Pagada</button>` : ''}
         ${puedeEntregar  ? `<button class="btn btn-primary" id="oc-ver-entregar">Entregada</button>` : ''}
         ${puedeAprobar   ? `<button class="btn btn-ghost btn-sm" id="oc-btn-editar">Editar borrador</button>` : ''}
@@ -3813,6 +3901,8 @@ function verOrden(id) {
   if (bPagar)    bPagar.onclick    = () => { wrap.remove(); accionOC(id, 'pagar'); };
   if (bEntregar) bEntregar.onclick = () => { wrap.remove(); accionOC(id, 'entregar'); };
   if (bVincular) bVincular.onclick = () => { wrap.remove(); abrirVincularReq(id, o.proyecto || ''); };
+  const bTesoreria = wrap.querySelector('#oc-ver-tesoreria');
+  if (bTesoreria) bTesoreria.onclick = () => { wrap.remove(); enviarATesoreria(id); };
   const bEditar = wrap.querySelector('#oc-btn-editar');
   if (bEditar) bEditar.onclick = () => activarEdicionOC(wrap, o, itemsOC);
 }
@@ -4166,7 +4256,198 @@ async function aprobarOCConModal(id){
       if (!resp.ok || data.error) throw new Error(data.error || 'Error');
       wrap.remove();
       await cargarOrdenes();
+      // Aquí es donde la OC acaba de recibir su número y el usuario tiene el
+      // contexto fresco: es el momento natural para pedir el pago. Cancelar no
+      // tiene consecuencias — el botón sigue en el modal de detalle.
+      const oAprobada = ESTADO.ordenes.find(x => String(x.id) === String(id));
+      if (ESTADO.tesoreria?.habilitado && oAprobada && tesoreriaDeOC(oAprobada).enviable
+          && !tesoreriaDeOC(oAprobada).enviada
+          && confirm(`OC ${oAprobada.numeroOC || ''} aprobada.\n\n¿Enviar la solicitud de pago a tesorería ahora?`)) {
+        enviarATesoreria(id);
+      }
     }catch(e){ alert('Error: ' + e.message); }
+  };
+}
+
+// ─── Envío de OC a tesorería (Pagos Diarios) ─────────────────────────────────
+
+let _enviandoTesoreria = false;
+
+// Concepto sugerido: "OC-0042 — cemento gris tipo I (+3 ítems)". Editable.
+function _conceptoSugerido(o){
+  let items = [];
+  try { items = JSON.parse(o.itemsJson || '[]'); } catch {}
+  const primero = (items[0]?.descripcion || items[0]?.insumo || '').trim();
+  const extras  = items.length > 1 ? ` (+${items.length - 1} ítem${items.length > 2 ? 's' : ''})` : '';
+  const base    = `${o.numeroOC || ''}${primero ? ' — ' + primero : ''}${extras}`;
+  return base.slice(0, 1000);
+}
+
+async function enviarATesoreria(id){
+  const o = ESTADO.ordenes.find(x => String(x.id) === String(id));
+  if (!o) return;
+  if (!ESTADO.tesoreria?.habilitado) {
+    alert('La integración con tesorería no está configurada en el servidor.');
+    return;
+  }
+  const t = tesoreriaDeOC(o);
+  if (!t.enviable) {
+    alert('Solo se pueden enviar OC aprobadas o finalizadas, con número asignado.');
+    return;
+  }
+  if (t.enviada && !confirm(`Esta OC ya se envió a tesorería como ${t.egresoId}.\n\n¿Abrir el formulario de todas formas? No se creará una segunda solicitud.`)) return;
+
+  const proyectos = ESTADO.tesoreria.proyectos || [];
+  if (!proyectos.length) {
+    alert('No se pudieron cargar los proyectos de tesorería. Intenta refrescar.');
+    return;
+  }
+
+  // Sugerencia de proyecto: el par que un humano ya eligió para este proyecto.
+  // Los nombres de los dos sistemas no coinciden, así que nunca se adivina.
+  let mapeo = null;
+  try {
+    const r = await fetch('/tesoreria/mapeo?proyecto=' + encodeURIComponent(o.proyecto || '')).then(r => r.json());
+    mapeo = r?.mapeo || null;
+  } catch {}
+  const sugeridoId = proyectos.some(p => p.id === mapeo?.tesoreria_id) ? mapeo.tesoreria_id : '';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal-card" style="max-width:560px">
+      <h3>Enviar a tesorería</h3>
+      <p class="text-muted" style="margin:4px 0 12px">
+        Crea una solicitud de pago en Pagos Diarios. El pago lo registra tesorería después.
+      </p>
+      <div style="border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;margin-bottom:14px;font-size:12px;display:grid;grid-template-columns:auto 1fr;gap:4px 12px">
+        <span style="color:var(--txt-2)">OC</span><strong class="mono">${esc(o.numeroOC || '')}</strong>
+        <span style="color:var(--txt-2)">Proveedor</span><span>${esc(o.proveedorNombre || '—')}</span>
+        <span style="color:var(--txt-2)">NIT</span><span class="mono">${esc(o.proveedorNit || '—')}</span>
+        <span style="color:var(--txt-2)">Total</span><strong class="mono">${fmt$(o.total)}</strong>
+      </div>
+      <label>Proyecto de tesorería *</label>
+      <input type="text" id="tes-proy-buscar" placeholder="Filtrar proyectos…" autocomplete="off">
+      <!-- option:checked explícito: sin esto el navegador pinta la opción
+           elegida en gris pálido al perder el foco y la elección parece
+           haberse borrado (invisible en tema claro). -->
+      <style>
+        #tes-proy option{padding:3px 6px}
+        #tes-proy option:checked{background:var(--accent);color:#fff;font-weight:600}
+      </style>
+      <select id="tes-proy" size="6" style="margin-top:6px;width:100%"></select>
+      <div id="tes-proy-elegido" style="margin-top:6px;font-size:12px"></div>
+      <small class="text-muted" style="display:block;margin-top:4px" id="tes-proy-hint">
+        Los nombres no coinciden con los códigos del ERP (${esc(o.proyecto || 'sin proyecto')}); elígelo a mano.
+      </small>
+      <label style="margin-top:12px">Concepto *</label>
+      <textarea id="tes-concepto" rows="3" maxlength="1000">${esc(_conceptoSugerido(o))}</textarea>
+      <small class="text-muted" style="display:block;margin-top:2px">
+        Lo verá tesorería en Pagos Diarios. Máx. 1000 caracteres.
+      </small>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="tes-cancel">Cancelar</button>
+        <button class="btn btn-primary" id="tes-ok">Enviar solicitud</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const sel     = wrap.querySelector('#tes-proy');
+  const buscar  = wrap.querySelector('#tes-proy-buscar');
+  const hint    = wrap.querySelector('#tes-proy-hint');
+  const elegidoEl   = wrap.querySelector('#tes-proy-elegido');
+  const btnOk       = wrap.querySelector('#tes-ok');
+  const conceptoEl  = wrap.querySelector('#tes-concepto');
+
+  // La elección se guarda acá y no se lee del DOM: si el filtro deja fuera al
+  // proyecto elegido, la opción se mantiene visible en vez de desaparecer sin
+  // aviso (perder la selección al refinar el filtro confunde y obliga a
+  // empezar de nuevo).
+  let elegido = sugeridoId;
+
+  const pintarOpciones = (filtro = '') => {
+    const f = filtro.trim().toLowerCase();
+    let visibles = f ? proyectos.filter(p => (p.name || '').toLowerCase().includes(f)) : proyectos;
+    if (elegido && !visibles.some(p => p.id === elegido)) {
+      const p = proyectos.find(x => x.id === elegido);
+      if (p) visibles = [p, ...visibles];
+    }
+    sel.innerHTML = visibles.length
+      ? visibles.map(p => `<option value="${esc(p.id)}" ${p.id === elegido ? 'selected' : ''}>${esc(p.name)}</option>`).join('')
+      : '<option value="" disabled>Sin coincidencias</option>';
+    if (elegido) sel.value = elegido;
+  };
+  // El botón dice el estado en vez de esperar a rechazarlo con un alert.
+  const actualizarBotonOk = () => {
+    btnOk.disabled = !elegido || !conceptoEl.value.trim();
+  };
+
+  // Confirmación explícita de lo elegido: el resaltado del <select> no basta
+  // (se apaga al mover el foco) y sin esto la pantalla seguía pidiendo elegir
+  // un proyecto que ya estaba elegido.
+  const pintarElegido = () => {
+    const p = proyectos.find(x => x.id === elegido);
+    if (p) {
+      elegidoEl.innerHTML = `<span style="color:var(--success)">✓ Elegido:</span> <strong>${esc(p.name)}</strong>`;
+      hint.textContent = sugeridoId && elegido !== sugeridoId
+        ? 'Esta elección reemplaza la sugerida y se recordará para las próximas OC de ' + (o.proyecto || 'este proyecto') + '.'
+        : 'Se recordará para las próximas OC de ' + (o.proyecto || 'este proyecto') + '.';
+    } else {
+      elegidoEl.innerHTML = '<span style="color:var(--warn)">Ningún proyecto elegido todavía</span>';
+      hint.textContent = `Los nombres no coinciden con los códigos del ERP (${o.proyecto || 'sin proyecto'}); elígelo a mano.`;
+    }
+    actualizarBotonOk();
+  };
+
+  pintarOpciones();
+  pintarElegido();
+  if (sugeridoId) {
+    hint.innerHTML = `<span style="color:var(--warn)">Sugerido por envíos anteriores de ${esc(o.proyecto || '')} — verifica que sea el correcto.</span>`;
+  }
+  buscar.addEventListener('input', () => pintarOpciones(buscar.value));
+  sel.addEventListener('change', () => { elegido = sel.value; pintarElegido(); });
+  conceptoEl.addEventListener('input', actualizarBotonOk);
+
+  wrap.querySelector('#tes-cancel').onclick = () => wrap.remove();
+  btnOk.onclick = async () => {
+    if (_enviandoTesoreria) return; // guardia anti-doble-clic
+    const proyectoId = elegido || sel.value;
+    const concepto   = wrap.querySelector('#tes-concepto').value.trim();
+    if (!proyectoId)  { alert('Elige el proyecto de tesorería.'); return; }
+    if (!concepto)    { alert('Escribe el concepto.'); return; }
+
+    _enviandoTesoreria = true;
+    btnOk.disabled = true;
+    btnOk.textContent = 'Enviando…';
+    try {
+      const resp = await fetch(`/ordenes/${encodeURIComponent(id)}/solicitud-tesoreria`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          proyecto_id:     proyectoId,
+          proyecto_nombre: proyectos.find(p => p.id === proyectoId)?.name || '',
+          concepto,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        const det = Array.isArray(data.detalles) && data.detalles.length
+          ? '\n\n• ' + data.detalles.join('\n• ') : '';
+        throw new Error((data.error || 'Error') + det);
+      }
+      wrap.remove();
+      // duplicado no es error: la idempotencia es justo lo que evita el doble pago
+      alert(data.duplicado
+        ? `Esta OC ya estaba en tesorería como ${data.egreso_id}.\nNo se creó una segunda solicitud.`
+        : `Solicitud creada en tesorería: ${data.egreso_id}`);
+      await cargarOrdenes();
+    } catch(e) {
+      alert('Error: ' + e.message);
+    } finally {
+      _enviandoTesoreria = false;
+      btnOk.textContent = 'Enviar solicitud';
+      actualizarBotonOk();
+    }
   };
 }
 
@@ -4930,6 +5211,7 @@ async function guardarConfig(){
     window.IVA_DEFAULT = Number(cfg.ivaDefault) || 19;
     _aplicarLogoHeader(cfg);
   } catch { window.IVA_DEFAULT = 19; }
+  await cargarTesoreria(); // antes de refrescarTodo: renderOrdenes ya lo necesita
   await refrescarTodo();
 })();
 

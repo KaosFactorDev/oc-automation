@@ -31,6 +31,7 @@ const localDb          = require('./db');
 const syncService      = require('./syncService');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
+const tesoreria        = require('./tesoreriaClient');
 
 // Sobreescribe cfg.firmante con el usuario de la sesión activa.
 // La configuración de empresa (logo, emisor, IVA) sigue viniendo de SharePoint.
@@ -530,6 +531,12 @@ async function migrarColumnasOC(siteId, listId) {
   const columnas = [
     { name: 'requerimientoOrigen',  text: { maxLength: 50 } },
     { name: 'fechaEntregaPrevista', dateTime: {} },
+    // Solicitud de pago en tesorería (Pagos Diarios). Se guardan acá y no solo
+    // en SQLite porque upsertDocumento() reescribe el JSON local con lo que
+    // venga de SharePoint en cada sync.
+    { name: 'solicitudTesoreriaId',    text: { maxLength: 50 } },  // egreso_id CE-YYMMNNNN
+    { name: 'fechaSolicitudTesoreria', dateTime: {} },
+    { name: 'solicitudTesoreriaPor',   text: { maxLength: 200 } },
   ];
   for (const col of columnas) {
     try {
@@ -2401,6 +2408,151 @@ const servidor = http.createServer(async (req, res) => {
         await configApp.set(mConf[1], valor);
         json({ ok: true });
       } catch (err) { json({ error: err.message }, 500); }
+    });
+    return;
+  }
+
+  // ── GET /tesoreria/proyectos → desplegable + bandera de habilitado ───────
+  // Un solo endpoint sirve para las dos cosas: la UI lo pide al cargar y así
+  // sabe si mostrar la columna y el botón. Sin credenciales → habilitado:false
+  // y la integración queda oculta en vez de dar errores.
+  if (req.method === 'GET' && url === '/tesoreria/proyectos') {
+    try {
+      if (!tesoreria.habilitado()) return json({ habilitado: false, proyectos: [] });
+      const proyectos = await tesoreria.listarProyectos();
+      return json({ habilitado: true, proyectos });
+    } catch (err) {
+      console.error('GET /tesoreria/proyectos:', err.message);
+      return json({ habilitado: true, proyectos: [], error: err.message }, 502);
+    }
+  }
+
+  // ── GET /tesoreria/enviadas?ocs=OC-0041,OC-0042 → estado actual ──────────
+  // Best-effort por diseño: si tesorería no responde, devuelve {} con 200 y la
+  // UI sigue mostrando lo que ya tiene guardado en cada OC.
+  if (req.method === 'GET' && url === '/tesoreria/enviadas') {
+    try {
+      if (!tesoreria.habilitado()) return json({ enviadas: {} });
+      const qs  = require('url').parse(req.url, true).query;
+      const ocs = String(qs.ocs || '').split(',').map(s => s.trim()).filter(Boolean);
+      return json({ enviadas: await tesoreria.consultarEnviadas(ocs) });
+    } catch (err) {
+      console.warn('GET /tesoreria/enviadas:', err.message);
+      return json({ enviadas: {} });
+    }
+  }
+
+  // ── GET /tesoreria/mapeo?proyecto=CT25-202… → última elección humana ──────
+  // Lee de SQLite, sin salir a la red. Solo es una sugerencia para preseleccionar
+  // el desplegable: el usuario puede cambiarla siempre.
+  if (req.method === 'GET' && url === '/tesoreria/mapeo') {
+    try {
+      const qs = require('url').parse(req.url, true).query;
+      return json({ mapeo: localDb.getMapeoTesoreria(String(qs.proyecto || '').trim()) });
+    } catch (err) {
+      console.warn('GET /tesoreria/mapeo:', err.message);
+      return json({ mapeo: null });
+    }
+  }
+
+  // ── POST /ordenes/:id/solicitud-tesoreria → crear solicitud de pago ──────
+  // El flujo no es automático a propósito: proyecto de tesorería y concepto los
+  // decide una persona, y queda registrada en solicitado_por.
+  const mSolTes = url.match(/^\/ordenes\/([^\/]+)\/solicitud-tesoreria$/);
+  if (req.method === 'POST' && mSolTes) {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const itemId = mSolTes[1];
+        if (!tesoreria.habilitado()) {
+          return json({ error: 'Integración con tesorería no configurada' }, 503);
+        }
+
+        let body = {};
+        if (chunks.length) {
+          try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { body = {}; }
+        }
+
+        const oc = localDb.getOrdenesCompra().find(o => String(o.id) === String(itemId));
+        if (!oc) return json({ error: 'OC no encontrada' }, 404);
+
+        // El documento pide validar 'aprobada'; se acepta también 'finalizada'
+        // (pagada + entregada) porque una compra ya cerrada puede legalizarse
+        // después. Lo que no se puede enviar es un borrador: no tiene número.
+        if (!['aprobada', 'finalizada'].includes(oc.estado)) {
+          return json({ error: `La OC está en estado "${oc.estado || 'borrador'}"; solo se pueden enviar OC aprobadas o finalizadas` }, 409);
+        }
+        const numeroOC = String(oc.numeroOC || '').trim();
+        if (!numeroOC) {
+          return json({ error: 'La OC no tiene número asignado; apruébala primero' }, 409);
+        }
+
+        const proyectoId = String(body.proyecto_id || '').trim();
+        const concepto   = String(body.concepto    || '').trim();
+        const detalles = [];
+        if (!proyectoId) detalles.push('Falta el proyecto de tesorería');
+        if (!concepto)   detalles.push('Falta el concepto');
+        if (concepto.length > 1000) detalles.push('El concepto no puede pasar de 1000 caracteres');
+        if (!(Number(oc.total) > 0)) detalles.push(`El total de la OC debe ser mayor a 0 (es ${oc.total})`);
+        if (detalles.length) return json({ error: 'Datos incompletos', detalles }, 422);
+
+        // El NIT va tal cual: la Edge Function lo normaliza (quita puntos y
+        // descarta el dígito de verificación). Normalizarlo acá también crearía
+        // dos verdades sobre el mismo dato.
+        const resultado = await tesoreria.crearSolicitud({
+          proyecto_id:    proyectoId,
+          nombre:         String(oc.proveedorNombre || '').trim(),
+          nit:            String(oc.proveedorNit    || '').trim(),
+          concepto,
+          total:          Number(oc.total),
+          orden_compra:   numeroOC,
+          solicitado_por: req._sesion?.email || undefined,
+        });
+
+        // De acá en adelante la solicitud YA existe en tesorería. Nada que falle
+        // debe tumbar la respuesta: perder el egreso_id de vista es menos grave
+        // que hacer creer al usuario que el envío falló (y un reintento es
+        // seguro, la Edge Function es idempotente).
+        //
+        // Los dos registros van en try/catch separados a propósito: si
+        // SharePoint no responde, la elección de proyecto igual se recuerda.
+        try {
+          const ctx = await ctxSharePoint();
+          if (ctx.OrdenesCompra) {
+            const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, itemId, {
+              solicitudTesoreriaId:    resultado.egreso_id || '',
+              fechaSolicitudTesoreria: new Date().toISOString(),
+              solicitudTesoreriaPor:   req._sesion?.email || '',
+            });
+            if (actualizado?.id) localDb.upsertDocumento('ordenes_compra', actualizado);
+          }
+        } catch (e) {
+          console.warn(`[OC ${numeroOC}] Solicitud ${resultado.egreso_id} creada, pero no se pudo marcar la OC en SharePoint:`, e.message);
+        }
+
+        // Recordar la elección humana de proyecto para preseleccionarla luego
+        try {
+          localDb.setMapeoTesoreria({
+            proyecto:        oc.proyecto || '',
+            tesoreriaId:     proyectoId,
+            tesoreriaNombre: String(body.proyecto_nombre || '').trim(),
+            actualizadoPor:  req._sesion?.email || '',
+          });
+        } catch (e) {
+          console.warn(`[OC ${numeroOC}] No se pudo recordar el mapeo de proyecto:`, e.message);
+        }
+
+        return json({
+          egreso_id: resultado.egreso_id,
+          estado:    resultado.estado,
+          duplicado: !!resultado.duplicado,
+        });
+      } catch (err) {
+        console.error('POST /ordenes/:id/solicitud-tesoreria:', err.message);
+        const status = err.status === 422 || err.status === 403 ? err.status : 502;
+        return json({ error: err.message, ...(err.detalles ? { detalles: err.detalles } : {}) }, status);
+      }
     });
     return;
   }
