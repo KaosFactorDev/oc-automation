@@ -4,6 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node src/servidor-cotizaciones.js",
+    "dev": "node --watch src/servidor-cotizaciones.js",
+    "correos": "node index.js",
+    "correos:test": "node index.js --test",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

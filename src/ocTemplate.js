@@ -158,8 +158,24 @@ function generarHTML(oc, cfg) {
 
 <div class="no-print">
   <button class="btn-pdf" onclick="window.print()">Imprimir / Guardar PDF</button>
-  <button class="btn-close" onclick="window.close()">Cerrar</button>
+  <button class="btn-close" onclick="cerrarVista()">Cerrar</button>
 </div>
+
+<script>
+// window.close() solo funciona en pestanas abiertas por script, y esta vista se
+// abre con un <a target="_blank"> normal, asi que el navegador lo ignora en
+// silencio. Si la pestana sigue viva tras intentarlo, volver atras es lo mas
+// cercano a cerrarla; si se abrio sin historial previo, no queda a donde ir y
+// se avisa en vez de dejar el boton mudo.
+function cerrarVista() {
+  window.close();
+  setTimeout(function () {
+    if (window.closed) return;
+    if (history.length > 1) history.back();
+    else alert('Cierra esta pestana con Ctrl+W (el navegador no permite que la pagina se cierre sola).');
+  }, 120);
+}
+</script>
 
 ${oc.estado === 'borrador' ? '<div class="marca-agua">NO APROBADO</div>'
   : oc.estado === 'anulada' ? '<div class="marca-agua">ANULADO</div>'
