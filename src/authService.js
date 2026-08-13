@@ -51,6 +51,12 @@ function getLoginUrl(redirectUri) {
     redirect_uri:  redirectUri,
     response_mode: 'query',
     scope:         'openid profile email',
+    // Sin esto Microsoft reutiliza en silencio la sesion que ya tenga abierta en
+    // el navegador. En equipos con varias cuentas (la corporativa y la personal,
+    // o dos correos de Civiltech) eso entra siempre con la ultima usada, y la
+    // unica salida era cerrar sesion en Microsoft. select_account fuerza el
+    // selector de cuenta en cada login.
+    prompt:        'select_account',
     state,
   });
   return `https://login.microsoftonline.com/${process.env.TENANT_ID}/oauth2/v2.0/authorize?${params}`;
