@@ -13,6 +13,7 @@ Reglas de trabajo para el repositorio. Léelas antes del primer PR: **un merge a
 | Ramas permanentes | `main` (producción) y `develop` (integración) |
 | Cómo entran los cambios | **Siempre por Pull Request.** Nadie commitea directo a `main` ni a `develop` |
 | Mensajes de commit | Conventional Commits: `type: description`, en inglés |
+| Quién abre los PR | **Siempre una persona, a mano, desde GitHub.** Nunca una herramienta |
 | Despliegue | Automático al hacer merge a `main` |
 | Menciones a IA | Prohibidas en commits y PRs |
 
@@ -120,12 +121,23 @@ También fuera: `wip`, `cambios`, `arreglos`, `.` y cualquier mensaje que no dig
 
 ## Pull Requests
 
+### Los PR se abren a mano
+
+**El Pull Request lo crea siempre una persona, desde la interfaz de GitHub.** No se abren con `gh pr create`, ni con bots, ni con asistentes de IA, ni con ninguna automatización.
+
+Esto no es una preferencia estética: el PR a `main` es lo único que separa un cambio de producción, y quien lo abre es quien se hace responsable de lo que va a desplegar. Esa decisión no se delega en una herramienta.
+
+**Si estás usando un asistente de IA:** su trabajo termina en `git push` de la rama. Deja el PR sin abrir y avisa que la rama está lista; la persona a cargo lo revisa y lo abre. Tampoco corresponde hacer merge, aprobar, ni cerrar PRs ajenos.
+
+### Checklist
+
 1. Saca la rama desde la base correcta (`develop`, salvo hotfix).
 2. Haz commits pequeños y coherentes.
-3. Abre el PR con título en el mismo formato del commit: `type: description`.
-4. En la descripción, en inglés: qué cambia, por qué, y cómo probarlo.
-5. Si toca la UI, incluye captura.
-6. Espera revisión. No hagas merge de tu propio PR sin que alguien lo apruebe.
+3. Empuja la rama: `git push -u origin <rama>`.
+4. Abre el PR **a mano** en GitHub, con título en el mismo formato del commit: `type: description`.
+5. En la descripción, en inglés: qué cambia, por qué, y cómo probarlo.
+6. Si toca la UI, incluye captura.
+7. Espera revisión. No hagas merge de tu propio PR sin que alguien lo apruebe.
 
 Antes de pedir revisión, verifica:
 
