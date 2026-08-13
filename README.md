@@ -2,6 +2,8 @@
 
 Consola web de gestión de requerimientos, órdenes de compra y órdenes de servicio para **Civiltech Ingeniería y Construcción S.A.S.** Se ejecuta localmente en cada equipo pero toda la información se almacena en SharePoint (nube corporativa), lo que permite que varios usuarios accedan a los mismos datos sin sincronización manual.
 
+> **¿Vas a trabajar en el código?** Lee primero [CONTRIBUTING.md](CONTRIBUTING.md) — flujo de ramas, convención de commits y entorno local. Ten presente que **un merge a `main` despliega a producción de inmediato**.
+
 ---
 
 ## Módulos
