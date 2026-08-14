@@ -108,6 +108,9 @@ Los documentos OC y OS en estado *borrador* muestran una marca de agua diagonal 
 ### Detección automática de proyecto
 Al cargar un requerimiento manual sin seleccionar proyecto, el sistema lo detecta del documento: para Excel lo extrae del encabezado (sin IA, lectura síncrona) y para PDF lo extrae del procesamiento con Gemini AI. El proyecto detectado se muestra en el mensaje de confirmación.
 
+### Creación manual de requerimientos sin formato
+El modal "Cargar requerimiento" ofrece dos modos: **Subir formato** (Excel/PDF CT-ADMIN-FO-002) y **Digitar ítems**, para cuando no existe el formato diligenciado. En el segundo modo se capturan proyecto, solicitante y los ítems (insumo, cantidad, unidad, necesidad, posible proveedor) directamente en la consola. El requerimiento resultante pasa por la misma resolución de proyecto y consulta de proveedor/precio histórico que los que llegan por correo, por lo que queda igual en estado *pendiente*. El proyecto es obligatorio en este modo: al no haber documento, no hay de dónde detectarlo.
+
 ### Formatos de exportación de requerimiento
 El botón "Exportar selección" en la vista de requerimiento permite elegir entre:
 - **Detallado**: tabla completa con columnas Solicit., Cubierta, Pendiente, Unidad, Necesidad, Posible proveedor y Estado.
