@@ -140,6 +140,10 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
 .td-input{background:var(--surface);border:1px solid transparent;border-radius:4px;padding:5px 8px;color:var(--txt);font-family:var(--sans);font-size:13px;width:100%;transition:border-color .15s}
 .td-input:focus{outline:none;border-color:var(--accent)}
 .precio-nuevo{color:var(--accent-hi);font-family:var(--mono);font-weight:500}
+.btn-quitar-fila{background:none;border:none;color:var(--txt-3);cursor:pointer;font-size:13px;padding:2px 4px;border-radius:4px}
+.btn-quitar-fila:hover{color:var(--danger);background:var(--card-hi)}
+/* Tabla de captura manual de requerimiento: celdas compactas para dejar aire al insumo */
+#tabla-req-manual th,#tabla-req-manual td{padding:6px 7px}
 .mono{font-family:var(--mono)}
 
 /* Chips / tags */
@@ -979,52 +983,120 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
 <!-- Modal de configuración -->
 <!-- Modal: cargar requerimiento manual -->
 <div id="modal-carga-req" style="display:none;position:fixed;inset:0;background:rgba(10,14,22,.8);z-index:100;align-items:center;justify-content:center;padding:20px">
-  <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;max-width:620px;width:100%;max-height:90vh;overflow:auto">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;max-width:min(860px,95vw);width:100%;max-height:90vh;overflow:auto">
     <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center">
       <h3 style="font-size:14px;font-weight:600">Cargar requerimiento manualmente</h3>
       <button aria-label="Cerrar" title="Cerrar" onclick="cerrarCargaManual()" style="margin-left:auto;background:none;border:none;color:var(--txt-2);cursor:pointer;font-size:20px">✕</button>
     </div>
     <div style="padding:20px;display:grid;gap:18px">
-      <div style="font-size:12px;color:var(--txt-2);line-height:1.5">
-        Sube el formato oficial <strong>CT-ADMIN-FO-002</strong> diligenciado en <strong>Excel</strong> o <strong>PDF</strong>. El sistema extraerá los ítems y creará un requerimiento en estado <span class="tag tag-pendiente">pendiente</span>, igual que si llegara por correo.
+      <div class="sub-tabs" style="margin-bottom:0">
+        <button class="sub-tab active" id="tab-carga-archivo" onclick="cambiarModoCarga('archivo')">Subir formato</button>
+        <button class="sub-tab" id="tab-carga-digitar" onclick="cambiarModoCarga('digitar')">Digitar ítems</button>
       </div>
 
-      <div class="zona-drop" id="zona-drop-req" style="padding:24px 20px">
-        <input type="file" id="input-archivo-req" accept=".xlsx,.xls,.pdf,application/pdf">
-        <div class="drop-icon">📄</div>
-        <div class="drop-title">Arrastra el formato aquí</div>
-        <div class="drop-sub">Excel (.xlsx / .xls) o PDF — haz clic para seleccionar</div>
-        <div class="nombre-archivo" id="nombre-archivo-req"></div>
+      <!-- Modo A: subir el formato CT-ADMIN-FO-002 -->
+      <div id="panel-carga-archivo" style="display:grid;gap:18px">
+        <div style="font-size:12px;color:var(--txt-2);line-height:1.5">
+          Sube el formato oficial <strong>CT-ADMIN-FO-002</strong> diligenciado en <strong>Excel</strong> o <strong>PDF</strong>. El sistema extraerá los ítems y creará un requerimiento en estado <span class="tag tag-pendiente">pendiente</span>, igual que si llegara por correo.
+        </div>
+
+        <div class="zona-drop" id="zona-drop-req" style="padding:24px 20px">
+          <input type="file" id="input-archivo-req" accept=".xlsx,.xls,.pdf,application/pdf">
+          <div class="drop-icon">📄</div>
+          <div class="drop-title">Arrastra el formato aquí</div>
+          <div class="drop-sub">Excel (.xlsx / .xls) o PDF — haz clic para seleccionar</div>
+          <div class="nombre-archivo" id="nombre-archivo-req"></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div class="campo">
+            <label>Ref. usuario (opcional)</label>
+            <input type="text" id="carga-consecutivo" placeholder="Ej. 0007 — el sistema asigna el oficial" maxlength="6">
+          </div>
+          <div class="campo">
+            <label>Fecha de solicitud</label>
+            <input type="text" id="carga-fecha" placeholder="DD/MM/AAAA">
+          </div>
+          <div class="campo">
+            <label>Proyecto (código)</label>
+            <input type="text" id="carga-proyecto" placeholder="Se detecta del Excel si está vacío" list="lista-proyectos-carga">
+            <datalist id="lista-proyectos-carga"></datalist>
+          </div>
+          <div class="campo">
+            <label>Responsable (opcional)</label>
+            <input type="text" id="carga-responsable" placeholder="Sobreescribe el del formato">
+          </div>
+        </div>
+
+        <div id="msg-carga-req" style="font-size:12px;min-height:18px;white-space:pre-line"></div>
+
+        <div style="display:flex;gap:10px;align-items:center;justify-content:flex-end">
+          <button class="btn btn-ghost" onclick="cerrarCargaManual()">Cancelar</button>
+          <button class="btn btn-primary" id="btn-carga-req" onclick="enviarCargaManual()" disabled>
+            <div class="spinner" id="spinner-carga-req"></div>
+            <span>Cargar requerimiento</span>
+          </button>
+        </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="campo">
-          <label>Ref. usuario (opcional)</label>
-          <input type="text" id="carga-consecutivo" placeholder="Ej. 0007 — el sistema asigna el oficial" maxlength="6">
+      <!-- Modo B: digitar los ítems sin archivo -->
+      <div id="panel-carga-digitar" style="display:none;gap:18px">
+        <div style="font-size:12px;color:var(--txt-2);line-height:1.5">
+          Digita los ítems cuando no exista el formato diligenciado. El requerimiento queda en estado <span class="tag tag-pendiente">pendiente</span> con la misma consulta de proveedor y precio histórico que los que llegan por correo.
         </div>
-        <div class="campo">
-          <label>Fecha de solicitud</label>
-          <input type="text" id="carga-fecha" placeholder="DD/MM/AAAA">
-        </div>
-        <div class="campo">
-          <label>Proyecto (código)</label>
-          <input type="text" id="carga-proyecto" placeholder="Se detecta del Excel si está vacío" list="lista-proyectos-carga">
-          <datalist id="lista-proyectos-carga"></datalist>
-        </div>
-        <div class="campo">
-          <label>Responsable (opcional)</label>
-          <input type="text" id="carga-responsable" placeholder="Sobreescribe el del formato">
-        </div>
-      </div>
 
-      <div id="msg-carga-req" style="font-size:12px;min-height:18px"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div class="campo">
+            <label>Proyecto (código) *</label>
+            <input type="text" id="man-proyecto" placeholder="Requerido — selecciona o escribe" list="lista-proyectos-manual">
+            <datalist id="lista-proyectos-manual"></datalist>
+          </div>
+          <div class="campo">
+            <label>Fecha de solicitud</label>
+            <input type="text" id="man-fecha" placeholder="DD/MM/AAAA">
+          </div>
+          <div class="campo">
+            <label>Solicitante</label>
+            <input type="text" id="man-responsable" placeholder="Quién solicita">
+          </div>
+          <div class="campo">
+            <label>Cargo (opcional)</label>
+            <input type="text" id="man-cargo" placeholder="Ej. Residente de obra">
+          </div>
+          <div class="campo">
+            <label>Ref. usuario (opcional)</label>
+            <input type="text" id="man-consecutivo" placeholder="Ej. 0007 — el sistema asigna el oficial" maxlength="6">
+          </div>
+        </div>
 
-      <div style="display:flex;gap:10px;align-items:center;justify-content:flex-end">
-        <button class="btn btn-ghost" onclick="cerrarCargaManual()">Cancelar</button>
-        <button class="btn btn-primary" id="btn-carga-req" onclick="enviarCargaManual()" disabled>
-          <div class="spinner" id="spinner-carga-req"></div>
-          <span>Cargar requerimiento</span>
-        </button>
+        <div class="tabla-wrap">
+          <table id="tabla-req-manual" style="font-size:13px;table-layout:fixed;min-width:720px">
+            <thead><tr>
+              <th style="width:30px">#</th>
+              <th style="width:34%">Insumo *</th>
+              <th style="width:78px">Cantidad</th>
+              <th style="width:74px">Unidad</th>
+              <th style="width:104px">Necesidad</th>
+              <th>Posible proveedor</th>
+              <th style="width:30px"></th>
+            </tr></thead>
+            <tbody id="man-items-tbody"></tbody>
+          </table>
+        </div>
+
+        <div>
+          <button class="btn btn-ghost btn-sm" onclick="agregarFilaReqManual()">+ Agregar ítem</button>
+        </div>
+
+        <div id="msg-crear-req" style="font-size:12px;min-height:18px;white-space:pre-line"></div>
+
+        <div style="display:flex;gap:10px;align-items:center;justify-content:flex-end">
+          <button class="btn btn-ghost" onclick="cerrarCargaManual()">Cancelar</button>
+          <button class="btn btn-primary" id="btn-crear-req" onclick="enviarRequerimientoManual()">
+            <div class="spinner" id="spinner-crear-req"></div>
+            <span>Crear requerimiento</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -3569,13 +3641,137 @@ function abrirCargaManual(){
   $('#msg-carga-req').style.color = '';
   $('#btn-carga-req').disabled = true;
 
-  // Poblar datalist de proyectos con los conocidos
-  const dl = $('#lista-proyectos-carga');
-  dl.innerHTML = (ESTADO.proyectos || []).map(p => `<option value="${esc(p)}">`).join('');
+  // Poblar datalist de proyectos con los conocidos (ambos modos)
+  const opciones = (ESTADO.proyectos || []).map(p => `<option value="${esc(p)}">`).join('');
+  $('#lista-proyectos-carga').innerHTML  = opciones;
+  $('#lista-proyectos-manual').innerHTML = opciones;
+
+  resetCapturaManual();
+  cambiarModoCarga('archivo');
 
   $('#modal-carga-req').style.display = 'flex';
 }
 function cerrarCargaManual(){ $('#modal-carga-req').style.display = 'none'; }
+
+function cambiarModoCarga(modo){
+  const esArchivo = modo === 'archivo';
+  $('#tab-carga-archivo').classList.toggle('active', esArchivo);
+  $('#tab-carga-digitar').classList.toggle('active', !esArchivo);
+  $('#panel-carga-archivo').style.display = esArchivo ? 'grid' : 'none';
+  $('#panel-carga-digitar').style.display = esArchivo ? 'none' : 'grid';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1.2 CAPTURA MANUAL DE REQUERIMIENTO (ítems digitados, sin archivo)
+// ─────────────────────────────────────────────────────────────────────────────
+function resetCapturaManual(){
+  const hoy = new Date();
+  $('#man-proyecto').value    = '';
+  $('#man-fecha').value       = `${String(hoy.getDate()).padStart(2,'0')}/${String(hoy.getMonth()+1).padStart(2,'0')}/${hoy.getFullYear()}`;
+  $('#man-responsable').value = ESTADO.usuario?.nombre || '';
+  $('#man-cargo').value       = '';
+  $('#man-consecutivo').value = '';
+  $('#msg-crear-req').textContent = '';
+  $('#msg-crear-req').style.color = '';
+  $('#btn-crear-req').disabled = false;
+  $('#man-items-tbody').innerHTML = '';
+  poblarDatalistInsumos();
+  for (let i = 0; i < 3; i++) agregarFilaReqManual({ foco: false });
+}
+
+function agregarFilaReqManual({ foco = true } = {}){
+  const tbody = $('#man-items-tbody');
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td class="man-num" style="color:var(--txt-3);font-family:var(--mono);font-size:12px"></td>
+    <td><input class="td-input man-insumo" list="lista-insumos-global" placeholder="Nombre del insumo" oninput="this.value=this.value.toUpperCase()"></td>
+    <td><input class="td-input man-cantidad" type="number" min="0.01" step="any" value="1"></td>
+    <td><input class="td-input man-unidad" value="UND"></td>
+    <td><input class="td-input man-necesidad" placeholder="DD/MM/AAAA"></td>
+    <td><input class="td-input man-proveedor" placeholder="Opcional"></td>
+    <td><button class="btn-quitar-fila" aria-label="Quitar ítem" title="Quitar ítem" onclick="quitarFilaReqManual(this)">✕</button></td>`;
+  tbody.appendChild(tr);
+  renumerarFilasReqManual();
+  if (foco) tr.querySelector('.man-insumo').focus();
+}
+
+function quitarFilaReqManual(btn){
+  const tbody = $('#man-items-tbody');
+  if (tbody.rows.length <= 1) return;  // dejar siempre una fila diligenciable
+  btn.closest('tr').remove();
+  renumerarFilasReqManual();
+}
+
+function renumerarFilasReqManual(){
+  $$('#man-items-tbody tr').forEach((tr, i) => { tr.querySelector('.man-num').textContent = i + 1; });
+}
+
+// Lee las filas con insumo diligenciado; ignora las vacías
+function leerItemsReqManual(){
+  return [...$$('#man-items-tbody tr')].map(tr => ({
+    insumo:           (tr.querySelector('.man-insumo').value || '').trim(),
+    cantidad:         tr.querySelector('.man-cantidad').value,
+    unidad:           (tr.querySelector('.man-unidad').value || '').trim(),
+    necesidad:        (tr.querySelector('.man-necesidad').value || '').trim(),
+    posibleProveedor: (tr.querySelector('.man-proveedor').value || '').trim(),
+  })).filter(it => it.insumo);
+}
+
+async function enviarRequerimientoManual(){
+  const msg = $('#msg-crear-req');
+  const setMsg = (texto, color) => { msg.textContent = texto; msg.style.color = color; };
+
+  const proyecto = ($('#man-proyecto').value || '').trim();
+  if (!proyecto) { setMsg('Indica el proyecto del requerimiento.', 'var(--danger)'); $('#man-proyecto').focus(); return; }
+
+  const fecha = ($('#man-fecha').value || '').trim();
+  if (fecha && !/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(fecha)) {
+    setMsg('La fecha de solicitud debe tener formato DD/MM/AAAA.', 'var(--danger)');
+    $('#man-fecha').focus(); return;
+  }
+
+  const items = leerItemsReqManual();
+  if (!items.length) { setMsg('Diligencia al menos un ítem con su insumo.', 'var(--danger)'); return; }
+
+  const btn  = $('#btn-crear-req');
+  const spin = $('#spinner-crear-req');
+  btn.disabled = true;
+  spin.style.display = 'inline-block';
+  setMsg('Creando requerimiento y consultando precios...', 'var(--accent-hi)');
+
+  try {
+    const res = await fetch('/requerimientos/crear-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        proyecto,
+        fecha,
+        responsable: ($('#man-responsable').value || '').trim(),
+        cargo:       ($('#man-cargo').value || '').trim(),
+        consecutivo: ($('#man-consecutivo').value || '').trim(),
+        items,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+    const consRef = data.consecutivoSistema || data.consecutivo || data.id;
+    const alerts  = (data.alertasGlobales || []).length ? `\n\n${data.alertasGlobales.join('\n')}` : '';
+    const sinPrecio = data.itemsSinPrecio ? ` (${data.itemsSinPrecio} sin historial de precio)` : '';
+    setMsg(`✓ Requerimiento ${consRef} creado con ${data.items} ítem(s).${sinPrecio}${alerts}`, 'var(--success)');
+
+    // El requerimiento ya quedó creado: un fallo al refrescar la tabla no debe
+    // mostrarse como si la creación hubiera fallado.
+    try { await cargarRequerimientos(); }
+    catch (e) { console.warn('No se pudo refrescar la lista de requerimientos:', e.message); }
+    setTimeout(cerrarCargaManual, 1500);
+  } catch (e) {
+    setMsg('Error: ' + e.message, 'var(--danger)');
+    btn.disabled = false;
+  } finally {
+    spin.style.display = 'none';
+  }
+}
 
 function seleccionarArchivoReq(file){
   const ext = (file.name.match(/\.[^.]+$/) || [''])[0].toLowerCase();

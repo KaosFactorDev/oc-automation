@@ -673,6 +673,9 @@ const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${P
 // Rutas que no requieren sesión activa
 const RUTAS_PUBLICAS = ['/', '/legacy', '/auth/login-url', '/auth/callback', '/auth/logout', '/me'];
 
+// Tope de ítems al crear un requerimiento digitándolo en la consola
+const MAX_ITEMS_REQ_MANUAL = 100;
+
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -2030,6 +2033,60 @@ const servidor = http.createServer(async (req, res) => {
         }
       } catch (err) {
         console.error('POST /requerimientos/cargar-manual:', err);
+        return json({ error: err.message }, 500);
+      }
+    });
+    return;
+  }
+
+  // ── POST /requerimientos/crear-manual → captura de ítems sin archivo ───────
+  if (req.method === 'POST' && url === '/requerimientos/crear-manual') {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const body  = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        const items = Array.isArray(body.items) ? body.items : [];
+
+        if (!String(body.proyecto || '').trim()) return json({ error: 'Selecciona el proyecto del requerimiento.' }, 400);
+        if (items.length === 0) return json({ error: 'Agrega al menos un ítem al requerimiento.' }, 400);
+        if (items.length > MAX_ITEMS_REQ_MANUAL) {
+          return json({ error: `Máximo ${MAX_ITEMS_REQ_MANUAL} ítems por requerimiento.` }, 400);
+        }
+        const fecha = String(body.fecha || '').trim();
+        if (fecha && !/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(fecha)) {
+          return json({ error: 'La fecha de solicitud debe tener formato DD/MM/AAAA.' }, 400);
+        }
+
+        // Misma resolución de proyecto y consulta de precios que el flujo de correo
+        const { procesarRequerimientoManual } = require('./procesarCorreo');
+        const proyectosSP = await obtenerProyectosSP({ soloActivos: false }).catch(() => []);
+        let resultado;
+        try {
+          resultado = procesarRequerimientoManual(body, { proyectosExternos: proyectosSP });
+        } catch (e) {
+          return json({ error: e.message }, 400);  // validación de negocio → 400
+        }
+
+        const requerimientos = require('./requerimientos');
+        const { item, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, {
+          messageId:  `manual:${sesion?.email || process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
+          adjuntoUrl: '',
+        });
+        if (item?.id) localDb.upsertDocumento('requerimientos', item);
+
+        return json({
+          ok: true,
+          id:                 item.id,
+          consecutivo:        resultado.solicitud.consecutivo || '',
+          consecutivoSistema: consecutivoSistema || '',
+          proyecto:           resultado.solicitud.proyecto,
+          items:              resultado.items.length,
+          itemsSinPrecio:     resultado.itemsSinPrecio,
+          alertasGlobales:    resultado.alertasGlobales || [],
+        });
+      } catch (err) {
+        console.error('POST /requerimientos/crear-manual:', err);
         return json({ error: err.message }, 500);
       }
     });
