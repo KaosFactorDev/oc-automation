@@ -3,14 +3,20 @@
  * leerRequerimiento.js  v2
  * Lee el Excel adjunto CT-ADMIN-FO-002 y extrae cabecera e ítems.
  *
- * Estructura real de la hoja "Requerimientos":
- *   B8  = Proyecto   J8  = Fecha
- *   B9  = Responsable  J9 = Cargo
+ * Estructura real de la hoja "Requerimientos". Los rótulos van a la izquierda y
+ * el valor diligenciado en las celdas combinadas a su derecha:
+ *   B8:C8  "PROYECTO"     → valor en D8:I8      J8:K8  "FECHA:"  → valor en L8:M8
+ *   B9:C9  "RESPONSABLE:" → valor en D9:I9      J9:K9  "CARGO:"  → valor en L9:M9
  *   Fila 11 = encabezados (ITEM, INSUMO, CANT, UND, NECESIDAD, POSIBLE PROVEEDOR)
  *   Filas 12-21 = ítems (B=item, C=insumo, H=cant, I=und, J=necesidad, L=posible proveedor)
+ *   Fila 22 en adelante = firmas — nunca son ítems
  */
 
 const XLSX = require('xlsx');
+
+// Rótulos del formato: nunca son el valor diligenciado, aunque caigan en el rango
+// que se escanea. Se comparan sin tildes ni dos puntos.
+const ES_ROTULO = /^(PROYECTO|OBRA|RESPONSABLE|SOLICITANTE|FECHA|CARGO|ITEM|INSUMO)\s*:?$/i;
 
 function leerRequerimiento(rutaExcel) {
   let wb;
@@ -26,16 +32,26 @@ function leerRequerimiento(rutaExcel) {
   const get = (celda) => {
     const c = ws[celda];
     if (!c) return '';
+    // Celdas de fecha: preferir el texto formateado antes que el objeto Date
+    if (c.v instanceof Date) return String(c.w || c.v.toISOString().slice(0, 10)).trim();
     const val = c.v !== undefined ? c.v : (c.w || '');
     return String(val).trim();
   };
 
+  // Primer valor real de la fila, saltando los rótulos del formato
+  const primerValor = (cols, fila) => {
+    for (const col of cols) {
+      const v = get(`${col}${fila}`);
+      if (v && !ES_ROTULO.test(v)) return v;
+    }
+    return '';
+  };
+
+  const COLS_IZQ = ['C','D','E','F','G','H','I'];
+  const COLS_DER = ['J','K','L','M','N'];
+
   // Cabecera en filas 8 y 9
-  let proyecto = '';
-  for (const col of ['C','D','E','F','G','H','I']) {
-    const v = get(`${col}8`);
-    if (v) { proyecto = v; break; }
-  }
+  let proyecto = primerValor(COLS_IZQ, 8);
   // Si no está en fila 8, intentar fila 6 (algunas versiones del formato)
   if (!proyecto) {
     for (const col of ['C','D','E','F','G','H']) {
@@ -46,17 +62,11 @@ function leerRequerimiento(rutaExcel) {
     }
   }
 
-  let responsable = '';
-  for (const col of ['C','D','E','F','G','H']) {
-    const v = get(`${col}9`);
-    if (v) { responsable = v; break; }
-  }
-
   const cabecera = {
     proyecto,
-    fecha:       get('J8') || get('K8') || '',
-    responsable,
-    cargo:       get('J9') || get('K9') || '',
+    fecha:       primerValor(COLS_DER, 8),
+    responsable: primerValor(COLS_IZQ, 9),
+    cargo:       primerValor(COLS_DER, 9),
   };
 
   // Buscar fila de inicio de ítems dinámicamente
