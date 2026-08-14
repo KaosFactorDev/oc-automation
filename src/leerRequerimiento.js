@@ -82,23 +82,46 @@ function leerRequerimiento(rutaExcel) {
     }
   }
 
-  // Leer ítems: parar cuando la columna insumo (C) esté vacía
-  const items = [];
-  for (let fila = filaInicio; ; fila++) {
-    const insumo = get(`C${fila}`);
-    if (!insumo || insumo.toUpperCase() === 'INSUMO') break;
+  // Última fila de la hoja, para no escanear indefinidamente
+  const filaFinal = (() => {
+    const ref = ws['!ref'] || '';
+    const m = ref.match(/:[A-Z]+(\d+)$/);
+    return m ? parseInt(m[1], 10) : filaInicio + 40;
+  })();
+
+  // Leer ítems. Una fila sin insumo no termina la tabla: el formato trae 10 filas
+  // numeradas y la gente no siempre las llena en orden. Se corta al salir de la
+  // tabla — un rótulo de firma en ITEM — o tras varias filas vacías seguidas.
+  const MAX_VACIAS = 4;
+  const items  = [];
+  const avisos = [];
+  let vacias = 0;
+  let huecos = 0;
+
+  for (let fila = filaInicio; fila <= filaFinal; fila++) {
+    const itemCol = get(`B${fila}`);
+    const insumo  = get(`C${fila}`);
+
+    // Salimos de la tabla: la columna ITEM dejó de ser un número y trae texto
+    // ("FIRMA DEL SOLICITANTE", "Elaborado por:")
+    if (itemCol && isNaN(parseFloat(itemCol))) break;
+    if (insumo && ES_ROTULO.test(insumo)) break;
+
+    if (!insumo) {
+      if (++vacias > MAX_VACIAS) break;
+      continue;
+    }
+    if (vacias > 0 && items.length > 0) huecos++;  // se saltó una fila en blanco
+    vacias = 0;
 
     const cantRaw  = get(`H${fila}`);
     const cantidad = isNaN(parseFloat(cantRaw)) ? 1 : parseFloat(cantRaw);
-    const unidad   = get(`I${fila}`);
-
-    if (!insumo) break;
 
     items.push({
-      item:             get(`B${fila}`) || String(items.length + 1),
+      item:             itemCol || String(items.length + 1),
       insumo,
       cantidad,
-      unidad:           unidad || 'UND',
+      unidad:           get(`I${fila}`) || 'UND',
       necesidad:        get(`J${fila}`) || '',
       posibleProveedor: get(`L${fila}`) || '',
     });
@@ -108,7 +131,11 @@ function leerRequerimiento(rutaExcel) {
     throw new Error('El formato de requerimiento no contiene ítems diligenciados. Verifique que la hoja "Requerimientos" esté completada con los insumos.');
   }
 
-  return { cabecera, items };
+  if (huecos > 0) {
+    avisos.push(`ℹ️ El formato tiene ${huecos} fila(s) en blanco entre los ítems. Se leyeron los ${items.length} ítems diligenciados — verifique que no falte ninguno.`);
+  }
+
+  return { cabecera, items, avisos };
 }
 
 module.exports = { leerRequerimiento };
