@@ -178,6 +178,8 @@ function construirResultado(infoAsunto, requerimiento, opts = {}) {
   if (sinPrecio.length > 0) {
     alertasGlobales.push(`🔍 ${sinPrecio.length} ítem(s) sin historial de precio: ${sinPrecio.map(i => i.insumo).join(', ')}`);
   }
+  // Avisos de la lectura del documento (p. ej. filas en blanco entre los ítems)
+  alertasGlobales.push(...(requerimiento.avisos || []));
 
   return {
     accion: 'GENERAR_OC',
