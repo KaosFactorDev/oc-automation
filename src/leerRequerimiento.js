@@ -3,14 +3,20 @@
  * leerRequerimiento.js  v2
  * Lee el Excel adjunto CT-ADMIN-FO-002 y extrae cabecera e ítems.
  *
- * Estructura real de la hoja "Requerimientos":
- *   B8  = Proyecto   J8  = Fecha
- *   B9  = Responsable  J9 = Cargo
+ * Estructura real de la hoja "Requerimientos". Los rótulos van a la izquierda y
+ * el valor diligenciado en las celdas combinadas a su derecha:
+ *   B8:C8  "PROYECTO"     → valor en D8:I8      J8:K8  "FECHA:"  → valor en L8:M8
+ *   B9:C9  "RESPONSABLE:" → valor en D9:I9      J9:K9  "CARGO:"  → valor en L9:M9
  *   Fila 11 = encabezados (ITEM, INSUMO, CANT, UND, NECESIDAD, POSIBLE PROVEEDOR)
  *   Filas 12-21 = ítems (B=item, C=insumo, H=cant, I=und, J=necesidad, L=posible proveedor)
+ *   Fila 22 en adelante = firmas — nunca son ítems
  */
 
 const XLSX = require('xlsx');
+
+// Rótulos del formato: nunca son el valor diligenciado, aunque caigan en el rango
+// que se escanea. Se comparan sin tildes ni dos puntos.
+const ES_ROTULO = /^(PROYECTO|OBRA|RESPONSABLE|SOLICITANTE|FECHA|CARGO|ITEM|INSUMO)\s*:?$/i;
 
 function leerRequerimiento(rutaExcel) {
   let wb;
@@ -26,16 +32,26 @@ function leerRequerimiento(rutaExcel) {
   const get = (celda) => {
     const c = ws[celda];
     if (!c) return '';
+    // Celdas de fecha: preferir el texto formateado antes que el objeto Date
+    if (c.v instanceof Date) return String(c.w || c.v.toISOString().slice(0, 10)).trim();
     const val = c.v !== undefined ? c.v : (c.w || '');
     return String(val).trim();
   };
 
+  // Primer valor real de la fila, saltando los rótulos del formato
+  const primerValor = (cols, fila) => {
+    for (const col of cols) {
+      const v = get(`${col}${fila}`);
+      if (v && !ES_ROTULO.test(v)) return v;
+    }
+    return '';
+  };
+
+  const COLS_IZQ = ['C','D','E','F','G','H','I'];
+  const COLS_DER = ['J','K','L','M','N'];
+
   // Cabecera en filas 8 y 9
-  let proyecto = '';
-  for (const col of ['C','D','E','F','G','H','I']) {
-    const v = get(`${col}8`);
-    if (v) { proyecto = v; break; }
-  }
+  let proyecto = primerValor(COLS_IZQ, 8);
   // Si no está en fila 8, intentar fila 6 (algunas versiones del formato)
   if (!proyecto) {
     for (const col of ['C','D','E','F','G','H']) {
@@ -46,17 +62,11 @@ function leerRequerimiento(rutaExcel) {
     }
   }
 
-  let responsable = '';
-  for (const col of ['C','D','E','F','G','H']) {
-    const v = get(`${col}9`);
-    if (v) { responsable = v; break; }
-  }
-
   const cabecera = {
     proyecto,
-    fecha:       get('J8') || get('K8') || '',
-    responsable,
-    cargo:       get('J9') || get('K9') || '',
+    fecha:       primerValor(COLS_DER, 8),
+    responsable: primerValor(COLS_IZQ, 9),
+    cargo:       primerValor(COLS_DER, 9),
   };
 
   // Buscar fila de inicio de ítems dinámicamente
@@ -72,23 +82,46 @@ function leerRequerimiento(rutaExcel) {
     }
   }
 
-  // Leer ítems: parar cuando la columna insumo (C) esté vacía
-  const items = [];
-  for (let fila = filaInicio; ; fila++) {
-    const insumo = get(`C${fila}`);
-    if (!insumo || insumo.toUpperCase() === 'INSUMO') break;
+  // Última fila de la hoja, para no escanear indefinidamente
+  const filaFinal = (() => {
+    const ref = ws['!ref'] || '';
+    const m = ref.match(/:[A-Z]+(\d+)$/);
+    return m ? parseInt(m[1], 10) : filaInicio + 40;
+  })();
+
+  // Leer ítems. Una fila sin insumo no termina la tabla: el formato trae 10 filas
+  // numeradas y la gente no siempre las llena en orden. Se corta al salir de la
+  // tabla — un rótulo de firma en ITEM — o tras varias filas vacías seguidas.
+  const MAX_VACIAS = 4;
+  const items  = [];
+  const avisos = [];
+  let vacias = 0;
+  let huecos = 0;
+
+  for (let fila = filaInicio; fila <= filaFinal; fila++) {
+    const itemCol = get(`B${fila}`);
+    const insumo  = get(`C${fila}`);
+
+    // Salimos de la tabla: la columna ITEM dejó de ser un número y trae texto
+    // ("FIRMA DEL SOLICITANTE", "Elaborado por:")
+    if (itemCol && isNaN(parseFloat(itemCol))) break;
+    if (insumo && ES_ROTULO.test(insumo)) break;
+
+    if (!insumo) {
+      if (++vacias > MAX_VACIAS) break;
+      continue;
+    }
+    if (vacias > 0 && items.length > 0) huecos++;  // se saltó una fila en blanco
+    vacias = 0;
 
     const cantRaw  = get(`H${fila}`);
     const cantidad = isNaN(parseFloat(cantRaw)) ? 1 : parseFloat(cantRaw);
-    const unidad   = get(`I${fila}`);
-
-    if (!insumo) break;
 
     items.push({
-      item:             get(`B${fila}`) || String(items.length + 1),
+      item:             itemCol || String(items.length + 1),
       insumo,
       cantidad,
-      unidad:           unidad || 'UND',
+      unidad:           get(`I${fila}`) || 'UND',
       necesidad:        get(`J${fila}`) || '',
       posibleProveedor: get(`L${fila}`) || '',
     });
@@ -98,7 +131,11 @@ function leerRequerimiento(rutaExcel) {
     throw new Error('El formato de requerimiento no contiene ítems diligenciados. Verifique que la hoja "Requerimientos" esté completada con los insumos.');
   }
 
-  return { cabecera, items };
+  if (huecos > 0) {
+    avisos.push(`ℹ️ El formato tiene ${huecos} fila(s) en blanco entre los ítems. Se leyeron los ${items.length} ítems diligenciados — verifique que no falte ninguno.`);
+  }
+
+  return { cabecera, items, avisos };
 }
 
 module.exports = { leerRequerimiento };
