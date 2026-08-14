@@ -25,12 +25,27 @@ async function leerRequerimientoAuto(rutaArchivo) {
   throw new Error(`Extensión no soportada: ${ext}. Solo .xlsx, .xls o .pdf.`);
 }
 
+// ── Formato oficial en blanco ─────────────────────────────────────────────────
+// Va adjunto en las tres respuestas automáticas — asunto mal escrito, correo sin
+// adjunto y adjunto ilegible — porque en todas el remitente necesita el formato
+// para corregir. También lo entrega la descarga desde la consola, y ambos
+// caminos resuelven la ruta aquí para que circule una sola copia.
+
+const NOMBRE_FORMATO = 'CT-ADMIN-FO-002_FORMATO_SOLICITUD_DE_REQUERIMIENTO_V3_0.xlsx';
+
+function rutaFormatoRequerimiento() {
+  return process.env.PATH_FORMATO_REQUERIMIENTO ||
+         path.join(__dirname, '../data', NOMBRE_FORMATO);
+}
+
 // ── Respuesta automática cuando el asunto no matchea el formato esperado ─────
 
 function mensajeFormatoAsuntoInvalido(infoAsunto) {
   return {
-    accion: 'RESPONDER_FORMATO_ASUNTO_INVALIDO',
-    asunto: `RE: ${infoAsunto.raw}`,
+    accion:        'RESPONDER_FORMATO_ASUNTO_INVALIDO',
+    asunto:        `RE: ${infoAsunto.raw}`,
+    rutaAdjunto:   rutaFormatoRequerimiento(),
+    nombreAdjunto: NOMBRE_FORMATO,
     cuerpo:
 `Estimado(a),
 
@@ -44,20 +59,11 @@ Por favor reenvíe su solicitud con el asunto en el siguiente formato exacto:
 
 Ejemplo: SOLICITUD REQUERIMIENTO 0001 20260410 MISTRAL
 
+Se adjunta el formato oficial de solicitud (CT-ADMIN-FO-002). Diligéncielo y envíelo adjunto junto con el asunto corregido — sin ese archivo no es posible procesar la solicitud.
+
 Saludos,
 Sistema de Gestión de Compras – Civiltech`,
   };
-}
-
-// ── Formato oficial en blanco ─────────────────────────────────────────────────
-// Lo entregan dos caminos: la respuesta automática por correo y la descarga
-// desde la consola. Ambos resuelven la ruta aquí para que circule una sola copia.
-
-const NOMBRE_FORMATO = 'CT-ADMIN-FO-002_FORMATO_SOLICITUD_DE_REQUERIMIENTO_V3_0.xlsx';
-
-function rutaFormatoRequerimiento() {
-  return process.env.PATH_FORMATO_REQUERIMIENTO ||
-         path.join(__dirname, '../data', NOMBRE_FORMATO);
 }
 
 // ── Respuesta automática cuando no hay adjunto ────────────────────────────────
@@ -100,8 +106,10 @@ async function procesarConAdjunto(infoAsunto, rutaAdjunto, opts = {}) {
     requerimiento = await leerRequerimientoAuto(rutaAdjunto);
   } catch (e) {
     return {
-      accion:   'RESPONDER_FORMATO_INVALIDO',
-      asunto:   `RE: ${infoAsunto.raw}`,
+      accion:        'RESPONDER_FORMATO_INVALIDO',
+      asunto:        `RE: ${infoAsunto.raw}`,
+      rutaAdjunto:   rutaFormatoRequerimiento(),
+      nombreAdjunto: NOMBRE_FORMATO,
       cuerpo:
 `Estimado(a),
 
@@ -109,7 +117,7 @@ Se recibió el adjunto de su solicitud ${infoAsunto.consecutivo}, pero no fue po
 
   ${e.message}
 
-Por favor verifique que el archivo adjunto sea el formato oficial CT-ADMIN-FO-002 completamente diligenciado y reenvíe su solicitud.
+Se adjunta de nuevo el formato oficial CT-ADMIN-FO-002 en blanco. Diligéncielo sobre esta copia —sin mover filas ni columnas, y sin dejar filas vacías entre los insumos— y reenvíe su solicitud.
 
 Saludos,
 Sistema de Gestión de Compras – Civiltech`,
