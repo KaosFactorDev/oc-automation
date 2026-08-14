@@ -108,6 +108,15 @@ Sistema de Gestión de Compras – Civiltech`,
     };
   }
 
+  return construirResultado(infoAsunto, requerimiento, opts);
+}
+
+// ── Enriquecimiento común (correo con adjunto y captura manual) ───────────────
+// Resuelve el proyecto contra la tabla maestra, consulta proveedor/precio por
+// ítem y arma el resultado GENERAR_OC. `infoAsunto` puede provenir de un correo
+// real o ser sintético (captura manual desde la consola).
+
+function construirResultado(infoAsunto, requerimiento, opts = {}) {
   // 3. Resolver proyecto: prioridad asunto > Excel
   // proyPorCodigo se construye desde SQLite; fallback a CSV solo si SQLite está vacío
   const proyPorCodigo = {};
@@ -180,6 +189,52 @@ Sistema de Gestión de Compras – Civiltech`,
   };
 }
 
+// ── Captura manual (sin correo ni formato adjunto) ────────────────────────────
+
+/**
+ * Arma el resultado GENERAR_OC a partir de ítems digitados a mano en la consola.
+ * Aplica la misma resolución de proyecto y consulta de proveedor/precio que el
+ * flujo de correo, de modo que el requerimiento resultante es indistinguible.
+ *
+ * @param {object} datos - { consecutivo, fecha, proyecto, responsable, cargo, items[] }
+ * @throws {Error} si no hay proyecto o ningún ítem con insumo diligenciado
+ */
+function procesarRequerimientoManual(datos = {}, opts = {}) {
+  const proyecto = String(datos.proyecto || '').trim();
+  if (!proyecto) throw new Error('El proyecto es obligatorio al crear un requerimiento manualmente.');
+
+  const items = (datos.items || []).map((it, i) => ({
+    item:             String(it.item || i + 1),
+    insumo:           String(it.insumo || '').trim(),
+    cantidad:         parseFloat(it.cantidad) > 0 ? parseFloat(it.cantidad) : 1,
+    unidad:           String(it.unidad || '').trim() || 'UND',
+    necesidad:        String(it.necesidad || '').trim(),
+    posibleProveedor: String(it.posibleProveedor || '').trim(),
+  })).filter(it => it.insumo);
+
+  if (items.length === 0) throw new Error('El requerimiento no tiene ítems con insumo diligenciado.');
+
+  const fecha = String(datos.fecha || '').trim();
+  const infoAsunto = {
+    valido:      true,
+    consecutivo: String(datos.consecutivo || '').trim(),
+    fechaTexto:  fecha,
+    proyecto,
+    raw:         'CAPTURA MANUAL',
+  };
+  const requerimiento = {
+    cabecera: {
+      proyecto,
+      fecha,
+      responsable: String(datos.responsable || '').trim(),
+      cargo:       String(datos.cargo || '').trim(),
+    },
+    items,
+  };
+
+  return construirResultado(infoAsunto, requerimiento, opts);
+}
+
 // ── Punto de entrada principal ────────────────────────────────────────────────
 
 /**
@@ -212,4 +267,4 @@ async function procesarCorreo(asunto, rutaAdjunto, opts = {}) {
   return procesarConAdjunto(infoAsunto, rutaAdjunto, opts);
 }
 
-module.exports = { procesarCorreo };
+module.exports = { procesarCorreo, procesarRequerimientoManual };
