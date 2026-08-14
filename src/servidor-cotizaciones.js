@@ -676,6 +676,10 @@ const RUTAS_PUBLICAS = ['/', '/legacy', '/auth/login-url', '/auth/callback', '/a
 // Tope de ítems al crear un requerimiento digitándolo en la consola
 const MAX_ITEMS_REQ_MANUAL = 100;
 
+// Candado de la revisión de correos bajo demanda: un ciclo a la vez por proceso,
+// igual que el cron, que omite el disparo si el anterior sigue corriendo.
+let _revisandoCorreo = false;
+
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -4102,6 +4106,65 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
       } catch (e) { return json({ error: e.message }, 500); }
     });
     return;
+  }
+
+  // ── POST /correos/revisar → corre el ciclo del buzón bajo demanda ──────────
+  // Mismo trabajo que index.js (el que dispara el cron), pero dentro del
+  // servidor, para no esperar la próxima corrida programada.
+  if (req.method === 'POST' && url === '/correos/revisar') {
+    if (_revisandoCorreo) {
+      return json({ error: 'Ya hay una revisión de correos en curso. Espera a que termine.' }, 409);
+    }
+    _revisandoCorreo = true;
+    const inicio = Date.now();
+    try {
+      const { procesarBuzon }  = require('./leerCorreos');
+      const { procesarCorreo } = require('./procesarCorreo');
+      const requerimientos     = require('./requerimientos');
+
+      const creados = [];
+      const fallos  = [];
+
+      // Registrar el requerimiento y reflejarlo en SQLite, para que aparezca en
+      // la consola sin esperar el sync. Devuelve la forma que espera leerCorreos.
+      const onOCGenerada = async (resultado, meta = {}) => {
+        const { item, duplicado, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, meta);
+        if (!duplicado && item?.id) localDb.upsertDocumento('requerimientos', item);
+        const resumen = {
+          id:                 item?.id,
+          consecutivo:        resultado.solicitud?.consecutivo || '',
+          consecutivoSistema: consecutivoSistema || (item?.fields || {}).consecutivoSistema || '',
+          proyecto:           resultado.solicitud?.proyecto || '',
+          items:              resultado.items?.length || 0,
+          duplicado,
+        };
+        creados.push(resumen);
+        return [resumen];
+      };
+
+      const { procesados, errores } = await procesarBuzon(
+        (asunto, rutaAdjunto) => procesarCorreo(asunto, rutaAdjunto),
+        onOCGenerada,
+        (err, asunto) => { fallos.push({ asunto, error: err.message }); },
+      );
+
+      console.log(`[correos/revisar] ${req._sesion?.email || 'desconocido'} → procesados: ${procesados}, errores: ${errores}`);
+      return json({
+        ok: true,
+        procesados,
+        errores,
+        nuevos:     creados.filter(c => !c.duplicado),
+        duplicados: creados.filter(c =>  c.duplicado).length,
+        fallos,
+        duracionMs: Date.now() - inicio,
+      });
+    } catch (err) {
+      console.error('POST /correos/revisar:', err);
+      // Faltan credenciales de Azure AD o el buzón no respondió
+      return json({ error: err.message, duracionMs: Date.now() - inicio }, 502);
+    } finally {
+      _revisandoCorreo = false;
+    }
   }
 
   // ── GET /sync → fuerza resync SharePoint → SQLite ───────────────────────

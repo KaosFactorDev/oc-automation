@@ -1161,6 +1161,28 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         <span id="msg-cfg" style="font-size:11px;color:var(--txt-2)"></span>
       </div>
 
+      <details id="cfg-correos" style="border-top:1px solid var(--border);padding-top:18px">
+        <summary style="cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:600;list-style:none;display:flex;align-items:center;gap:6px">
+          <span>&#9654;</span> Revisión del buzón de requerimientos
+        </summary>
+        <div style="margin-top:16px">
+          <div style="font-size:11px;color:var(--txt-3);margin-bottom:12px;line-height:1.5">
+            El buzón se revisa solo de lunes a viernes, cada 5 minutos, entre 6:00 a.m. y 7:00 p.m. Usa este botón si necesitas que un requerimiento entre ya, sin esperar la próxima corrida.<br>
+            Hace exactamente el mismo trabajo: lee los correos con asunto de solicitud, crea los requerimientos pendientes, responde al solicitante y mueve los correos a <strong>Procesados_OC</strong>. Los que ya se procesaron no se duplican.
+          </div>
+
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" id="btn-revisar-correo" onclick="revisarCorreoAhora()">
+              <div class="spinner" id="spinner-revisar-correo"></div>
+              <span>Revisar el buzón ahora</span>
+            </button>
+            <span style="font-size:11px;color:var(--txt-3)">Puede tardar más de un minuto si hay PDFs por interpretar.</span>
+          </div>
+
+          <div id="msg-revisar-correo" style="font-size:11.5px;margin-top:10px;min-height:16px;line-height:1.6;white-space:pre-wrap"></div>
+        </div>
+      </details>
+
       <details id="cfg-proyectos" style="border-top:1px solid var(--border);padding-top:18px">
         <summary style="cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:600;list-style:none;display:flex;align-items:center;gap:6px">
           <span>&#9654;</span> Proyectos activos
@@ -5070,6 +5092,56 @@ async function abrirConfig(){
   }
 }
 function cerrarConfig(){ $('#modal-config').style.display = 'none'; }
+
+// ── Revisión del buzón bajo demanda ─────────────────────────────────────────
+// Dispara el mismo ciclo que el cron, sin esperar la próxima corrida.
+async function revisarCorreoAhora(){
+  const btn  = $('#btn-revisar-correo');
+  const spin = $('#spinner-revisar-correo');
+  const msg  = $('#msg-revisar-correo');
+  const setMsg = (t, color) => { msg.textContent = t; msg.style.color = color; };
+
+  btn.disabled = true;
+  spin.style.display = 'inline-block';
+  setMsg('Leyendo el buzón...', 'var(--accent-hi)');
+
+  try {
+    const res  = await fetch('/correos/revisar', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+    const seg    = (data.duracionMs / 1000).toFixed(1);
+    const nuevos = data.nuevos || [];
+    const lineas = [];
+
+    if (nuevos.length) {
+      lineas.push(`✓ ${nuevos.length} requerimiento(s) creado(s):`);
+      nuevos.forEach(r => lineas.push(
+        `    ${r.consecutivoSistema || r.consecutivo || r.id} · ${r.proyecto || 'sin proyecto'} · ${r.items} ítem(s)`
+      ));
+    }
+    if (data.duplicados)  lineas.push(`⟳ ${data.duplicados} correo(s) ya estaban registrados — no se duplicaron.`);
+    (data.fallos || []).forEach(f => lineas.push(`⚠ "${f.asunto}": ${f.error}`));
+
+    if (!lineas.length) {
+      lineas.push(data.procesados
+        ? `Se revisaron ${data.procesados} correo(s); ninguno generó un requerimiento nuevo.`
+        : 'No había correos de solicitud pendientes en la bandeja.');
+    }
+    lineas.push(`(${data.procesados} correo(s) revisado(s) en ${seg} s)`);
+
+    const color = (data.errores || (data.fallos || []).length) ? 'var(--warn)'
+                : nuevos.length ? 'var(--success)' : 'var(--txt-2)';
+    setMsg(lineas.join('\n'), color);
+
+    if (nuevos.length) await cargarRequerimientos().catch(() => {});
+  } catch (e) {
+    setMsg('No se pudo revisar el buzón: ' + e.message, 'var(--danger)');
+  } finally {
+    spin.style.display = 'none';
+    btn.disabled = false;
+  }
+}
 
 // ── Gestión de proyectos (alta + activar/inactivar) ──────────────────────────
 async function cargarProyectosAdmin(){
