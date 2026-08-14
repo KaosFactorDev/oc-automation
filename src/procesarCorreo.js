@@ -49,19 +49,28 @@ Sistema de Gestión de Compras – Civiltech`,
   };
 }
 
+// ── Formato oficial en blanco ─────────────────────────────────────────────────
+// Lo entregan dos caminos: la respuesta automática por correo y la descarga
+// desde la consola. Ambos resuelven la ruta aquí para que circule una sola copia.
+
+const NOMBRE_FORMATO = 'CT-ADMIN-FO-002_FORMATO_SOLICITUD_DE_REQUERIMIENTO_V3_0.xlsx';
+
+function rutaFormatoRequerimiento() {
+  return process.env.PATH_FORMATO_REQUERIMIENTO ||
+         path.join(__dirname, '../data', NOMBRE_FORMATO);
+}
+
 // ── Respuesta automática cuando no hay adjunto ────────────────────────────────
 
 function mensajeSinAdjunto(infoAsunto) {
   const proyecto      = infoAsunto.valido ? infoAsunto.proyecto : '(proyecto no identificado)';
   const cons          = infoAsunto.valido ? infoAsunto.consecutivo : '—';
-  const rutaFormato   = process.env.PATH_FORMATO_REQUERIMIENTO ||
-                        require('path').join(__dirname, '../data/CT-ADMIN-FO-002_FORMATO_SOLICITUD_DE_REQUERIMIENTO_V3_0.xlsx');
 
   return {
     accion:        'RESPONDER_SOLICITAR_ADJUNTO',
     asunto:        `RE: ${infoAsunto.raw || 'SOLICITUD REQUERIMIENTO'}`,
-    rutaAdjunto:   rutaFormato,
-    nombreAdjunto: 'CT-ADMIN-FO-002_FORMATO_SOLICITUD_DE_REQUERIMIENTO_V3_0.xlsx',
+    rutaAdjunto:   rutaFormatoRequerimiento(),
+    nombreAdjunto: NOMBRE_FORMATO,
     cuerpo:
 `Estimado(a),
 
@@ -267,4 +276,7 @@ async function procesarCorreo(asunto, rutaAdjunto, opts = {}) {
   return procesarConAdjunto(infoAsunto, rutaAdjunto, opts);
 }
 
-module.exports = { procesarCorreo, procesarRequerimientoManual };
+module.exports = {
+  procesarCorreo, procesarRequerimientoManual,
+  rutaFormatoRequerimiento, NOMBRE_FORMATO,
+};

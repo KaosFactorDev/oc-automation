@@ -2287,6 +2287,24 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GET /requerimientos/formato → descarga el formato oficial en blanco ─────
+  // Misma copia que adjunta la respuesta automática por correo.
+  if (req.method === 'GET' && url === '/requerimientos/formato') {
+    const { rutaFormatoRequerimiento, NOMBRE_FORMATO } = require('./procesarCorreo');
+    const ruta = rutaFormatoRequerimiento();
+    if (!fs.existsSync(ruta)) {
+      console.error('GET /requerimientos/formato: no existe', ruta);
+      return json({ error: 'El formato oficial no está disponible en el servidor.' }, 404);
+    }
+    res.writeHead(200, {
+      'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="${NOMBRE_FORMATO}"`,
+      'Content-Length':      fs.statSync(ruta).size,
+      'Cache-Control':       'no-store',
+    });
+    return fs.createReadStream(ruta).pipe(res);
+  }
+
   // ── GET /requerimientos/carpeta-pdf → link a la carpeta SharePoint con los PDFs ──
   if (req.method === 'GET' && url === '/requerimientos/carpeta-pdf') {
     try {
