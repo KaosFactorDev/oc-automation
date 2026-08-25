@@ -666,7 +666,8 @@ const PATH_COMPRAS = process.env.PATH_COMPRAS     || path.join(__dirname, '../da
 const PATH_PROV    = process.env.PATH_PROVEEDORES || path.join(__dirname, '../data/proveedores_depurados_final.csv');
 const PATH_PROY    = process.env.PATH_PROYECTOS   || path.join(__dirname, '../data/tabla_proyectos.csv');
 const GEMINI_KEY   = process.env.GEMINI_API_KEY || '';
-const MODELO_GEMINI = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+// Version concreta, nunca un alias movil: ver la nota en .env.example.
+const MODELO_GEMINI = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const TEMP_DIR     = path.join(__dirname, '../temp/cotizaciones');
 const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`;
 
@@ -763,7 +764,17 @@ async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 0 } = 
             catch (e) { reject(new Error(`Respuesta de Gemini ilegible (HTTP ${res.statusCode})`)); }
           });
         });
-        req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s`)); });
+        req.setTimeout(timeoutMs, () => {
+          req.destroy();
+          // generateContent no hace streaming: Gemini no envia un solo byte hasta
+          // terminar de generar, asi que toda la fase de razonamiento cuenta como
+          // socket inactivo y este timeout es en realidad un techo al tiempo de
+          // generacion. Se marca para no reintentarlo: la generacion ya ocurrio del
+          // lado de Google (y ya consumio cuota), reintentar solo paga otra completa.
+          const err = new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s`);
+          err.generacionEnVuelo = true;
+          reject(err);
+        });
         req.on('error', reject);
         req.write(bodyStr);
         req.end();
@@ -782,8 +793,10 @@ async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 0 } = 
       return resp.body;
     } catch (e) {
       ultimoError = e;
-      // Reintenta solo timeouts / cortes de red; los errores ya lanzados por la API no.
-      const reintentable = /timeout|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
+      // Reintenta solo cortes de red, donde la peticion nunca llego a generarse.
+      // Un timeout propio NO se reintenta (ver generacionEnVuelo mas arriba).
+      const reintentable = !e.generacionEnVuelo &&
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
       if (reintentable && intento < reintentos) {
         const espera = 1000 * Math.pow(2, intento);
         console.warn(`[postGemini] ${e.message} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
@@ -796,6 +809,143 @@ async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 0 } = 
   throw ultimoError || new Error('Gemini: fallo desconocido');
 }
 
+// Igual que postGemini pero contra :streamGenerateContent?alt=sse, entregando el
+// texto a medida que llega en vez de esperar la respuesta completa.
+//
+// Existe aparte y no reemplaza a postGemini a proposito: a postGemini la usan
+// geminiTexto, el clausulado, el analisis de inventario y leerRequerimientoPDF.js.
+// Son cuatro flujos que no necesitan progreso y que no vale la pena arriesgar.
+//
+// Dos ventajas sobre postGemini en los endpoints de extraccion:
+//  - permite informarle progreso al usuario mientras Gemini genera.
+//  - el timeout del socket vuelve a ser lo que dice ser. En postGemini es en
+//    realidad un techo al tiempo total de generacion, porque generateContent no
+//    envia un byte hasta terminar; aca llegan datos continuamente y el timeout
+//    solo salta si el stream de verdad se queda quieto.
+//
+// onTexto(acumulado) se llama en cada trozo. Devuelve el texto completo.
+async function streamGemini(url, bodyStr, { timeoutMs = 120000, reintentos = 2, onTexto } = {}) {
+  const https = require('https');
+  let ultimoError;
+
+  for (let intento = 0; intento <= reintentos; intento++) {
+    let huboDatos = false;
+    try {
+      return await new Promise((resolve, reject) => {
+        const req = https.request(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        }, (res) => {
+          // Los errores de la API no vienen como SSE: vienen con status != 200 y un
+          // cuerpo JSON normal. Se acumula completo y se lanza legible.
+          if (res.statusCode !== 200) {
+            const trozos = [];
+            res.on('data', c => trozos.push(c));
+            res.on('end', () => {
+              let apiErr;
+              try { apiErr = JSON.parse(Buffer.concat(trozos).toString())?.error; } catch {}
+              const e = new Error(`Gemini error (HTTP ${apiErr?.code || res.statusCode}): ${apiErr?.message || 'sin detalle'}`);
+              e.transitorio = res.statusCode === 503 || apiErr?.status === 'UNAVAILABLE';
+              reject(e);
+            });
+            return;
+          }
+
+          let pendiente = '';   // linea SSE partida entre dos chunks TCP
+          let texto     = '';
+          let finish;
+
+          res.setEncoding('utf-8');
+          res.on('data', (chunk) => {
+            huboDatos = true;
+            pendiente += chunk;
+            const lineas = pendiente.split('\n');
+            pendiente = lineas.pop();   // la ultima puede estar incompleta
+
+            for (const linea of lineas) {
+              if (!linea.startsWith('data:')) continue;
+              let payload;
+              try { payload = JSON.parse(linea.slice(5)); } catch { continue; }
+
+              if (payload.error) {
+                reject(new Error(`Gemini error (HTTP ${payload.error.code || 500}): ${payload.error.message}`));
+                req.destroy();
+                return;
+              }
+
+              const cand = payload.candidates?.[0];
+              if (cand?.finishReason) finish = cand.finishReason;
+
+              // Se saltan las partes de razonamiento. Con includeThoughts apagado no
+              // aparecen, pero no quiero que el conteo dependa de ese default.
+              for (const parte of cand?.content?.parts || []) {
+                if (parte.thought) continue;
+                if (parte.text) texto += parte.text;
+              }
+              if (onTexto) { try { onTexto(texto); } catch {} }
+            }
+          });
+
+          res.on('end', () => {
+            // MAX_TOKENS devuelve HTTP 200 con el texto cortado a la mitad. Si se deja
+            // pasar, falla mas abajo en el parseo con un mensaje que no dice nada.
+            if (finish === 'MAX_TOKENS') {
+              return reject(new Error('Gemini corto la respuesta por limite de tokens (MAX_TOKENS). Sube maxOutputTokens o reduce el documento.'));
+            }
+            resolve(texto);
+          });
+          res.on('error', reject);
+        });
+
+        req.setTimeout(timeoutMs, () => {
+          req.destroy();
+          const err = new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s sin datos`);
+          err.generacionEnVuelo = true;
+          reject(err);
+        });
+        req.on('error', reject);
+        req.write(bodyStr);
+        req.end();
+      });
+    } catch (e) {
+      ultimoError = e;
+      // Solo se reintenta lo que fallo ANTES del primer byte. Si el stream ya
+      // entrego texto, reintentar empieza de cero y paga otra generacion completa
+      // (y otra unidad de cuota) para tirar a la basura lo que ya habia llegado.
+      const reintentable = !huboDatos && !e.generacionEnVuelo &&
+        (e.transitorio || /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message));
+      if (reintentable && intento < reintentos) {
+        const espera = 1000 * Math.pow(2, intento);
+        console.warn(`[streamGemini] ${e.message} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
+        await new Promise(r => setTimeout(r, espera));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw ultimoError || new Error('Gemini: fallo desconocido');
+}
+
+// Rescata objetos JSON completos de un texto que puede venir truncado (un array a
+// medio llegar, por ejemplo). Se construye una instancia nueva en cada llamada a
+// proposito: el flag /g guarda lastIndex y compartirla entre llamadas la corrompe.
+const nuevoRegexObjeto = () => /\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}/g;
+
+// Cuenta objetos ya cerrados que tengan `campo`, sobre texto que todavia esta
+// llegando. Es el contador de progreso del streaming: los chunks miden ~50
+// caracteres y un item ~200, asi que no llegan items, llegan pedazos.
+function contarItemsParciales(texto, campo) {
+  const inicio = texto.indexOf('[');
+  if (inicio < 0) return 0;
+  const fragmento = texto.slice(inicio);
+  const re = nuevoRegexObjeto();
+  let match, n = 0;
+  while ((match = re.exec(fragmento)) !== null) {
+    try { if (JSON.parse(match[0])[campo]) n++; } catch {}
+  }
+  return n;
+}
+
 function parsearJSONGemini(str) {
   // 1. Parseo limpio (caso normal)
   try { return JSON.parse(str); } catch {}
@@ -806,7 +956,7 @@ function parsearJSONGemini(str) {
 
   // 2. Recuperar objetos completos aunque el array esté truncado
   const items = [];
-  const objRegex = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}/g;
+  const objRegex = nuevoRegexObjeto();
   let match;
   while ((match = objRegex.exec(fragmento)) !== null) {
     try {
@@ -823,11 +973,13 @@ function parsearJSONGemini(str) {
   return [];
 }
 
-async function extraerConGemini(contenidoBase64, mimeType, nombreArchivo) {
+// onProgreso(n) recibe el numero de items completos que han llegado hasta el momento.
+// Es opcional: sin el, la extraccion se comporta igual que antes de cara al llamador.
+async function extraerConGemini(contenidoBase64, mimeType, nombreArchivo, onProgreso) {
   if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
 
   const MODELO = MODELO_GEMINI;
-  const URL    = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:generateContent?key=${GEMINI_KEY}`;
+  const URL    = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:streamGenerateContent?alt=sse&key=${GEMINI_KEY}`;
 
   const PROMPT = `Analiza este documento de cotización y extrae TODOS los ítems cotizados.
 Para cada ítem devuelve SOLO un JSON array con este formato exacto (sin texto adicional, sin markdown):
@@ -873,13 +1025,30 @@ ${PROMPT}` }
 
   const body = JSON.stringify({
     contents: [{ parts: partes }],
-    generationConfig: { temperature: 0, maxOutputTokens: 32768 },
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: 32768,
+      // Extraer items de una tabla es copiar datos, no razonar. Los modelos 3.x
+      // razonan por defecto y eso solo agrega latencia: medido sobre una cotizacion
+      // de 45 items, "low" baja de ~31s a ~22s y de 6233 a 2371 tokens de
+      // razonamiento, con extraccion identica.
+      thinkingConfig: { thinkingLevel: 'low' },
+    },
   });
 
-  const respuesta = await postGemini(URL, body, { timeoutMs: 60000, reintentos: 2 });
+  // Se cuentan los items completos a medida que llegan y se avisa solo cuando el
+  // numero cambia: son ~45 avisos en vez de los ~190 chunks que manda Gemini.
+  let ultimoN = 0;
+  const texto = await streamGemini(URL, body, {
+    timeoutMs: 120000,
+    reintentos: 2,
+    onTexto: onProgreso ? (parcial) => {
+      const n = contarItemsParciales(parcial, 'insumo');
+      if (n !== ultimoN) { ultimoN = n; onProgreso(n); }
+    } : undefined,
+  });
 
-  const texto = respuesta.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
-  const jsonLimpio = texto.replace(/```json\n?/g, '').replace(/```/g, '').trim();
+  const jsonLimpio = (texto || '[]').replace(/```json\n?/g, '').replace(/```/g, '').trim();
   return parsearJSONGemini(jsonLimpio);
 }
 
@@ -1150,6 +1319,26 @@ const servidor = http.createServer(async (req, res) => {
     res.end(contenido);
   };
 
+  // Respuesta en streaming: una linea JSON por evento (NDJSON). La usan los endpoints
+  // de extraccion para informar progreso mientras Gemini genera.
+  //
+  // OJO con la semantica de errores: al escribir la primera linea el status queda
+  // fijado en 200, asi que un fallo posterior NO puede viajar como HTTP 500. Viaja
+  // como {tipo:'error'} y el cliente lo trata igual.
+  const abrirNdjson = () => {
+    res.writeHead(200, {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-store',
+      // Caddy no buffera (verificado en el Caddyfile del VPS); esto es por si algun
+      // dia entra un nginx delante, que si buffera por defecto y romperia el progreso.
+      'X-Accel-Buffering': 'no',
+    });
+    return {
+      evento: (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch {} },
+      cerrar: () => { try { res.end(); } catch {} },
+    };
+  };
+
   // ── Middleware de autenticación ──────────────────────────────────────────
   const esPublica = RUTAS_PUBLICAS.includes(url);
   const cookies   = auth.parseCookies(req.headers.cookie);
@@ -1176,6 +1365,22 @@ const servidor = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url === '/me') {
     if (!sesion) return json({ error: 'no_session' }, 401);
     return json({ email: sesion.email, nombre: sesion.nombre, rol: sesion.rol });
+  }
+
+  // ── GET /diag/stream → comprobar que el reverse proxy no buffera ─────────
+  // Escupe una linea por segundo durante 5s. Si el proxy buffera, las 5 llegan de
+  // golpe al final y el progreso de /extraer no serviria de nada. Se verifica con:
+  //   curl -N -s https://<dominio>/diag/stream | while read l; do echo "$(date +%T) $l"; done
+  // No esta en RUTAS_PUBLICAS a proposito: requiere sesion como cualquier otra ruta.
+  if (req.method === 'GET' && url === '/diag/stream') {
+    const flujo = abrirNdjson();
+    let n = 0;
+    const t = setInterval(() => {
+      flujo.evento({ tipo: 'latido', seg: ++n });
+      if (n >= 5) { clearInterval(t); flujo.evento({ tipo: 'fin' }); flujo.cerrar(); }
+    }, 1000);
+    req.on('close', () => clearInterval(t));
+    return;
   }
 
   // ── GET /auth/login-url → URL de login Microsoft ─────────────────────────
@@ -2990,8 +3195,42 @@ const servidor = http.createServer(async (req, res) => {
           }
         }
 
-        const items = await extraerConGemini(datos, mimeType, archivo.fileName);
-        json({ ok: true, items, archivo: archivo.fileName });
+        // Con ?stream=1 se responde NDJSON con progreso (consola nueva); sin el, un
+        // unico JSON al final, que es lo que espera la UI de /legacy.
+        const quiereStream = new URLSearchParams(req.url.split('?')[1] || '').get('stream') === '1';
+
+        if (!quiereStream) {
+          const items = await extraerConGemini(datos, mimeType, archivo.fileName);
+          return json({ ok: true, items, archivo: archivo.fileName });
+        }
+
+        const flujo = abrirNdjson();
+        // Primera linea de inmediato, antes de hablar con Gemini: le da a la UI algo
+        // que mostrar durante los ~12s de razonamiento, en los que no llega un dato.
+        flujo.evento({ tipo: 'fase', fase: 'analizando' });
+
+        // Latidos mientras no haya items. Sin esto los primeros segundos son
+        // indistinguibles de un cuelgue, que es justo el problema que veniamos a
+        // resolver: contar items no sirve antes de que llegue el primero.
+        const t0 = Date.now();
+        let hayItems = false;
+        const latido = setInterval(() => {
+          if (!hayItems) flujo.evento({ tipo: 'latido', seg: Math.round((Date.now() - t0) / 1000) });
+        }, 5000);
+
+        try {
+          const items = await extraerConGemini(datos, mimeType, archivo.fileName, (n) => {
+            hayItems = true;
+            flujo.evento({ tipo: 'progreso', items: n });
+          });
+          flujo.evento({ tipo: 'fin', items, archivo: archivo.fileName });
+        } catch (err) {
+          console.error('[/extraer] Error extracción IA:', err.message);
+          flujo.evento({ tipo: 'error', mensaje: err.message });
+        } finally {
+          clearInterval(latido);
+          flujo.cerrar();
+        }
 
       } catch (err) {
         console.error('[/extraer] Error extracción IA:', err.message);
@@ -3214,7 +3453,7 @@ const servidor = http.createServer(async (req, res) => {
 
         if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
         const MODELO = MODELO_GEMINI;
-        const GURL   = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:generateContent?key=${GEMINI_KEY}`;
+        const GURL   = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:streamGenerateContent?alt=sse&key=${GEMINI_KEY}`;
 
         const PROMPT = `Analiza este documento que es una cotización o propuesta económica de servicios.
 Extrae los datos Y redacta el clausulado jurídico. Devuelve SOLO un JSON con este formato exacto (sin texto adicional, sin markdown, sin bloques de código):
@@ -3257,24 +3496,72 @@ Reglas para el clausulado (CRÍTICO — aplica todos sin excepción):
           ? [{ text: `${Buffer.from(datos, 'base64').toString('utf-8')}\n\n${PROMPT}` }]
           : [{ inline_data: { mime_type: mimeType, data: datos } }, { text: PROMPT }];
 
+        // Sin thinkingLevel "low" a proposito: a diferencia de /extraer, esta llamada
+        // ademas redacta el clausulado juridico, que si es una tarea de razonamiento.
+        // Recortarle el razonamiento abarataria latencia a costa de la calidad legal.
         const gBody = JSON.stringify({
           contents: [{ parts: partes }],
           generationConfig: { temperature: 0, maxOutputTokens: 32768 },
         });
 
-        const gResp = await postGemini(GURL, gBody, { timeoutMs: 60000, reintentos: 2 });
-        const raw = gResp.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-        const clean = raw.replace(/```json[\s\S]*?/g, '').replace(/```/g, '').trim();
-        const extraido = JSON.parse(clean);
-        // Strip any markdown from clausulas
-        if (extraido.clausulas) {
-          extraido.clausulas = extraido.clausulas
-            .replace(/\*\*\*(.+?)\*\*\*/g, '$1')
-            .replace(/\*\*(.+?)\*\*/g, '$1')
-            .replace(/\*(.+?)\*/g, '$1')
-            .replace(/#+\s*/g, '');
+        const quiereStream = new URLSearchParams(req.url.split('?')[1] || '').get('stream') === '1';
+        const flujo = quiereStream ? abrirNdjson() : null;
+
+        // Aca el progreso no puede ser un contador: la respuesta es un objeto unico,
+        // no un array. Se informa por claves, en el orden en que el prompt las pide.
+        // El clausulado va al final y es la parte mas larga, asi que ese ultimo aviso
+        // es el que cubre la espera grande.
+        let ultimaSenal = '';
+        const senalar = (parcial) => {
+          let senal;
+          if (parcial.includes('"clausulas"')) senal = 'clausulado';
+          else {
+            const n = contarItemsParciales(parcial, 'descripcion');
+            if (n > 0) senal = `items:${n}`;
+            else if (/"proveedorNombre"\s*:\s*"[^"]/.test(parcial)) senal = 'proveedor';
+          }
+          if (!senal || senal === ultimaSenal) return;
+          ultimaSenal = senal;
+          if (senal === 'clausulado')      flujo.evento({ tipo: 'progreso', fase: 'clausulado' });
+          else if (senal === 'proveedor')  flujo.evento({ tipo: 'progreso', fase: 'proveedor' });
+          else                             flujo.evento({ tipo: 'progreso', fase: 'items', items: Number(senal.split(':')[1]) });
+        };
+
+        let latido;
+        if (flujo) {
+          flujo.evento({ tipo: 'fase', fase: 'analizando' });
+          const t0 = Date.now();
+          latido = setInterval(() => {
+            if (!ultimaSenal) flujo.evento({ tipo: 'latido', seg: Math.round((Date.now() - t0) / 1000) });
+          }, 5000);
         }
-        json({ ok: true, ...extraido });
+
+        try {
+          const raw = await streamGemini(GURL, gBody, {
+            timeoutMs: 120000,
+            reintentos: 2,
+            onTexto: flujo ? senalar : undefined,
+          });
+          const clean = (raw || '{}').replace(/```json[\s\S]*?/g, '').replace(/```/g, '').trim();
+          const extraido = JSON.parse(clean);
+          // Strip any markdown from clausulas
+          if (extraido.clausulas) {
+            extraido.clausulas = extraido.clausulas
+              .replace(/\*\*\*(.+?)\*\*\*/g, '$1')
+              .replace(/\*\*(.+?)\*\*/g, '$1')
+              .replace(/\*(.+?)\*/g, '$1')
+              .replace(/#+\s*/g, '');
+          }
+          if (flujo) flujo.evento({ tipo: 'fin', ...extraido });
+          else json({ ok: true, ...extraido });
+        } catch (err) {
+          console.error('[/os/extraer] Error extracción IA:', err.message);
+          if (flujo) flujo.evento({ tipo: 'error', mensaje: err.message });
+          else json({ error: err.message }, 500);
+        } finally {
+          if (latido) clearInterval(latido);
+          if (flujo) flujo.cerrar();
+        }
       } catch (err) {
         console.error('[/os/extraer] Error extracción IA:', err.message);
         json({ error: err.message }, 500);
