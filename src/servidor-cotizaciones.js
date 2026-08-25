@@ -666,7 +666,8 @@ const PATH_COMPRAS = process.env.PATH_COMPRAS     || path.join(__dirname, '../da
 const PATH_PROV    = process.env.PATH_PROVEEDORES || path.join(__dirname, '../data/proveedores_depurados_final.csv');
 const PATH_PROY    = process.env.PATH_PROYECTOS   || path.join(__dirname, '../data/tabla_proyectos.csv');
 const GEMINI_KEY   = process.env.GEMINI_API_KEY || '';
-const MODELO_GEMINI = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+// Version concreta, nunca un alias movil: ver la nota en .env.example.
+const MODELO_GEMINI = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const TEMP_DIR     = path.join(__dirname, '../temp/cotizaciones');
 const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`;
 
@@ -763,7 +764,17 @@ async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 0 } = 
             catch (e) { reject(new Error(`Respuesta de Gemini ilegible (HTTP ${res.statusCode})`)); }
           });
         });
-        req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s`)); });
+        req.setTimeout(timeoutMs, () => {
+          req.destroy();
+          // generateContent no hace streaming: Gemini no envia un solo byte hasta
+          // terminar de generar, asi que toda la fase de razonamiento cuenta como
+          // socket inactivo y este timeout es en realidad un techo al tiempo de
+          // generacion. Se marca para no reintentarlo: la generacion ya ocurrio del
+          // lado de Google (y ya consumio cuota), reintentar solo paga otra completa.
+          const err = new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s`);
+          err.generacionEnVuelo = true;
+          reject(err);
+        });
         req.on('error', reject);
         req.write(bodyStr);
         req.end();
@@ -782,8 +793,10 @@ async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 0 } = 
       return resp.body;
     } catch (e) {
       ultimoError = e;
-      // Reintenta solo timeouts / cortes de red; los errores ya lanzados por la API no.
-      const reintentable = /timeout|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
+      // Reintenta solo cortes de red, donde la peticion nunca llego a generarse.
+      // Un timeout propio NO se reintenta (ver generacionEnVuelo mas arriba).
+      const reintentable = !e.generacionEnVuelo &&
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
       if (reintentable && intento < reintentos) {
         const espera = 1000 * Math.pow(2, intento);
         console.warn(`[postGemini] ${e.message} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
@@ -873,10 +886,20 @@ ${PROMPT}` }
 
   const body = JSON.stringify({
     contents: [{ parts: partes }],
-    generationConfig: { temperature: 0, maxOutputTokens: 32768 },
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: 32768,
+      // Extraer items de una tabla es copiar datos, no razonar. Los modelos 3.x
+      // razonan por defecto y eso solo agrega latencia: medido sobre una cotizacion
+      // de 45 items, "low" baja de ~31s a ~22s y de 6233 a 2371 tokens de
+      // razonamiento, con extraccion identica.
+      thinkingConfig: { thinkingLevel: 'low' },
+    },
   });
 
-  const respuesta = await postGemini(URL, body, { timeoutMs: 60000, reintentos: 2 });
+  // 120s y no 60s: un PDF entra por el camino de vision, que es mas lento que
+  // texto, y el timeout de postGemini es un techo al tiempo total de generacion.
+  const respuesta = await postGemini(URL, body, { timeoutMs: 120000, reintentos: 2 });
 
   const texto = respuesta.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
   const jsonLimpio = texto.replace(/```json\n?/g, '').replace(/```/g, '').trim();
@@ -3257,12 +3280,15 @@ Reglas para el clausulado (CRÍTICO — aplica todos sin excepción):
           ? [{ text: `${Buffer.from(datos, 'base64').toString('utf-8')}\n\n${PROMPT}` }]
           : [{ inline_data: { mime_type: mimeType, data: datos } }, { text: PROMPT }];
 
+        // Sin thinkingLevel "low" a proposito: a diferencia de /extraer, esta llamada
+        // ademas redacta el clausulado juridico, que si es una tarea de razonamiento.
+        // Recortarle el razonamiento abarataria latencia a costa de la calidad legal.
         const gBody = JSON.stringify({
           contents: [{ parts: partes }],
           generationConfig: { temperature: 0, maxOutputTokens: 32768 },
         });
 
-        const gResp = await postGemini(GURL, gBody, { timeoutMs: 60000, reintentos: 2 });
+        const gResp = await postGemini(GURL, gBody, { timeoutMs: 120000, reintentos: 2 });
         const raw = gResp.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
         const clean = raw.replace(/```json[\s\S]*?/g, '').replace(/```/g, '').trim();
         const extraido = JSON.parse(clean);
