@@ -10,7 +10,8 @@ const fs    = require('fs');
 const https = require('https');
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
-const MODELO     = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+// Version concreta, nunca un alias movil: ver la nota en .env.example.
+const MODELO     = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 
 const PROMPT = `Este PDF es el formato oficial de SOLICITUD DE REQUERIMIENTO (CT-ADMIN-FO-002) de Civiltech.
 Extrae la información y devuelve SOLO un JSON (sin markdown, sin comentarios) con esta estructura EXACTA:
@@ -58,7 +59,14 @@ async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 2 } = 
             catch (e) { reject(new Error(`Respuesta de Gemini ilegible (HTTP ${res.statusCode})`)); }
           });
         });
-        req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s`)); });
+        req.setTimeout(timeoutMs, () => {
+          req.destroy();
+          // Ver la nota en servidor-cotizaciones.js: este timeout es un techo al
+          // tiempo de generacion, y la generacion ya ocurrio del lado de Google.
+          const err = new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s`);
+          err.generacionEnVuelo = true;
+          reject(err);
+        });
         req.on('error', reject);
         req.write(bodyStr);
         req.end();
@@ -76,7 +84,8 @@ async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 2 } = 
       return resp.body;
     } catch (e) {
       ultimoError = e;
-      const reintentable = /timeout|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
+      const reintentable = !e.generacionEnVuelo &&
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
       if (reintentable && intento < reintentos) {
         const espera = 1000 * Math.pow(2, intento);
         console.warn(`[leerRequerimientoPDF] ${e.message} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
@@ -102,13 +111,22 @@ async function leerRequerimientoPDF(rutaPDF) {
         { text: PROMPT },
       ],
     }],
-    generationConfig: { temperature: 0, maxOutputTokens: 4096 },
+    generationConfig: {
+      temperature: 0,
+      // 8192 y no 4096: en los modelos 3.x los tokens de razonamiento se descuentan
+      // de este presupuesto. Con 4096 el razonamiento se lo comia casi entero y la
+      // respuesta volvia con finishReason MAX_TOKENS y texto truncado — con HTTP 200,
+      // asi que no lanzaba error: fallaba mas abajo en el JSON.parse.
+      maxOutputTokens: 8192,
+      // Leer campos de un requerimiento es extraccion, no razonamiento.
+      thinkingConfig: { thinkingLevel: 'low' },
+    },
   });
 
   const resp = await postGemini(
     `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:generateContent?key=${GEMINI_KEY}`,
     body,
-    { timeoutMs: 60000, reintentos: 2 },
+    { timeoutMs: 120000, reintentos: 2 },
   );
 
   const texto = resp.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
