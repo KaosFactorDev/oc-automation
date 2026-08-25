@@ -1462,6 +1462,79 @@ function fmtFechaLarga(str){ if(!str) return '—'; const d = new Date(str); if(
 function capFirst(s){ return s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : s; }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST con progreso en vivo (NDJSON)
+// ─────────────────────────────────────────────────────────────────────────────
+// Los endpoints de extraccion con IA tardan entre 20 y 120 segundos. Con ?stream=1
+// responden una linea JSON por evento en vez de un unico JSON al final, y este
+// helper las va leyendo para que la UI pueda mostrar progreso.
+//
+// onEvento(ev) recibe cada evento: {tipo:'fase'|'latido'|'progreso'|'error'|'fin'}.
+// Devuelve el payload del evento 'fin'.
+//
+// Dos garantias que importan, porque su ausencia fue el bug original:
+//  - si el stream termina sin 'fin', lanza. Una conexion que muere en silencio no
+//    puede volver a dejar el spinner girando para siempre.
+//  - AbortController con techo duro, por si el servidor deja de responder del todo.
+async function postConProgreso(url, formData, onEvento, { timeoutMs = 180000 } = {}) {
+  const ctl = new AbortController();
+  const corte = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const sep  = url.includes('?') ? '&' : '?';
+    const resp = await fetch(`${url}${sep}stream=1`, { method: 'POST', body: formData, signal: ctl.signal });
+
+    // Un fallo antes del primer byte si llega con status de error y cuerpo JSON.
+    if (!resp.ok) {
+      let msg = `HTTP ${resp.status}`;
+      try { msg = (await resp.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+
+    const lector  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let pendiente = '';
+    let final     = null;
+
+    for (;;) {
+      const { done, value } = await lector.read();
+      if (done) break;
+      pendiente += decoder.decode(value, { stream: true });
+      const lineas = pendiente.split('\n');
+      pendiente = lineas.pop();          // la ultima puede estar a medio llegar
+
+      for (const linea of lineas) {
+        if (!linea.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(linea); } catch { continue; }
+        if (ev.tipo === 'error') throw new Error(ev.mensaje || 'Error del servidor');
+        if (ev.tipo === 'fin')   final = ev;
+        else if (onEvento)       onEvento(ev);
+      }
+    }
+
+    if (!final) throw new Error('La conexión se cortó antes de terminar la extracción');
+    return final;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error(`La extracción excedió ${Math.round(timeoutMs / 1000)}s sin respuesta`);
+    throw e;
+  } finally {
+    clearTimeout(corte);
+  }
+}
+
+// Traduce los eventos de progreso al texto que ve el usuario. Se comparte entre las
+// tres pantallas de extraccion para que digan todas lo mismo.
+function textoProgresoIA(ev) {
+  if (ev.tipo === 'fase' && ev.fase === 'analizando') return 'Analizando el documento con IA…';
+  if (ev.tipo === 'latido')  return `Analizando el documento con IA… ${ev.seg}s`;
+  if (ev.tipo === 'progreso') {
+    if (ev.fase === 'proveedor')  return 'Proveedor detectado, extrayendo ítems…';
+    if (ev.fase === 'clausulado') return 'Ítems extraídos. Redactando clausulado…';
+    return `Extrayendo… ${ev.items} ítem(s) encontrados`;
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Cierre universal de modales (Escape y clic en el fondo)
 // ─────────────────────────────────────────────────────────────────────────────
 // Los modales se crean en 15 sitios distintos del archivo. Centralizar el
@@ -2323,9 +2396,10 @@ async function extraerOS() {
     if (proveedor) fd.append('proveedor', proveedor);
     if (proyecto)  fd.append('proyecto', proyecto);
 
-    const r = await fetch('/os/extraer', { method: 'POST', body: fd });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || 'Error del servidor');
+    const data = await postConProgreso('/os/extraer', fd, (ev) => {
+      const txt = textoProgresoIA(ev);
+      if (txt && msg) msg.textContent = txt;
+    });
 
     _osExtraccion = data;
     const res = $('#os-cot-resultado');
@@ -4830,9 +4904,10 @@ $('#btn-extraer')?.addEventListener('click', async () => {
   setEstado('cargando','Procesando con IA — puede tardar 10-30 segundos...');
   try{
     const fd = new FormData(); fd.append('archivo', ESTADO.archivoSeleccionado);
-    const resp = await fetch('/extraer', { method:'POST', body:fd });
-    const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error);
+    const data = await postConProgreso('/extraer', fd, (ev) => {
+      const txt = textoProgresoIA(ev);
+      if (txt) setEstado('cargando', txt);
+    });
     if (!data.items?.length) throw new Error('No se encontraron ítems en el documento');
     const provManual  = $('#prov-manual').value;
     const proyManual  = $('#proy-manual').value;
@@ -4968,9 +5043,10 @@ $('#btn-extraer-oc')?.addEventListener('click', async () => {
   setEstadoOC('cargando','Extrayendo ítems y precios con IA...');
   try{
     const fd = new FormData(); fd.append('archivo', ESTADO.archivoOC);
-    const resp = await fetch('/extraer', { method:'POST', body:fd });
-    const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error);
+    const data = await postConProgreso('/extraer', fd, (ev) => {
+      const txt = textoProgresoIA(ev);
+      if (txt) setEstadoOC('cargando', txt);
+    });
     if (!data.items?.length) throw new Error('No se encontraron ítems en el documento');
     // Poblar header con proveedor/NIT del primer ítem (si el header está vacío)
     if (!($('#oc-razon-social')?.value || '').trim() && data.items?.[0]?.proveedor) {
