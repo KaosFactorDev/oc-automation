@@ -32,6 +32,7 @@ const syncService      = require('./syncService');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
+const geminiConfig     = require('./geminiConfig');
 
 // Sobreescribe cfg.firmante con el usuario de la sesión activa.
 // La configuración de empresa (logo, emisor, IVA) sigue viniendo de SharePoint.
@@ -666,8 +667,9 @@ const PATH_COMPRAS = process.env.PATH_COMPRAS     || path.join(__dirname, '../da
 const PATH_PROV    = process.env.PATH_PROVEEDORES || path.join(__dirname, '../data/proveedores_depurados_final.csv');
 const PATH_PROY    = process.env.PATH_PROYECTOS   || path.join(__dirname, '../data/tabla_proyectos.csv');
 const GEMINI_KEY   = process.env.GEMINI_API_KEY || '';
-// Version concreta, nunca un alias movil: ver la nota en .env.example.
-const MODELO_GEMINI = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+// Saneado y validado en geminiConfig.js: el .env de produccion se edita a mano y un
+// typo ahi antes no se veia hasta que un usuario subia un archivo.
+const MODELO_GEMINI = geminiConfig.MODELO;
 const TEMP_DIR     = path.join(__dirname, '../temp/cotizaciones');
 const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`;
 
@@ -4475,6 +4477,11 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
 servidor.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT}`);
   console.log('  Abre esa URL en tu navegador para cargar cotizaciones.\n');
+  // Comprueba que GEMINI_MODEL apunte a un modelo que existe. No bloquea el
+  // arranque: solo deja el diagnostico en el log, para que un .env mal escrito se
+  // vea aqui y no cuando un usuario intente extraer una cotizacion.
+  geminiConfig.verificarModelo(GEMINI_KEY)
+    .catch(e => console.warn('[geminiConfig] Verificación falló:', e.message));
   // Sincronización SharePoint → SQLite en segundo plano
   syncService.init(ctxSharePoint)
     .catch(e => console.warn('[syncService] No se pudo inicializar:', e.message));
