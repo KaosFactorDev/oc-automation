@@ -47,7 +47,11 @@ function norm(s) {
 const txtNum = (v) => String(v ?? '').trim() || '(sin número)';
 
 function normNit(s) {
-  return String(s || '').replace(/\.0+$/, '').replace(/[^0-9A-Za-z-]/g, '');
+  // Igual que erp.norm_nit(): la raíz, sin el dígito de verificación.
+  return String(s || '')
+    .replace(/\.0+$/, '')
+    .replace(/[^0-9A-Za-z-]/g, '')
+    .split('-')[0];
 }
 
 function items(doc, campo = 'itemsJson') {

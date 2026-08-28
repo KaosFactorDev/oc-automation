@@ -73,7 +73,13 @@ function norm(s) {
 }
 
 function normNit(s) {
-  const v = String(s || '').replace(/\.0+$/, '').replace(/[^0-9A-Za-z-]/g, '');
+  // Debe dar exactamente lo mismo que erp.norm_nit(): se corta en el guion
+  // para quedarse con la raíz, porque el dígito de verificación es un checksum
+  // de esa raíz y no distingue empresas.
+  const v = String(s || '')
+    .replace(/\.0+$/, '')
+    .replace(/[^0-9A-Za-z-]/g, '')
+    .split('-')[0];
   return v || null;
 }
 
