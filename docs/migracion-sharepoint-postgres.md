@@ -1,0 +1,208 @@
+# Migración de SharePoint a Postgres
+
+## Por qué
+
+El ERP tenía cinco fuentes de datos repartidas: once listas de SharePoint, un
+libro de Excel (`Control Costos.xlsx`), tres CSV en `data/`, y un SQLite local
+que hacía de caché de lectura. SharePoint era la fuente de verdad y el SQLite
+existía únicamente porque leer por Microsoft Graph tarda cientos de
+milisegundos y la consola no podía esperar eso en cada pantalla.
+
+Ese montaje tiene tres problemas de fondo:
+
+- **SharePoint no valida nada.** No hay unicidad, ni llaves foráneas, ni tipos
+  estrictos. Los datos se degradan sin que nada avise.
+- **La aplicación no puede consultar.** Sumar por insumo o por proveedor obliga
+  a bajar todos los documentos y recorrerlos en memoria, porque los ítems viven
+  dentro de un string JSON.
+- **El caché puede quedar viejo** y nadie se entera hasta que una cuenta no da.
+
+## Alcance
+
+Se migran **los datos**. Los archivos no: los PDF de respaldo de OC, OS y
+requerimientos siguen subiéndose al Drive de SharePoint, que es donde la gente
+ya los busca.
+
+Conviene distinguir qué es fuente de datos y qué no, porque no todo el Excel
+del sistema desaparece:
+
+| No es fuente de datos | Qué es |
+|---|---|
+| El requerimiento que llega por correo | Formato de **entrada**. La gente de obra seguirá llenándolo en Excel |
+| `data/CT-ADMIN-FO-002...xlsx`, `plantilla_oc.xlsx` | Plantillas |
+| Los `.xlsx` que generan `ocTemplate.js` y compañía | **Salida**, entregables |
+| Los PDF en `/OrdenesCompraPDF/` | Archivos, no datos |
+
+De `graphStorage.js` sobreviven tres cosas: la autenticación, el Drive y la
+lectura del buzón.
+
+## Decisiones
+
+### Postgres autoalojado en Docker
+
+Se descartó Supabase alojado por límite de espacio en la cuenta. La base corre
+en Docker: en el equipo local con `docker-compose.dev.yml`, y en el VPS como un
+servicio más del `docker-compose.yml`.
+
+En el VPS no publica puertos y vive en una red interna, así que solo la app y el
+mailer la alcanzan. Sus datos van a un volumen con nombre (`oc-automation-pgdata`)
+y no a `./data`, que es lo que el workflow de despliegue sincroniza con rsync.
+
+Del CLI de Supabase se conserva **solo el motor de migraciones**: funciona
+contra cualquier Postgres con `--db-url`, mantiene su tabla de rastreo y evita
+escribir un runner propio. Queda fijado como `devDependency`.
+
+### El caché SQLite deja de tener sentido
+
+Esto es consecuencia de autoalojar. `db.js` y `syncService.js` son 893 líneas
+que existen para esquivar la latencia de SharePoint. Con Postgres en el mismo
+host —localhost en desarrollo, la red interna de Docker en el VPS— una consulta
+tarda menos de un milisegundo.
+
+Cuando la aplicación pase a Postgres, esos dos archivos se borran, y con ellos
+el sync cada 2 minutos, la ventana en que el caché queda viejo, y el
+`syncAll()` que `contador.js` tiene que llamar antes de leer el consecutivo.
+
+### Sin doble escritura: corte directo
+
+El plan original contemplaba una etapa de escritura simultánea a SharePoint y
+Postgres, con un script que comparara las dos a diario. Se descartó: una vez que
+Postgres funcione no hay razón para seguir escribiendo en SharePoint.
+
+Eso quita la etapa de convivencia, el script de comparación y el código de
+escritura espejo. A cambio no hay vuelta atrás gradual, y eso se cubre así:
+
+- Producción sigue en SharePoint mientras se desarrolla, así que hay una
+  referencia viva contra la cual comparar pantalla por pantalla.
+- El import es idempotente y tarda segundos. El día del corte: importar y
+  desplegar, en ese orden. La ventana en que SharePoint podría recibir algo que
+  Postgres no vea son minutos.
+- Si algo sale mal, revertir el despliegue deja todo como estaba: SharePoint
+  nunca se tocó.
+
+**El orden importa: import primero, despliegue después.**
+
+## Qué se encontró en los datos
+
+SharePoint no valida, así que la migración fue la primera revisión seria que
+recibieron estos datos. Lo que apareció:
+
+### Números de documento repetidos
+
+11 números de OC, 5 de OS y 1 de remisión, todos duplicados. Las OC y OS tenían
+la misma causa: `contador.js` calcula el siguiente número como `MAX()`
+excluyendo los anulados, así que al anular el documento más alto el siguiente
+reutilizaba su número. `0072` y `0075` llegaron a tener tres documentos cada uno.
+
+La remisión venía de otro lado: el número salía de `existentes.length + 1`, así
+que dos creadas en el mismo segundo obtenían el mismo. `REM-00011` eran dos
+remisiones byte a byte idénticas creadas con un segundo de diferencia — un doble
+clic en el formulario.
+
+**El esquema nuevo hace las dos cosas imposibles.** Ver "Numeración" en
+[esquema-erp.md](esquema-erp.md).
+
+### Una orden de servicio que terminaba antes de empezar
+
+`OS-0095`: inicio 2026-08-13, fin 2026-08-06. Error de digitación, corregido
+intercambiando las dos fechas — que no inventa ni descarta ninguna.
+
+### Ítems de OC con dos formas distintas
+
+Según por dónde se creara la orden, el ítem traía el nombre bajo la clave
+`descripcion` (alta manual) o bajo `insumo` (generado desde un requerimiento).
+El código lo parcheaba en nueve lugares con `it.descripcion || it.insumo`. En la
+carga actual, **549 de 1.261 ítems** venían con la segunda forma. Ahora hay una
+sola columna.
+
+### Proveedores duplicados
+
+Cinco pares de proveedores colapsan en uno solo al normalizar el NIT:
+`900.807.426-3`, `800,118,549-1` y `811017552.0` son tres formatos del mismo
+dato. Son el mismo proveedor dado de alta dos veces.
+
+### Usuarios con varias filas por correo
+
+`lfelizzola@civiltechic.com` tenía ocho filas en `UsuariosERP`, con rol y estado
+distintos entre ellas. La regla correcta es que gana **la más reciente**, igual
+que hace `bulkUpsertUsuarios()` en `db.js`. La regla contraria concedía permisos
+que el registro vigente no da.
+
+Queda un caso sin resolver que necesita decisión humana:
+`svargas@civiltechic.com` aparece con **dos nombres distintos** (Carolina Vargas
+y Sandra Vargas). Son dos personas compartiendo un login. Como `creadoPor` queda
+escrito en cada OC, requerimiento y remisión, la trazabilidad de quién hizo qué
+se pierde entre las dos. Si son dos personas, necesitan correos separados.
+
+### Referencias fuera del catálogo
+
+23 proyectos y 12 proveedores referenciados por documentos no existían en su
+catálogo. El import los crea con `activo = false` y `requiere_revision = true`
+para no perder la referencia, pero hay que revisarlos: varios son el mismo
+proyecto escrito distinto.
+
+```sql
+SELECT codigo FROM erp.proyectos WHERE requiere_revision ORDER BY codigo;
+SELECT nit, razon_social FROM erp.proveedores WHERE requiere_revision;
+```
+
+`CT26-034LT ZIPAQUIRA Norte 230KV - JE Jaimes` y
+`CT26-034 LT Norte 230 KV-JE Jaimes` son uno solo. `EQUIPOS GT 20026` tiene un
+dígito de más. `IZZI96` probablemente es `CT26-041 Micropilotes IZZI96-COALA`.
+
+Fusionarlos es trabajo de catálogo, no de migración, y no bloquea nada.
+
+## Resultado de la carga
+
+12.584 filas, 691 documentos. Las comprobaciones que importan:
+
+| Comprobación | Resultado |
+|---|---|
+| Ítems que suman el subtotal e IVA de su cabecera | **282 de 282** órdenes de compra |
+| Total de OC, origen contra destino | $730.726.113,6 en ambos |
+| Números de documento duplicados | 0 |
+| Fechas del historial sin interpretar | 0 de 5.496 |
+
+## Qué falta
+
+### 1. Capa de repositorio (el trabajo de fondo)
+
+Hoy `servidor-cotizaciones.js` llama a Microsoft Graph directamente en 88
+lugares, más 10 en `requerimientos.js` y el resto en `contador.js`,
+`configApp.js` y `controlCostos.js`: **105 puntos de llamada** que conocen la
+forma de una lista de SharePoint.
+
+Mientras eso siga así, la aplicación no puede leer de Postgres por más completa
+que esté la base. Hay que introducir `src/repo/` con un módulo por agregado
+—requerimientos, órdenes, remisiones, inventario, catálogos, historial,
+usuarios, configuración— donde cada función sea una operación de negocio
+(`crearOC()`, `cambiarEstadoOC()`) y no un `updateListItem` con un objeto de
+campos.
+
+Como no habrá doble escritura, la capa se escribe **directo contra Postgres**:
+una implementación en vez de dos.
+
+Se quedan sin tocar las 7 llamadas de `leerCorreos.js` (buzón) y las de subir
+PDF al Drive. Eso no son datos.
+
+### 2. Control de Costos
+
+`registrarGasto()` y `actualizarFila()` en `controlCostos.js` escriben en un
+libro de Excel de SharePoint con búsqueda lineal por número de OC. Con los
+documentos ya tipados, el control de costos es una vista derivada de
+`ordenes_compra` y `ordenes_servicio`. Se conserva la salida: una ruta que
+exporta la vista a `.xlsx` con ExcelJS y la sube al mismo sitio. El Excel pasa
+de ser base de datos a ser reporte.
+
+### 3. Retirar los CSV
+
+`consultaProveedor.js` ya acepta los datos precargados, así que `loadCSV()` y
+`cargarDatosCSV()` se borran sin tocar la lógica de selección de proveedor.
+Salen `PATH_COMPRAS`, `PATH_PROVEEDORES` y `PATH_PROYECTOS` del `.env`, del
+README y de `test.js`. Los tres archivos se archivan, no se borran.
+
+### 4. Postgres en el VPS
+
+El servicio ya está definido en `docker-compose.yml`. Falta levantarlo, crear el
+rol, migrar, importar y dejar el respaldo en el cron del host. Ver
+[operacion-base-de-datos.md](operacion-base-de-datos.md).

@@ -6,6 +6,11 @@ Desde julio 2026 el sistema está **centralizado en un VPS Linux con Docker**: u
 
 > **¿Vas a trabajar en el código?** Lee primero [CONTRIBUTING.md](CONTRIBUTING.md) — flujo de ramas, convención de commits y entorno local. Ten presente que **un merge a `main` despliega a producción de inmediato**.
 
+> **Migración a Postgres en curso.** Las once listas de SharePoint ya están
+> modeladas y cargadas en una base Postgres autoalojada, pero la aplicación
+> todavía no la usa: sigue leyendo y escribiendo en SharePoint. El estado, el
+> esquema y los comandos están en [docs/](docs/README.md).
+
 ---
 
 ## Módulos

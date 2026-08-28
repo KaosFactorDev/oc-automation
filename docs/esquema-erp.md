@@ -1,0 +1,218 @@
+# Esquema `erp`
+
+Referencia del esquema de Postgres. La definición vive en
+`supabase/migrations/`; esto explica el porqué.
+
+Todo el ERP vive en el esquema `erp`, nunca en `public`. Eso mantiene el espacio
+de nombres limpio y permite que la base comparta servidor con otro sistema sin
+mezclarse.
+
+## Inventario
+
+18 tablas, 9 funciones, 78 índices.
+
+| Tabla | Col. | Filas hoy | Lista de SharePoint |
+|---|---:|---:|---|
+| `proyectos` | 13 | 50 | Proyectos |
+| `proveedores` | 18 | 433 | Proveedores |
+| `insumos` | 11 | 880 | Insumos |
+| `usuarios` | 9 | 6 | UsuariosERP |
+| `configuracion` | 6 | 6 | ConfiguracionApp |
+| `requerimientos` | 15 | 132 | Requerimientos |
+| `requerimiento_items` | 11 | 1.097 | ↳ de `itemsJson` |
+| `ordenes_compra` | 37 | 282 | OrdenesCompra |
+| `orden_compra_items` | 12 | 1.261 | ↳ de `itemsJson` |
+| `ordenes_servicio` | 40 | 147 | OrdenesServicio |
+| `orden_servicio_items` | 9 | 185 | ↳ de `itemsJson` |
+| `remisiones` | 16 | 130 | Remisiones |
+| `remision_items` | 7 | 693 | ↳ de `itemsJson` |
+| `remision_ordenes` | 2 | 134 | ↳ de `ocIds` |
+| `movimientos_inventario` | 21 | 1.652 | MovimientosInventario |
+| `historial_precios` | 19 | 5.496 | HistorialPrecios |
+| `contadores` | 3 | 5 | *(nueva)* |
+| `zonas` | 2 | 7 | *(nueva)* |
+
+Las tablas de ítems no existían: salen de descomponer la columna `itemsJson`.
+
+## Decisiones de modelado
+
+### Los ítems dejan de ser JSON
+
+En SharePoint —y en el caché SQLite— los ítems de cada documento vivían dentro
+de un string `itemsJson`. Ahora son tablas hijas. Eso es lo que permite:
+
+- sumar por insumo, proveedor o proyecto sin leer todos los documentos;
+- que el control de costos sea una consulta y no un archivo aparte;
+- detectar un ítem sin descripción al escribirlo, y no meses después cuando el
+  PDF sale con la celda en blanco.
+
+Los totales de línea son **columnas generadas**, no valores guardados:
+
+```sql
+valor_bruto numeric(16,2) GENERATED ALWAYS AS
+  (round(cantidad * precio_unitario * (1 - descuento_pct / 100), 2)) STORED
+```
+
+Antes cada plantilla y cada ruta repetía esa aritmética y podían discrepar.
+
+### `sp_id`: el rastro del origen
+
+Casi todas las tablas guardan el id del item de SharePoint. Sirve para
+reconciliar durante la transición y para rastrear de dónde salió una fila. Se
+puede borrar cuando SharePoint se apague.
+
+Dos excepciones:
+
+- **`proveedores`**: `sp_id` no es único. Cinco pares de items distintos traen
+  el mismo NIT y colapsan en una sola fila. Un índice único ahí haría fallar el
+  import.
+- **`usuarios`**: el `ON CONFLICT` del import va contra el **correo**, no contra
+  `sp_id`, porque el correo es la clave real. Con `sp_id`, reimportar después de
+  que una persona cambia de fila choca contra `usuarios_email_key`.
+
+### Números de documento nulos, no vacíos
+
+`numero_oc` y `numero_os` admiten `NULL`. El número solo se asigna al aprobar;
+en SharePoint las órdenes sin aprobar guardaban cadena vacía, y sobre eso no se
+puede poner un índice único. En Postgres varios `NULL` conviven bajo `UNIQUE`,
+así que el índice es parcial:
+
+```sql
+CREATE UNIQUE INDEX ordenes_compra_numero_key ON erp.ordenes_compra (numero_oc)
+  WHERE numero_oc IS NOT NULL;
+```
+
+Y un `CHECK` impide que un documento aprobado se quede sin número, que era
+imposible de rastrear en el consecutivo.
+
+### Fechas del historial: las dos versiones
+
+`HistorialPrecios.fecha` es una columna de **texto** en SharePoint, con cuatro
+formatos conviviendo sobre las 5.496 filas:
+
+| Formato | Filas |
+|---|---:|
+| `junio 23, 2026` | 3.721 |
+| `23 de junio de 2026` | 1.562 |
+| `2026-06-23` | 123 |
+| `23/04/2026` | ~66 |
+
+Se guardan las dos: `fecha` (tipo `date`, la interpretación) y `fecha_texto`
+(el original sin tocar). Lo que no se pueda interpretar queda en `NULL` y el
+dato crudo sigue ahí. En la carga actual se interpretaron las 5.496.
+
+### Normalización
+
+Dos funciones `IMMUTABLE`, para poder usarlas en índices:
+
+- **`erp.norm(text)`** — mayúsculas, sin tildes, sin puntuación, espacios
+  colapsados. Réplica de `norm()` en `db.js`. Da la unicidad de proyectos por
+  código e insumos por nombre.
+- **`erp.norm_nit(text)`** — quita puntos, comas, espacios y el sufijo `.0` que
+  deja Excel al leer un número como flotante. El `.0` se quita **antes** de
+  borrar la puntuación, porque después ya no se distingue de un separador de
+  miles.
+
+Usa `translate()` y no la extensión `unaccent`, que es `STABLE` y no sirve en un
+índice.
+
+> Las mismas normalizaciones están replicadas en JavaScript en
+> `revisar-listas.js` e `importar-listas.js`. **Si cambias una, cambia la otra**:
+> si divergen, el chequeo previo reportaría cosas que la base no rechaza, o al
+> revés. Se verificaron equivalentes sobre 2.137 nombres y 455 NIT reales.
+
+### Llaves foráneas con catálogo tolerante
+
+Los documentos referencian proyectos y proveedores por llave foránea real. Como
+23 proyectos y 12 proveedores referenciados no estaban en su catálogo, el import
+los crea con `activo = false` y `requiere_revision = true` en vez de fallar o de
+perder la referencia.
+
+### Zonas como tabla
+
+Era un campo `choice` en tres listas. Como tabla se amplía sin tocar el esquema
+de lo que la referencia. El import resuelve contra ella **sin distinguir
+mayúsculas**, porque los proveedores traían `Centro` y `CENTRO` mezclados; lo
+que no calce queda en `NULL` en vez de romper la llave.
+
+## Numeración
+
+`erp.contadores` con `UPDATE ... RETURNING`, no una `sequence`.
+
+**Por qué no una sequence:** `nextval()` no es transaccional. Si la transacción
+que pidió el número falla, el número queda consumido y el consecutivo salta.
+Para una OC eso no sirve: es un documento con efectos contables y la serie debe
+ser continua. Con una tabla, la fila queda bloqueada hasta el commit — dos
+aprobaciones simultáneas se serializan y, si una falla, su número se devuelve.
+
+Verificado: dos sesiones concurrentes, la segunda esperó 2,7 s al commit de la
+primera y obtuvo el número siguiente, no el mismo.
+
+**El bug que arregla:** `contador.js` toma `MAX()` excluyendo los estados
+anulados, así que anular el documento más alto deja que el siguiente reutilice
+su número. Ya pasó 16 veces. Acá el contador nunca retrocede y anular no libera
+un número.
+
+Funciones:
+
+| Función | Devuelve |
+|---|---|
+| `erp.siguiente_numero_oc()` | `bigint` — el prefijo y el relleno los pone la app (`OC_PREFIX`, `OC_PAD`) |
+| `erp.siguiente_numero_os()` | `bigint` |
+| `erp.siguiente_numero_remision()` | `text` — `REM-00001` |
+| `erp.siguiente_documento_almacen(tipo)` | `text` — `EA-0001` / `SA-0001` |
+| `erp.sincronizar_contadores()` | Deja cada contador en el número más alto ya emitido. **Solo se ejecuta una vez, después del import inicial** |
+
+`sincronizar_contadores()` toma el máximo sobre **todos** los números, incluidos
+los de documentos anulados. Ahí está la diferencia con `contador.js`.
+
+La vista `erp.vw_numeros_duplicados` lista números repetidos. Con los índices
+únicos puestos debería estar siempre vacía.
+
+## Reglas que la base hace cumplir
+
+29 `CHECK`, más las llaves foráneas y los índices únicos. Los que más importan:
+
+| Regla | Constraint |
+|---|---|
+| Estados dentro de su conjunto | `*_estado_valido` en los 5 tipos de documento |
+| Un aprobado tiene número | `ordenes_compra_aprobada_con_numero`, `ordenes_servicio_aprobada_con_numero` |
+| Un servicio no termina antes de empezar | `ordenes_servicio_rango_fechas` |
+| Ningún ítem sin descripción | `*_items_descripcion_no_vacia` |
+| Porcentajes entre 0 y 100 | `orden_compra_items_pct_rango`, `orden_servicio_items_iva_rango` |
+| Cantidad de inventario no negativa | `movimientos_cantidad_positiva` — el signo lo lleva `tipo` |
+| NIT siempre normalizado | `proveedores_nit_normalizado` |
+| Correo en minúsculas y con arroba | `usuarios_email_minuscula`, `usuarios_email_con_arroba` |
+
+`revisar-listas.js` aplica estas mismas reglas contra SharePoint **antes** del
+import, para que los rechazos aparezcan como una lista para corregir y no como
+un error a mitad de la carga.
+
+## Roles y permisos
+
+Las migraciones las aplica el CLI con el rol `postgres`. La aplicación se
+conecta con **`erp_app`**, que puede leer y escribir pero **no alterar el
+esquema**: el DDL es exclusivo de las migraciones.
+
+El rol lo crea la migración de permisos con `LOGIN` y **sin contraseña** —una
+contraseña en un archivo de migración terminaría en git—. Cada entorno le asigna
+la suya:
+
+```sql
+ALTER ROLE erp_app PASSWORD '...';
+```
+
+o, más simple, `npm run db:clave`, que la toma de `ERP_DB_PASSWORD`.
+
+Verificado: `erp_app` inserta y emite consecutivos, pero recibe *permission
+denied* en `CREATE TABLE` y `DROP TABLE`.
+
+## Lo que no se migró, a propósito
+
+| Campo de SharePoint | Por qué |
+|---|---|
+| `Requerimientos.ocsGeneradas` | Lista de ids en texto separada por comas; ya lo dice `ordenes_compra.requerimiento_id` |
+| `Remisiones.ocsAsociadas` | Números en texto para mostrar; se deriva de `remision_ordenes` con un join |
+| `@odata.etag`, `ContentType`, `Modified`, `_Compliance*`, … | Metadatos de la plataforma, no datos del negocio |
+
+Y `sesiones` se queda en SQLite: es local y no tiene por qué viajar.
