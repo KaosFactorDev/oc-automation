@@ -27,6 +27,7 @@ const ocTemplate       = require('./ocTemplate');
 const remisionTemplate = require('./remisionTemplate');
 const osTemplate       = require('./osTemplate');
 const configApp        = require('./configApp');
+const repoCatalogos    = require('./repo/catalogos');
 const localDb          = require('./db');
 const syncService      = require('./syncService');
 const auth             = require('./authService');
@@ -34,12 +35,20 @@ const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
 const geminiConfig     = require('./geminiConfig');
 
+// Misma normalización que erp.norm_nit(): quita puntos, comas, el sufijo ".0"
+// que deja Excel al leer un NIT como número, y el dígito de verificación —que
+// es un checksum de la raíz y no distingue empresas—.
+const erpNormNit = (s) => String(s || '')
+  .replace(/\.0+$/, '')
+  .replace(/[^0-9A-Za-z-]/g, '')
+  .split('-')[0];
+
 // Sobreescribe cfg.firmante con el usuario de la sesión activa.
-// La configuración de empresa (logo, emisor, IVA) sigue viniendo de SharePoint.
-function cfgConFirmante(cfg, sesion) {
+// La configuración de empresa (logo, emisor, IVA) sale de erp.configuracion.
+async function cfgConFirmante(cfg, sesion) {
   const nombre = (sesion?.nombre || '').trim();
   if (!nombre) return cfg;
-  const usuario = localDb.getUsuarioByEmail(sesion.email) || {};
+  const usuario = (await repoCatalogos.getUsuarioByEmail(sesion.email)) || {};
   const cargo = (usuario.cargo || '').trim();
   return { ...cfg, firmante: { nombre, cargo } };
 }
@@ -112,7 +121,7 @@ async function ocDesdeSharePoint(itemId) {
 // tener itemsJson completo (actualizado.fields del PATCH no lo incluye).
 async function guardarPdfOCEnSharePoint(ctx, itemId, sesion) {
   const oc  = await ocDesdeSharePoint(itemId);
-  const cfg = cfgConFirmante(await configApp.getConfig(), sesion);
+  const cfg = await cfgConFirmante(await configApp.getConfig(), sesion);
   const html   = ocTemplate.generarHTML(oc, cfg);
   const buffer = await pdfGenerator.htmlAPdf(html);
   const nombre = `${oc.numeroOC || itemId}_${oc.proyecto || 'SIN-PROYECTO'}`.replace(/[\\/:*?"<>|]/g, '-');
@@ -1115,7 +1124,7 @@ function osDesdeFields(item) {
 async function guardarPdfOSEnSharePoint(ctx, osId, sesion) {
   const item = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, osId);
   const os   = osDesdeFields(item);
-  const cfg  = cfgConFirmante(await configApp.getConfig(), sesion);
+  const cfg  = await cfgConFirmante(await configApp.getConfig(), sesion);
   const html   = osTemplate.generarHTML(os, cfg);
   const buffer = await pdfGenerator.htmlAPdf(html);
   const nombre = `${os.numeroOS || osId}_${os.proyecto || 'SIN-PROYECTO'}`.replace(/[\\/:*?"<>|]/g, '-');
@@ -1160,7 +1169,7 @@ function parsearMultipart(body, boundary) {
 // ── Rutas de datos para autocompletado ───────────────────────────────────────
 
 async function obtenerProveedores(_ctx) {
-  const rows = localDb.getProveedores();
+  const rows = await repoCatalogos.getProveedores();
   if (rows.length) return rows.map(r => ({ nit: r.nit, nombre: r.nombre, zona: r.zona }));
   // Fallback CSV si SQLite aún no se ha sincronizado
   try {
@@ -1281,7 +1290,7 @@ async function sugerirHomologacionCSV(query) {
 // Devuelve catálogo de insumos en MAYÚSCULAS, dedupe.
 async function obtenerInsumos() {
   const set = new Set();
-  const rows = localDb.getInsumos({ soloActivos: true });
+  const rows = await repoCatalogos.getInsumos({ soloActivos: true });
   for (const r of rows) if (r.nombre) set.add(r.nombre.toUpperCase());
   if (!set.size) {
     // Fallback CSV si SQLite aún no tiene datos
@@ -1296,10 +1305,12 @@ function obtenerProyectos() {
   } catch { return []; }
 }
 
-// Lee proyectos desde SQLite (sin latencia). Fallback a CSV si está vacío.
+// Lee proyectos desde Postgres. Fallback a CSV si la tabla está vacía.
 async function obtenerProyectosSP({ soloActivos = true } = {}) {
-  const rows = localDb.getProyectos({ soloActivos });
-  if (rows.length) return rows.map(r => ({ id: r.sp_id, codigo: r.nombre, nombre: r.nombre, zona: r.zona, activo: r.activo !== 0 }));
+  const rows = await repoCatalogos.getProyectos({ soloActivos });
+  // El id ya no es el de SharePoint: los 23 proyectos que el import creó para
+  // no perder referencias huérfanas no tienen sp_id y quedarían sin id.
+  if (rows.length) return rows.map(r => ({ id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo }));
   return obtenerProyectos().map(c => ({ codigo: c, nombre: c, activo: true }));
 }
 
@@ -1407,31 +1418,25 @@ const servidor = http.createServer(async (req, res) => {
       const { email, nombre } = await auth.exchangeCode(code, state, AUTH_REDIRECT_URI);
 
       // Verificar que el usuario esté registrado y activo
-      let usuario = localDb.getUsuarioByEmail(email);
+      let usuario = await repoCatalogos.getUsuarioByEmail(email);
       if (!usuario) {
         // Auto-registrar como pendiente de aprobación
         try {
-          const ctx = await ctxSharePoint();
-          if (ctx.UsuariosERP) {
-            const item = await g.addListItem(ctx.siteId, ctx.UsuariosERP, {
-              email, nombre, cargo: '', rol: 'operador', activo: false,
-            });
-            localDb.upsertUsuario({ sp_id: String(item.id), email, nombre, cargo: '', rol: 'operador', activo: false });
-          }
-        } catch {}
+          await repoCatalogos.guardarUsuario({ email, nombre, cargo: '', rol: 'operador', activo: false });
+        } catch (e) {
+          console.warn('[auth] No se pudo registrar el usuario pendiente:', e.message);
+        }
         res.writeHead(302, { 'Location': '/?auth_error=pendiente' });
         res.end();
         return;
       }
       if (!usuario.activo) {
-        // Puede que la aprobación vino de otro equipo y aún no sincronizó — forzar sync
-        await syncService.syncAll().catch(() => {});
-        usuario = localDb.getUsuarioByEmail(email);
-        if (!usuario?.activo) {
-          res.writeHead(302, { 'Location': '/?auth_error=pendiente' });
-          res.end();
-          return;
-        }
+        // Antes acá se forzaba un sync, porque la aprobación podía haberse hecho
+        // desde otro equipo y el caché local todavía no la tenía. Leyendo de
+        // Postgres esa ventana no existe: la aprobación ya está visible.
+        res.writeHead(302, { 'Location': '/?auth_error=pendiente' });
+        res.end();
+        return;
       }
 
       const sessionId = auth.createSession(email, nombre, usuario.rol);
@@ -1461,13 +1466,13 @@ const servidor = http.createServer(async (req, res) => {
 
   // ── GET /proveedores → lista completa desde SQLite ──────────────────────
   if (req.method === 'GET' && url === '/proveedores') {
-    return json(localDb.getProveedores());
+    return json(await repoCatalogos.getProveedores());
   }
 
   // ── GET /proveedores/:id ─────────────────────────────────────────────────
   const mProvId = url.match(/^\/proveedores\/([^\/]+)$/);
   if (req.method === 'GET' && mProvId) {
-    const p = localDb.getProveedores().find(x => String(x.id) === mProvId[1]);
+    const p = await repoCatalogos.getProveedorPorNit(mProvId[1]);
     return p ? json(p) : json({ error: 'Proveedor no encontrado' }, 404);
   }
 
@@ -1492,11 +1497,11 @@ const servidor = http.createServer(async (req, res) => {
           correo:      String(body.correo || '').trim().toLowerCase(),
           activo:      true,
         };
-        const ctx = await ctxSharePoint();
-        if (!ctx.Proveedores) return json({ error: 'Lista Proveedores no disponible en SharePoint.' }, 500);
-        const creado = await g.addListItem(ctx.siteId, ctx.Proveedores, campos);
-        if (creado?.id) localDb.upsertProveedor({ id: creado.id, fields: { nombre, ...campos, ...(creado.fields || {}) } });
-        return json({ ok: true, id: creado?.id });
+        // El NIT se normaliza en la base, así que "900.807.426-3" y
+        // "900807426-3" son el mismo proveedor: dar de alta uno que ya existe
+        // lo actualiza en vez de duplicarlo, que es lo que pasaba en SharePoint.
+        const creado = await repoCatalogos.guardarProveedor(campos);
+        return json({ ok: true, id: creado.id });
       } catch (err) { return json({ error: err.message }, 500); }
     });
     return;
@@ -1518,14 +1523,17 @@ const servidor = http.createServer(async (req, res) => {
         if (body.telefono != null) cambios.telefono     = String(body.telefono).trim();
         if (body.correo   != null) cambios.correo       = String(body.correo).trim().toLowerCase();
         if (body.activo   != null) cambios.activo       = !!body.activo;
-        const ctx = await ctxSharePoint();
-        if (!ctx.Proveedores) return json({ error: 'Lista Proveedores no disponible.' }, 500);
-        await g.updateListItem(ctx.siteId, ctx.Proveedores, mProvId[1], cambios);
-        const actual = localDb.getProveedores().find(x => String(x.id) === mProvId[1]) || {};
-        // incluir nombre en SQLite para que getProveedores() lo resuelva correctamente
-        const cambosSQLite = { ...cambios };
-        if (cambios.razonSocial) cambosSQLite.nombre = cambios.razonSocial;
-        localDb.upsertProveedor({ id: mProvId[1], fields: { ...actual, ...cambosSQLite } });
+
+        // mProvId[1] es el NIT, que es la clave primaria del proveedor.
+        // Cambiar el NIT en sí no se soporta acá: sería mover la fila de
+        // identidad y hay que rehacer las referencias de los documentos.
+        if (cambios.nit && erpNormNit(cambios.nit) !== erpNormNit(mProvId[1])) {
+          return json({ error: 'El NIT identifica al proveedor y no se puede cambiar desde acá.' }, 400);
+        }
+        delete cambios.nit;
+
+        const actualizado = await repoCatalogos.actualizarProveedor(mProvId[1], cambios);
+        if (!actualizado) return json({ error: 'Proveedor no encontrado' }, 404);
         return json({ ok: true });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -1743,22 +1751,17 @@ const servidor = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const ctx  = await ctxSharePoint();
         const campos = {};
         if (body.codigo       !== undefined) campos.codigo       = String(body.codigo).trim();
-        if (body.nombre       !== undefined) campos.nombre       = String(body.nombre).trim();
+        // En SharePoint "nombre" era el descriptivo, aparte del código.
+        if (body.nombre       !== undefined) campos.descripcion  = String(body.nombre).trim();
         if (body.tipo         !== undefined) campos.tipo         = String(body.tipo).trim();
         if (body.ciudad       !== undefined) campos.ciudad       = String(body.ciudad).trim();
         if (body.zona         !== undefined) campos.zona         = String(body.zona).trim();
         if (body.departamento !== undefined) campos.departamento = String(body.departamento).trim();
-        await g.updateListItem(ctx.siteId, ctx.Proyectos, mProyId[1], campos);
-        localDb.bulkUpsertProyectos([{
-          id:         mProyId[1],
-          codigo:     campos.codigo || '',
-          nombre:     campos.nombre || campos.codigo || '',
-          zona:       campos.zona   || 'Centro',
-          updated_at: new Date().toISOString(),
-        }]);
+
+        const actualizado = await repoCatalogos.actualizarProyecto(mProyId[1], campos);
+        if (!actualizado) return json({ error: 'Proyecto no encontrado' }, 404);
         return json({ ok: true });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -1774,15 +1777,15 @@ const servidor = http.createServer(async (req, res) => {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         const codigo = String(body.codigo || '').trim();
         if (!codigo) return json({ error: 'codigo requerido' }, 400);
-        const ctx = await ctxSharePoint();
-        if (!ctx.Proyectos) return json({ error: 'Lista Proyectos no existe — ejecuta provisionar-proyectos.js' }, 500);
-        const existentes = await g.getListItems(ctx.siteId, ctx.Proyectos);
-        if (existentes.some(it => String(it.fields?.codigo || '').trim().toUpperCase() === codigo.toUpperCase())) {
-          return json({ error: `Proyecto "${codigo}" ya existe` }, 400);
-        }
-        const creado = await g.addListItem(ctx.siteId, ctx.Proyectos, {
+        // El duplicado lo detecta el índice único sobre erp.norm(codigo), que
+        // además compara sin tildes ni mayúsculas. Antes había que bajar la
+        // lista completa de SharePoint y compararla en memoria.
+        const yaExiste = await repoCatalogos.getProyectoPorCodigo(codigo);
+        if (yaExiste) return json({ error: `Proyecto "${codigo}" ya existe` }, 400);
+
+        const creado = await repoCatalogos.crearProyecto({
           codigo,
-          nombre:       String(body.nombre || codigo).trim(),
+          descripcion:  String(body.nombre || codigo).trim(),
           tipo:         String(body.tipo || '').trim(),
           ciudad:       String(body.ciudad || '').trim(),
           departamento: String(body.departamento || '').trim(),
@@ -1790,16 +1793,6 @@ const servidor = http.createServer(async (req, res) => {
           activo:       true,
           notas:        String(body.notas || '').trim(),
         });
-        if (creado?.id) {
-          localDb.bulkUpsertProyectos([{
-            id:         creado.id,
-            codigo:     codigo,
-            nombre:     String(body.nombre || codigo).trim(),
-            zona:       String(body.zona || 'Centro').trim(),
-            activo:     true,
-            updated_at: new Date().toISOString(),
-          }]);
-        }
         return json({ ok: true, id: creado.id });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -1814,20 +1807,12 @@ const servidor = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const ctx = await ctxSharePoint();
-        if (!ctx.Proyectos) return json({ error: 'Lista Proyectos no existe' }, 500);
         const activo = body.activo === undefined ? null : !!body.activo;
-        const item = await g.getListItem(ctx.siteId, ctx.Proyectos, mToggle[1]);
-        const nuevo = activo === null ? !(item.fields?.activo !== false) : activo;
-        await g.updateListItem(ctx.siteId, ctx.Proyectos, mToggle[1], { activo: nuevo });
-        localDb.bulkUpsertProyectos([{
-          id:         mToggle[1],
-          codigo:     item.fields?.codigo || '',
-          nombre:     item.fields?.nombre || item.fields?.codigo || '',
-          zona:       item.fields?.zona   || 'Centro',
-          activo:     nuevo,
-          updated_at: new Date().toISOString(),
-        }]);
+        const item = await repoCatalogos.getProyecto(mToggle[1]);
+        if (!item) return json({ error: 'Proyecto no encontrado' }, 404);
+        // Sin body.activo, alterna el estado actual.
+        const nuevo = activo === null ? !item.activo : activo;
+        await repoCatalogos.actualizarProyecto(mToggle[1], { activo: nuevo });
         return json({ ok: true, activo: nuevo });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -2311,7 +2296,7 @@ const servidor = http.createServer(async (req, res) => {
     const [, reqId, fmt] = mRem;
     try {
       const rem = await remisionDesdeRequerimiento(reqId);
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       if (fmt === 'xlsx') {
         const buffer = await remisionTemplate.generarExcelBuffer(rem, cfg);
         res.writeHead(200, {
@@ -2397,7 +2382,7 @@ const servidor = http.createServer(async (req, res) => {
         alertas:              f.alertas || '',
         items,
       };
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       if (fmt === 'xlsx') {
         const buffer = await remisionTemplate.generarExcelBuffer(rem, cfg);
         res.writeHead(200, {
@@ -2650,7 +2635,7 @@ const servidor = http.createServer(async (req, res) => {
   if (req.method === 'GET' && mOcHtml) {
     try {
       const oc  = await ocDesdeSharePoint(mOcHtml[1]);
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       return html(ocTemplate.generarHTML(oc, cfg));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -2663,7 +2648,7 @@ const servidor = http.createServer(async (req, res) => {
   if (req.method === 'GET' && mOcXlsx) {
     try {
       const oc  = await ocDesdeSharePoint(mOcXlsx[1]);
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       const buffer = await ocTemplate.generarExcelBuffer(oc, cfg);
       res.writeHead(200, {
         'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -3258,30 +3243,26 @@ const servidor = http.createServer(async (req, res) => {
         const ctx = await ctxSharePoint();
         const guardadas = await agregarFilasCompras(filas, ctx);
 
-        // Upsert en lista SharePoint "Insumos" para futuras sugerencias/autocompletado
+        // Alta en el catálogo de insumos para futuras sugerencias y
+        // autocompletado. Ya no hace falta bajar el catálogo entero para
+        // comparar: guardarInsumo() resuelve el conflicto contra el índice
+        // único de nombre_norm, que además ignora tildes y mayúsculas.
         let insumosNuevos = 0;
         try {
-          if (ctx.Insumos) {
-            const existentes = await g.getListItems(ctx.siteId, ctx.Insumos);
-            const yaEnCatalogo = new Set(
-              existentes.map(it => String(it.fields?.nombre || '').trim().toUpperCase()).filter(Boolean)
-            );
-            const unicosNuevos = [...new Set(filas.map(f => f.insumo).filter(Boolean))]
-              .filter(nom => !yaEnCatalogo.has(nom));
-            for (const nom of unicosNuevos) {
-              try {
-                const filaFuente = filas.find(f => f.insumo === nom) || {};
-                await g.addListItem(ctx.siteId, ctx.Insumos, {
-                  nombre:             nom,
-                  nombreNormalizado:  nom.normalize('NFD').replace(/[̀-ͯ]/g, ''),
-                  unidadEstandar:     String(filaFuente.unidad || '').trim().toUpperCase(),
-                  activo:             true,
-                });
-                insumosNuevos++;
-              } catch (e) { console.warn(`Insumo "${nom}" no se pudo registrar:`, e.message); }
-            }
+          const antes = new Set(
+            (await repoCatalogos.getInsumos({ soloActivos: false })).map(i => i.nombreNorm));
+          for (const nom of [...new Set(filas.map(f => f.insumo).filter(Boolean))]) {
+            try {
+              const filaFuente = filas.find(f => f.insumo === nom) || {};
+              const guardado = await repoCatalogos.guardarInsumo({
+                nombre: nom,
+                unidad: String(filaFuente.unidad || '').trim().toUpperCase() || null,
+                activo: true,
+              });
+              if (!antes.has(guardado.nombreNorm)) insumosNuevos++;
+            } catch (e) { console.warn(`Insumo "${nom}" no se pudo registrar:`, e.message); }
           }
-        } catch (e) { console.warn('Upsert Insumos falló:', e.message); }
+        } catch (e) { console.warn('Alta de insumos falló:', e.message); }
 
         json({ ok: true, guardadas, insumosNuevos });
       } catch (err) {
@@ -3627,7 +3608,7 @@ FORMATO:
     req.on('end', async () => {
       try {
         const osData = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+        const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
         const htmlStr = osTemplate.generarHTML(osData, cfg);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(htmlStr);
@@ -3766,7 +3747,7 @@ FORMATO:
       if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible');
       const item = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, mOsHtml[1]);
       const os  = osDesdeFields(item);
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(osTemplate.generarHTML(os, cfg));
     } catch (err) {
@@ -3784,7 +3765,7 @@ FORMATO:
       if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible');
       const item  = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, mOsXlsx[1]);
       const os    = osDesdeFields(item);
-      const cfg   = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg   = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       const buffer = await osTemplate.generarExcelBuffer(os, cfg);
       res.writeHead(200, {
         'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -4366,7 +4347,7 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
   if (req.method === 'GET' && url === '/usuarios') {
     if (req._sesion?.rol !== 'admin') return json({ error: 'Acceso denegado' }, 403);
     syncService.syncAll().catch(() => {}); // actualiza en segundo plano para la próxima carga
-    return json(localDb.getUsuarios());
+    return json(await repoCatalogos.getUsuarios());
   }
 
   // ── PATCH /usuarios/:id → actualizar rol/activo (solo admin) ─────────────
@@ -4379,8 +4360,6 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
     req.on('end', async () => {
       try {
         const data = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const ctx = await ctxSharePoint();
-        if (!ctx.UsuariosERP) return json({ error: 'Lista UsuariosERP no disponible' }, 503);
 
         const fields = {};
         if (data.activo !== undefined) fields.activo = Boolean(data.activo);
@@ -4388,9 +4367,8 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
         if (data.nombre !== undefined) fields.nombre = String(data.nombre);
         if (data.cargo  !== undefined) fields.cargo  = String(data.cargo);
 
-        await g.updateListItem(ctx.siteId, ctx.UsuariosERP, spId, fields);
-        const existing = localDb.getUsuarios().find(u => u.sp_id === spId) || {};
-        localDb.upsertUsuario({ ...existing, sp_id: spId, ...fields });
+        const actualizado = await repoCatalogos.actualizarUsuario(spId, fields);
+        if (!actualizado) return json({ error: 'Usuario no encontrado' }, 404);
         return json({ ok: true });
       } catch (e) { return json({ error: e.message }, 500); }
     });
