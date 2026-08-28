@@ -1,4 +1,53 @@
 services:
+  # ── Base de datos ──────────────────────────────────────────────────────────
+  # Postgres autoalojado en el VPS. Reemplaza a SharePoint como fuente de verdad.
+  #
+  # Tres decisiones deliberadas:
+  #
+  #  1. NO publica puertos. La base es alcanzable solo por la red interna
+  #     "datos", desde app y mailer. Nada de "ports: 5432:5432": eso la expondría
+  #     a internet y Postgres con contraseña es lo único que la separaría de
+  #     cualquiera que escanee el VPS. Para conectarse desde afuera, un túnel SSH
+  #     (ver la sección de respaldos y acceso en el README).
+  #
+  #  2. Los datos viven en un volumen con nombre (pgdata), NO en ./data. El
+  #     workflow de deploy hace rsync sobre ./data, y aunque esa llamada no
+  #     lleva --delete, la base de datos no debe estar donde un proceso de
+  #     despliegue pueda escribir.
+  #
+  #  3. No está en la red "edge". El proxy inverso no tiene por qué verla.
+  db:
+    image: postgres:17-alpine
+    container_name: oc-automation-db
+    environment:
+      - TZ=America/Bogota
+      - POSTGRES_DB=${POSTGRES_DB:-erp}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatoria en .env}
+      # La imagen alpine inicializa en locale C. C.UTF-8 conserva el orden por
+      # bytes pero maneja UTF-8 correctamente, que es lo que necesitan los
+      # nombres con tilde y ñ. El ordenamiento alfabético español (donde "Ñ" va
+      # entre "N" y "O") necesitaría una colación ICU; ver el README.
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=C.UTF-8
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - datos
+    # El default de 64 MB es escaso para ordenamientos y VACUUM.
+    shm_size: 256mb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-erp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   app:
     build: .
     image: oc-automation:latest
@@ -12,6 +61,12 @@ services:
       - "3001"
     networks:
       - edge
+      - datos
+    # Sin esto, la app arranca antes de que Postgres acepte conexiones y el
+    # primer ciclo de lecturas falla en cada reinicio del VPS.
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:3001/"]
@@ -34,6 +89,15 @@ services:
     volumes:
       - ./data:/app/data
       - ./deploy/crontab:/app/deploy/crontab:ro
+    networks:
+      # "edge" acá NO es para que el proxy lo enrute — mailer no expone nada.
+      # Es por la salida a internet: la red "datos" es internal y sin esto
+      # index.js no podría alcanzar Microsoft Graph ni la API de Gemini.
+      - edge
+      - datos
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
     logging:
       driver: json-file
@@ -44,3 +108,14 @@ services:
 networks:
   edge:
     external: true
+  # Red interna: sin salida a internet y sin puertos publicados. Solo la
+  # comparten app, mailer y db.
+  datos:
+    driver: bridge
+    internal: true
+
+volumes:
+  # Volumen con nombre gestionado por Docker. Sobrevive a "docker compose down"
+  # y a cualquier deploy; solo se borra con "docker compose down -v".
+  pgdata:
+    name: oc-automation-pgdata
