@@ -16,6 +16,8 @@
 
 require('dotenv').config();
 
+const { PUERTO_POR_DEFECTO, BASE_POR_DEFECTO } = require('../pg');
+
 const v = (nombre, def = '') => (process.env[nombre] || def).toString().trim();
 
 /** Configuración discreta para el driver `pg`. No requiere codificar nada. */
@@ -31,8 +33,8 @@ function configAdmin() {
 
   return {
     host:     v('PGHOST', 'localhost'),
-    port:     Number(v('PGPORT', '55432')),
-    database: v('POSTGRES_DB', 'erp'),
+    port:     Number(v('PGPORT', PUERTO_POR_DEFECTO)),
+    database: v('POSTGRES_DB', BASE_POR_DEFECTO),
     user:     v('PGUSER', 'postgres'),
     password: clave,
     // Contra localhost o el servicio "db" del compose, el tráfico no sale del

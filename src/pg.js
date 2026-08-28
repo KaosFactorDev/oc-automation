@@ -34,8 +34,22 @@ const { Pool } = require('pg');
 require('dotenv').config();
 
 let _pool = null;
+let _destino = "";
 
 const v = (nombre, def = '') => (process.env[nombre] || def).toString().trim();
+
+/**
+ * Valores por defecto de la conexión, compartidos con src/scripts/db-admin.js
+ * (el que arma las credenciales de migración). Tienen que vivir en un solo
+ * lugar: si los dos módulos usan puertos distintos, las migraciones y la
+ * aplicación terminan en bases diferentes y nada lo avisa.
+ *
+ * 55432 y no 5432 porque es lo que publica docker-compose.dev.yml, elegido
+ * para no chocar con un Postgres instalado en Windows. En el VPS la app usa
+ * ERP_DB_HOST=db y ERP_DB_PORT=5432, que ganan sobre esto.
+ */
+const PUERTO_POR_DEFECTO = '55432';
+const BASE_POR_DEFECTO   = 'erp';
 
 function habilitado() {
   return !!(v('DATABASE_URL') || (v('ERP_DB_HOST') && v('ERP_DB_USER')));
@@ -83,16 +97,16 @@ function configuracion() {
     return { connectionString: url, _host: host };
   }
 
-  const host = v('ERP_DB_HOST', 'localhost');
-  const user = v('ERP_DB_USER');
+  // El host, el puerto y la base son los mismos para el rol de la aplicación y
+  // para el de migraciones: lo único que cambia entre los dos son las
+  // credenciales. Por eso ERP_DB_HOST/PORT/NAME solo hacen falta cuando
+  // difieren de los de administración — que es el caso en el VPS, donde la app
+  // ve la base como "db" en la red del compose y las migraciones corren desde
+  // el host contra localhost.
+  const host = v('ERP_DB_HOST') || v('PGHOST', 'localhost');
+  const user = v('ERP_DB_USER', 'erp_app');
   const password = process.env.ERP_DB_PASSWORD || '';
 
-  if (!user) {
-    throw new Error(
-      'Falta la configuración de Postgres en .env: define ERP_DB_USER, ' +
-      'ERP_DB_PASSWORD, ERP_DB_HOST, ERP_DB_PORT y ERP_DB_NAME (o DATABASE_URL).'
-    );
-  }
   if (!password) {
     throw new Error(
       `Falta ERP_DB_PASSWORD en .env. El rol ${user} se crea sin contraseña en la ` +
@@ -102,8 +116,11 @@ function configuracion() {
 
   return {
     host,
-    port: Number(v('ERP_DB_PORT', '5432')),
-    database: v('ERP_DB_NAME', 'erp'),
+    // PUERTO_POR_DEFECTO tiene que ser el mismo que usa db-admin.js. Cuando no
+    // lo era, con un .env que no define PGPORT las migraciones iban a un puerto
+    // y la aplicación a otro: dos bases distintas sin que nada lo dijera.
+    port: Number(v('ERP_DB_PORT') || v('PGPORT') || PUERTO_POR_DEFECTO),
+    database: v('ERP_DB_NAME') || v('POSTGRES_DB', BASE_POR_DEFECTO),
     user,
     password,
     _host: host,
@@ -141,24 +158,43 @@ function pool() {
     console.warn('[pg] Error en cliente idle del pool:', err.message);
   });
 
+  _destino = conexion.connectionString
+    ? '(DATABASE_URL)'
+    : `${conexion.user}@${conexion.host}:${conexion.port}/${conexion.database}`;
+
   return _pool;
+}
+
+/**
+ * Un fallo de conexión sin decir contra qué se intentó obliga a adivinar entre
+ * host, puerto, base y usuario — y un puerto equivocado da exactamente el mismo
+ * "password authentication failed" que una contraseña equivocada. Acá se le
+ * agrega el destino al error.
+ *
+ * Va en los helpers y no envolviendo pool.connect: pg llama a connect() con
+ * callback internamente, así que ahí no siempre hay una promesa que encadenar.
+ */
+function conDestino(err) {
+  if (_destino && !err.message.includes(' — conectando a ')) {
+    err.message = `${err.message} — conectando a ${_destino}`;
+  }
+  return err;
 }
 
 /** Consulta suelta, sin transacción. */
 async function query(sql, params = []) {
-  return pool().query(sql, params);
+  try { return await pool().query(sql, params); }
+  catch (err) { throw conDestino(err); }
 }
 
 /** Igual que query() pero devuelve solo las filas. */
 async function rows(sql, params = []) {
-  const r = await pool().query(sql, params);
-  return r.rows;
+  return (await query(sql, params)).rows;
 }
 
 /** Igual que query() pero devuelve la primera fila o null. */
 async function one(sql, params = []) {
-  const r = await pool().query(sql, params);
-  return r.rows[0] || null;
+  return (await query(sql, params)).rows[0] || null;
 }
 
 /**
@@ -173,7 +209,10 @@ async function one(sql, params = []) {
  *   });
  */
 async function tx(fn) {
-  const client = await pool().connect();
+  let client;
+  try { client = await pool().connect(); }
+  catch (err) { throw conDestino(err); }
+
   try {
     await client.query('BEGIN');
     const resultado = await fn(client);
@@ -194,4 +233,8 @@ async function cerrar() {
   }
 }
 
-module.exports = { habilitado, pool, query, rows, one, tx, cerrar };
+module.exports = {
+  habilitado, pool, query, rows, one, tx, cerrar,
+  // Compartidos con src/scripts/db-admin.js para que no existan dos defaults.
+  PUERTO_POR_DEFECTO, BASE_POR_DEFECTO,
+};
