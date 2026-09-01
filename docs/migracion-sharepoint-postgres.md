@@ -52,16 +52,52 @@ Del CLI de Supabase se conserva **solo el motor de migraciones**: funciona
 contra cualquier Postgres con `--db-url`, mantiene su tabla de rastreo y evita
 escribir un runner propio. Queda fijado como `devDependency`.
 
-### El caché SQLite deja de tener sentido
+### El caché SQLite se eliminó
 
-Esto es consecuencia de autoalojar. `db.js` y `syncService.js` son 893 líneas
-que existen para esquivar la latencia de SharePoint. Con Postgres en el mismo
-host —localhost en desarrollo, la red interna de Docker en el VPS— una consulta
-tarda menos de un milisegundo.
+Consecuencia de autoalojar. `db.js` y `syncService.js` eran 893 líneas que
+existían para esquivar la latencia de SharePoint. Con Postgres en el mismo host
+—localhost en desarrollo, la red interna de Docker en el VPS— una consulta tarda
+menos de un milisegundo.
 
-Cuando la aplicación pase a Postgres, esos dos archivos se borran, y con ellos
-el sync cada 2 minutos, la ventana en que el caché queda viejo, y el
-`syncAll()` que `contador.js` tiene que llamar antes de leer el consecutivo.
+**Hecho.** `syncService.js` se borró completo y `db.js` pasó de 737 líneas y 43
+funciones a 124 y 6: solo queda lo que tiene sentido guardar en la máquina, que
+son las sesiones y el mapeo de proyectos hacia tesorería.
+
+Lo que decidió borrarlo en vez de dejarlo «por seguridad» fueron las cifras: el
+sync bajaba ~10.500 filas cada 2 minutos —32 segundos por ciclo— hacia diez
+tablas con **cero lectores**. Código que se ejecuta no es una red de seguridad,
+es un segundo sistema: los nombres de `db.js` seguían funcionando, así que
+escribir `localDb.getOrdenesCompra()` por costumbre habría devuelto datos viejos
+sin ningún error.
+
+Peores eran las cuatro `asegurarLista*()`, que no estaban inertes: **creaban
+listas y columnas en SharePoint en cada arranque del servidor**, en el sistema
+del que estamos saliendo.
+
+Con ellos se fueron el sync cada 2 minutos, la ventana en que el caché quedaba
+viejo, las rutas `/sync` y `/sync/estado`, y el `syncAll()` que `contador.js`
+llamaba antes de leer el consecutivo. El arranque del servidor quedó en tres
+líneas de log.
+
+La red de seguridad real es otra: las listas de SharePoint con sus datos
+intactos, los `pg_dump` diarios, y el historial de git — borrar código no es
+perderlo.
+
+### Qué scripts se retiraron y cuáles no
+
+Se borraron los que solo servían para **crear o poblar estructuras en
+SharePoint**: `crear-listas`, `esquemas`, `migrarCSV`, `migrarOC`,
+`migrar-proveedores`, `provisionar-proyectos`, `cargar-insumos`, `init-sqlite`
+y `limpiar-ocs-prueba`. Migrar de vuelta no es un escenario real, así que
+conservarlos para invocación manual no aportaba nada.
+
+Los tres `backfill-pdf-*` **no eran de esa categoría** y se migraron en vez de
+borrarse: generan el PDF de respaldo de documentos que quedaron sin uno, y los
+PDF se quedan en SharePoint por la decisión de alcance. Ahora leen de Postgres.
+
+Quedan dos pendientes de decisión: `crear-control-costos.js`, que se va con la
+etapa 1 de abajo, y `wipe-datos-prueba.js`, que aún apunta a SharePoint y habría
+que repuntar si se quiere conservar como herramienta.
 
 ### Sin doble escritura: corte directo
 
@@ -151,7 +187,7 @@ consolida sus 69 órdenes, y los conteos de documentos no cambian.
 
 `lfelizzola@civiltechic.com` tenía ocho filas en `UsuariosERP`, con rol y estado
 distintos entre ellas. La regla correcta es que gana **la más reciente**, igual
-que hace `bulkUpsertUsuarios()` en `db.js`. La regla contraria concedía permisos
+que hacía `bulkUpsertUsuarios()` en el caché. La regla contraria concedía permisos
 que el registro vigente no da.
 
 Queda un caso sin resolver que necesita decisión humana:
@@ -247,16 +283,19 @@ sobre las variables ya migradas.
 Vale tenerlo presente en lo que falta: el síntoma no es un crash, es un dato que
 desaparece.
 
-### Lo que falta de esta capa
+### Un bug que salió al migrar el historial de precios
 
-Cuatro operaciones de datos, ninguna un agregado completo: el alta en
-`HistorialPrecios` al confirmar una cotización, la lectura del catálogo
-`Insumos` para una sugerencia por IA, una lectura de `Proyectos`, y el alta del
-admin inicial en `UsuariosERP`.
+El caché ordenaba el historial por una columna de **texto**, así que
+"septiembre 9, 2025" quedaba antes que "agosto 28, 2026" — alfabéticamente, no
+cronológicamente. `consultaProveedor.js` toma las 3 compras más recientes para
+sugerir proveedor y precio, así que llevaba tiempo eligiendo las equivocadas.
+Ordenar por una columna `date` lo arregla.
 
-Y las cuatro funciones `asegurarLista*()` con sus ~21 llamadas a Graph, que
-crean listas y columnas en SharePoint: quedan como código muerto en cuanto nada
-lea esas listas.
+### Esta capa está cerrada
+
+Cero operaciones de datos por Graph. Fuera de `graphStorage.js` no queda un solo
+`addListItem`, `updateListItem`, `getListItem` ni `getListItems` en la
+aplicación, y ninguna lectura de documentos o catálogos sale del caché.
 
 ## Qué falta
 

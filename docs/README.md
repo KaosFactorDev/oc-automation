@@ -10,7 +10,8 @@ Postgres autoalojada. Empieza por acá.
 | Postgres corriendo en Docker (local) | **Hecho** |
 | Esquema `erp` (11 listas de SharePoint) | **Hecho** — 18 tablas, 10 funciones, 78 índices |
 | Carga inicial de datos | **Hecho** — 12.584 filas |
-| Capa de repositorio en la aplicación | **Casi** — quedan 4 operaciones de datos |
+| Capa de repositorio en la aplicación | **Hecho** — 0 operaciones de datos por Graph |
+| Caché SQLite retirado | **Hecho** — `db.js` de 737 a 124 líneas |
 | Control de Costos: de libro Excel a vista SQL | Pendiente |
 | Retirar los CSV | Pendiente |
 | Postgres en el VPS y corte | Pendiente |
@@ -30,24 +31,15 @@ HTTP contra las rutas reales:
 | `/inventario/stock` | 528 |
 | `/inventario/movimientos` | 1.533 |
 | `/proveedores` | 424 |
+| `/inventario/documentos` | 268 |
 
 ### Lo que todavía va a SharePoint
 
-**Cuatro operaciones de datos**, ninguna un agregado completo:
+Solo **`controlCostos.js`**, que escribe en el libro de Excel. Eso es la etapa
+siguiente.
 
-| Dónde | Qué |
-|---|---|
-| `servidor-cotizaciones.js:800` | Alta en `HistorialPrecios` al confirmar una cotización |
-| `servidor-cotizaciones.js:1765` | Lee el catálogo `Insumos` completo para una sugerencia por IA |
-| `servidor-cotizaciones.js:1797` | Lee un item de `Proyectos` |
-| `servidor-cotizaciones.js:680` | Alta del admin inicial en `UsuariosERP` |
-
-Más **`controlCostos.js`**, que escribe en el libro de Excel — eso es la etapa
-siguiente, no un pendiente de esta.
-
-Y las cuatro funciones `asegurarLista*()` con sus ~21 llamadas a Graph, que
-crean listas y columnas en SharePoint: quedan como código muerto en cuanto nada
-lea esas listas.
+Fuera de `graphStorage.js` no queda ni un `addListItem`, `updateListItem`,
+`getListItem` ni `getListItems` en la aplicación.
 
 ### Lo que se queda en SharePoint a propósito
 

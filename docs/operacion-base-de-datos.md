@@ -190,8 +190,9 @@ Un número de documento repetido. `npm run revisar-listas` dice cuáles, y
 
 Pasaba cuando `revisar-listas` leía del caché SQLite y el import leía de
 SharePoint: el caché tenía 276 órdenes de compra cuando SharePoint ya tenía 282.
-Ya no ocurre — el chequeo lee de SharePoint por defecto. Si usas `--cache`,
-recuerda que es un atajo, no la corrida real.
+Ya no ocurre por dos razones: el chequeo lee de SharePoint por defecto, y el
+caché se eliminó. La bandera `--cache` quedó como atajo histórico y ya no tiene
+datos que leer.
 
 ### `supabase start` se queda bajando imágenes
 

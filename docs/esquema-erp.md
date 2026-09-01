@@ -38,7 +38,7 @@ Las tablas de ítems no existían: salen de descomponer la columna `itemsJson`.
 
 ### Los ítems dejan de ser JSON
 
-En SharePoint —y en el caché SQLite— los ítems de cada documento vivían dentro
+En SharePoint —y en el caché SQLite que ya se eliminó— los ítems de cada documento vivían dentro
 de un string `itemsJson`. Ahora son tablas hijas. Eso es lo que permite:
 
 - sumar por insumo, proveedor o proyecto sin leer todos los documentos;
@@ -107,7 +107,7 @@ dato crudo sigue ahí. En la carga actual se interpretaron las 5.496.
 Dos funciones `IMMUTABLE`, para poder usarlas en índices:
 
 - **`erp.norm(text)`** — mayúsculas, sin tildes, sin puntuación, espacios
-  colapsados. Réplica de `norm()` en `db.js`. Da la unicidad de proyectos por
+  colapsados. Da la unicidad de proyectos por
   código e insumos por nombre.
 - **`erp.norm_nit(text)`** — quita puntos, comas, espacios, el sufijo `.0` que
   deja Excel al leer un número como flotante, y el **dígito de verificación**.
