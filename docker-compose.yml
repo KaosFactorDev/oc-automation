@@ -29,6 +29,12 @@ services:
       # nombres con tilde y ñ. El ordenamiento alfabético español (donde "Ñ" va
       # entre "N" y "O") necesitaría una colación ICU; ver el README.
       - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=C.UTF-8
+    # Atado a 127.0.0.1: no queda escuchando en la interfaz pública, pero el
+    # host sí lo alcanza. Hace falta para migrar, importar, verificar y respaldar
+    # desde el VPS. Antes la red era internal:true y eso, comprobado, bloquea
+    # también los puertos publicados: ninguna de esas operaciones podía correr.
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -108,11 +114,22 @@ services:
 networks:
   edge:
     external: true
-  # Red interna: sin salida a internet y sin puertos publicados. Solo la
-  # comparten app, mailer y db.
+  # Red propia de los datos: solo la comparten app, mailer y db, así que nada
+  # más en el host puede resolver "db".
+  #
+  # NO es internal:true. Lo fue, y la aislamiento se pagaba caro: internal
+  # bloquea los puertos publicados —probado— así que el host no alcanzaba la
+  # base y no se podía migrar, importar ni respaldar desde el VPS. La CLI de
+  # Supabase tampoco está en la imagen de producción (npm ci --omit=dev), así
+  # que hacerlo desde dentro del contenedor no era opción.
+  #
+  # Lo que protegía era la salida a internet DEL contenedor de Postgres, que en
+  # operación normal no inicia conexiones. Lo que costaba era toda la operación
+  # diaria. El nombre explícito permite que el compose de solo-base use la misma
+  # red y el traspaso no recree nada.
   datos:
+    name: oc-automation-datos
     driver: bridge
-    internal: true
 
 volumes:
   # Volumen con nombre gestionado por Docker. Sobrevive a "docker compose down"
