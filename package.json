@@ -18,7 +18,8 @@
     "db:clave": "node src/scripts/db-clave-app.js",
     "db:esperar": "node src/scripts/db-esperar.js",
     "db:importar": "node src/scripts/importar-listas.js",
-    "corregir-listas": "node src/scripts/corregir-listas.js"
+    "corregir-listas": "node src/scripts/corregir-listas.js",
+    "db:verificar": "node src/scripts/verificar-migracion.js"
   },
   "keywords": [],
   "author": "",

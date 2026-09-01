@@ -12,6 +12,7 @@ Comandos, respaldos y los problemas con los que ya nos tropezamos.
 | `npm run db:clave` | Asigna a `erp_app` la contraseña de `ERP_DB_PASSWORD` |
 | `npm run db:reset` | Borra el volumen y rehace todo: levanta, espera, migra, asigna contraseña. **Borra los datos** |
 | `npm run db:psql` | Abre `psql` contra la base local |
+| `npm run db:verificar` | Compara SharePoint contra Postgres: ¿están todos los datos? |
 | `npm run revisar-listas` | Chequeo previo: qué rechazaría el esquema |
 | `npm run corregir-listas` | Corrige en SharePoint lo que se puede corregir solo |
 | `npm run db:importar` | Carga las 11 listas en Postgres |
@@ -117,6 +118,67 @@ Probado: restaurar en una base nueva da un resultado idéntico —18 tablas, 9
 funciones, 78 índices, las 6 migraciones registradas— con las funciones
 operando.
 
+## Probar antes de desplegar
+
+La pregunta «están todos los datos» no se responde mirando la consola: 282
+órdenes en pantalla no dicen si SharePoint tiene 286.
+
+```bash
+npm run db:verificar                  # SharePoint vs Postgres
+npm run db:verificar -- --detalle     # cada diferencia, no solo el conteo
+```
+
+Compara cuatro cosas, y no todas prueban lo mismo:
+
+| Comprueba | Por qué |
+|---|---|
+| **Identidades** (`sp_id`) | Un conteo que cuadra no prueba nada si una fila se perdió y otra se duplicó |
+| **Conteos** | Resumen rápido, nada más |
+| **Dinero** | Los totales de OC y OS, donde una diferencia se nota |
+| **Coherencia interna** | Números duplicados, ítems que no suman la cabecera, documentos sin proyecto, contadores por debajo del máximo emitido |
+
+Dos detalles que evitan falsos positivos:
+
+- **Proveedores y usuarios colapsan a propósito.** La migración fusionó 14
+  proveedores duplicados y varias filas por persona, así que esos `sp_id`
+  desaparecieron. Comparar por `sp_id` daría un falso negativo; se comparan por
+  su llave natural —NIT y correo—, que es la pregunta correcta: no «¿está esta
+  fila?» sino «¿está este proveedor?».
+- **Una fila nueva no es una fila perdida.** SharePoint asigna el id de forma
+  creciente. Si todo lo que falta tiene un `sp_id` por encima del último
+  importado, se creó después; un hueco *dentro* del rango ya importado es otra
+  cosa y el script lo distingue.
+
+### Lo que el verificador NO prueba
+
+Que las escrituras funcionen. Las lecturas están cubiertas; para las escrituras
+hay que usar la consola, y ahí conviene saber qué toca producción:
+
+| Acción en local | Efecto |
+|---|---|
+| Crear o editar un requerimiento, una OC, una OS | Solo Postgres local. Seguro |
+| **Aprobar** una OC u OS | Solo Postgres local: emite el consecutivo, registra el precio en el historial y recalcula el estado del requerimiento |
+| Registrar movimientos de inventario | Solo Postgres local. Seguro |
+| **Generar el PDF** | Lo **sube al Drive real** de SharePoint |
+| **Exportar Control de Costos** | **Sobrescribe el libro real** en SharePoint |
+| **Enviar a tesorería** | Escribe en el Supabase de **producción** |
+| El botón de revisar el buzón | Lee el buzón real y **responde correos** |
+
+Las cuatro últimas no son parte de la migración —ya funcionaban así—, pero
+conviene no dispararlas por accidente mientras se prueba. El mailer es un proceso
+aparte (`npm run correos`), así que `npm run dev` no toca correos.
+
+### El ciclo cuando el verificador marca diferencias
+
+```bash
+npm run revisar-listas            # ¿hay algo que el esquema rechace?
+npm run corregir-listas           # en seco; -- --aplicar para escribir
+npm run db:importar               # trae lo nuevo, actualiza lo existente
+npm run db:verificar              # debe quedar en cero
+```
+
+El import es idempotente: correrlo dos veces no duplica nada.
+
 ## El corte en el VPS
 
 Pendiente. Es la última etapa de la migración. La base **no publica puertos** y
@@ -179,16 +241,7 @@ npm run revisar-listas           # confirmar que quedó limpio
 npm run db:importar
 
 # ── 6. Verificar contra el origen ──────────────────────────────────────────
-#   Los conteos y el total en pesos deben coincidir con SharePoint.
-docker exec oc-automation-db psql -U postgres -d erp -c "
-  SELECT 'ordenes_compra' t, count(*) FROM erp.ordenes_compra
-  UNION ALL SELECT 'ordenes_servicio', count(*) FROM erp.ordenes_servicio
-  UNION ALL SELECT 'requerimientos',   count(*) FROM erp.requerimientos
-  UNION ALL SELECT 'remisiones',       count(*) FROM erp.remisiones
-  UNION ALL SELECT 'proveedores',      count(*) FROM erp.proveedores
-  UNION ALL SELECT 'movimientos',      count(*) FROM erp.movimientos_inventario;
-  SELECT count(*) docs, sum(valor_total) FROM erp.vw_gastos;
-  SELECT * FROM erp.vw_numeros_duplicados;"          -- debe salir vacía
+npm run db:verificar             # debe terminar en cero diferencias
 
 # ── 7. Sincronizar los contadores ──────────────────────────────────────────
 docker exec oc-automation-db psql -U postgres -d erp   -c "SELECT * FROM erp.sincronizar_contadores();"
