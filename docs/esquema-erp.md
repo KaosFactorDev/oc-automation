@@ -9,7 +9,7 @@ mezclarse.
 
 ## Inventario
 
-18 tablas, 10 funciones, 78 índices.
+18 tablas, 5 vistas, 10 funciones, 78 índices.
 
 | Tabla | Col. | Filas hoy | Lista de SharePoint |
 |---|---:|---:|---|
@@ -191,6 +191,40 @@ habría hecho que los siguientes requerimientos repitieran números ya emitidos.
 
 La vista `erp.vw_numeros_duplicados` lista números repetidos. Con los índices
 únicos puestos debería estar siempre vacía.
+
+## Vistas de gasto
+
+`Control Costos.xlsx` era una tabla de Excel con una fila por documento aprobado
+y búsqueda lineal por número de OC. Los gastos no son un dato aparte —son los
+documentos aprobados vistos por otro lado— así que se derivan.
+
+**`erp.vw_gastos`** unifica tres orígenes en una sola forma de fila:
+
+| `origen` | De dónde sale |
+|---|---|
+| `orden_compra` | `ordenes_compra` en estado aprobado |
+| `orden_servicio` | `ordenes_servicio` en estado aprobado |
+| `salida_almacen` | `movimientos_inventario` de salida, agrupados por `documento_ref` |
+
+Columnas: `origen`, `origen_id`, `numero`, `fecha_documento`, `proyecto`,
+`proveedor_nit`, `proveedor_nombre`, `tipo_gasto`, `subtotal`, `iva`, `total`,
+`estado`, `fecha_aprobacion`, `fecha_pago`, `fecha_entrega`, `creado_por`.
+
+Las salidas de almacén se agrupan porque un documento de almacén es un lote de
+movimientos: una fila por insumo despachado, un solo gasto. Sin el `GROUP BY`
+cada insumo contaría como un gasto propio y el total se inflaría.
+
+Encima hay tres resúmenes, que antes eran hojas del libro calculadas a mano:
+
+| Vista | Agrupa por |
+|---|---|
+| `erp.vw_gastos_por_proyecto` | proyecto |
+| `erp.vw_gastos_por_proveedor` | NIT del proveedor |
+| `erp.vw_gastos_por_tipo` | tipo de gasto |
+
+Como son vistas y no tablas, no hay nada que sincronizar: el número que se lee
+es el que sale de los documentos en ese momento. `controlCostos.js` reconstruye
+el libro completo desde acá y lo sube a SharePoint como entregable.
 
 ## Reglas que la base hace cumplir
 

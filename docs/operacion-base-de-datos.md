@@ -21,7 +21,6 @@ Banderas útiles:
 ```bash
 npm run db:push -- --dry-run           # ver qué migraría, sin aplicar
 npm run revisar-listas -- --detalle    # todas las filas de cada hallazgo
-npm run revisar-listas -- --cache      # leer del SQLite (rápido, puede estar viejo)
 npm run corregir-listas -- --aplicar   # sin esto, solo muestra el plan
 npm run db:importar -- --dry-run       # import completo que revierte al final
 npm run db:importar -- --truncate      # vaciar antes de cargar
@@ -118,30 +117,107 @@ Probado: restaurar en una base nueva da un resultado idéntico —18 tablas, 9
 funciones, 78 índices, las 6 migraciones registradas— con las funciones
 operando.
 
-## Levantar en el VPS
+## El corte en el VPS
 
-Pendiente. El servicio `db` ya está en `docker-compose.yml`.
-
-```bash
-# 1. POSTGRES_PASSWORD y ERP_DB_* en el .env del VPS (ERP_DB_HOST=db, ERP_DB_PORT=5432)
-docker compose up -d db
-
-# 2. crear el rol y darle contraseña
-docker exec -it oc-automation-db psql -U postgres -d erp
-#   (la migración crea erp_app sin contraseña; db:clave se la asigna)
-
-# 3. migrar e importar — MIGRATION_DB_URL con localhost:5432 desde el host
-npm run db:push
-npm run db:importar
-
-# 4. dejar el respaldo en el cron
-```
-
-La base **no publica puertos**. Para llegar desde afuera, túnel SSH:
+Pendiente. Es la última etapa de la migración. La base **no publica puertos** y
+vive en la red interna de Docker, así que solo la alcanzan la app y el mailer;
+para llegar desde tu equipo, túnel SSH:
 
 ```bash
 ssh -L 55432:localhost:5432 usuario@vps
 ```
+
+### El orden importa
+
+**Importar primero, desplegar después.** La versión desplegada hoy lee de
+SharePoint; la nueva lee de Postgres. Si se despliega antes de importar, la
+aplicación arranca contra una base vacía y la gente ve un ERP sin datos. Al
+revés no pasa nada: una base ya cargada esperando el despliegue es inofensiva.
+
+Conviene hacerlo fuera de horario laboral y no un viernes.
+
+### Antes de empezar
+
+```bash
+# 1. Confirmar que nadie está aprobando documentos en este momento.
+#    Un documento aprobado entre el import y el despliegue se pierde:
+#    queda en SharePoint, que ya nadie va a leer.
+```
+
+No hace falta respaldar SharePoint: el import solo lee, las listas quedan
+intactas y son el respaldo del corte.
+
+Ese último punto es la parte delicada del corte, y no la resuelve ningún script:
+hay que avisar al equipo y verificar que la consola esté quieta.
+
+### El procedimiento
+
+```bash
+# ── 1. Variables en el .env del VPS ────────────────────────────────────────
+#   POSTGRES_PASSWORD=...        (solo letras y dígitos; ver .env.example)
+#   ERP_DB_HOST=db               (nombre del servicio, no localhost)
+#   ERP_DB_PORT=5432             (el puerto interno, no 55432)
+#   ERP_DB_NAME=erp
+#   ERP_DB_USER=erp_app
+#   ERP_DB_PASSWORD=...
+#   MIGRATION_DB_URL=postgresql://postgres:CLAVE@localhost:5432/erp?sslmode=disable
+
+# ── 2. Levantar solo la base ───────────────────────────────────────────────
+docker compose up -d db
+npm run db:esperar
+
+# ── 3. Migrar el esquema ───────────────────────────────────────────────────
+npm run db:push
+npm run db:clave                 # asigna la contraseña al rol erp_app
+
+# ── 4. Revisar los datos de SharePoint ANTES de importar ───────────────────
+npm run revisar-listas           # solo informa, no cambia nada
+npm run corregir-listas          # en seco; -- --aplicar para escribir
+npm run revisar-listas           # confirmar que quedó limpio
+
+# ── 5. Importar ────────────────────────────────────────────────────────────
+npm run db:importar
+
+# ── 6. Verificar contra el origen ──────────────────────────────────────────
+#   Los conteos y el total en pesos deben coincidir con SharePoint.
+docker exec oc-automation-db psql -U postgres -d erp -c "
+  SELECT 'ordenes_compra' t, count(*) FROM erp.ordenes_compra
+  UNION ALL SELECT 'ordenes_servicio', count(*) FROM erp.ordenes_servicio
+  UNION ALL SELECT 'requerimientos',   count(*) FROM erp.requerimientos
+  UNION ALL SELECT 'remisiones',       count(*) FROM erp.remisiones
+  UNION ALL SELECT 'proveedores',      count(*) FROM erp.proveedores
+  UNION ALL SELECT 'movimientos',      count(*) FROM erp.movimientos_inventario;
+  SELECT count(*) docs, sum(valor_total) FROM erp.vw_gastos;
+  SELECT * FROM erp.vw_numeros_duplicados;"          -- debe salir vacía
+
+# ── 7. Sincronizar los contadores ──────────────────────────────────────────
+docker exec oc-automation-db psql -U postgres -d erp   -c "SELECT * FROM erp.sincronizar_contadores();"
+#   Sin esto, la primera OC nueva puede reusar un número existente.
+
+# ── 8. Ahora sí, desplegar ─────────────────────────────────────────────────
+#   Merge a main. Verificar en la consola: /ordenes, /requerimientos,
+#   /gastos e /inventario/stock deben mostrar los mismos totales del paso 6.
+
+# ── 9. Dejar el respaldo en el cron del host ───────────────────────────────
+crontab -e     # ver la sección "Respaldos"
+```
+
+### Si algo sale mal
+
+El plan de reversa es corto porque SharePoint queda intacto: el import solo
+**lee** de las listas. Revertir el despliegue a la versión anterior devuelve un
+ERP que funciona, leyendo de SharePoint como hasta ahora.
+
+Eso deja de ser cierto en cuanto alguien apruebe un documento contra Postgres:
+desde ahí, revertir pierde ese documento. Conviene confirmar que la consola
+responde bien antes de que el equipo empiece a trabajar, y no al revés.
+
+### Después del corte
+
+Las listas de SharePoint quedan de solo lectura de hecho —nada las escribe—,
+pero siguen ahí. Vale dejarlas unas semanas como red de seguridad antes de
+archivarlas, y no borrarlas: el `sp_id` de cada fila apunta a ellas y es el
+único rastro del origen de los datos.
 
 ## Problemas conocidos
 

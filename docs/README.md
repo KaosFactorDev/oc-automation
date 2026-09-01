@@ -8,19 +8,25 @@ Postgres autoalojada. Empieza por acá.
 | Etapa | Estado |
 |---|---|
 | Postgres corriendo en Docker (local) | **Hecho** |
-| Esquema `erp` (11 listas de SharePoint) | **Hecho** — 18 tablas, 10 funciones, 78 índices |
-| Carga inicial de datos | **Hecho** — 12.584 filas |
+| Esquema `erp` (11 listas de SharePoint) | **Hecho** — 18 tablas, 5 vistas, 10 funciones |
+| Carga inicial de datos | **Hecho** — 12.587 filas |
 | Capa de repositorio en la aplicación | **Hecho** — 0 operaciones de datos por Graph |
 | Caché SQLite retirado | **Hecho** — `db.js` de 737 a 124 líneas |
-| Control de Costos: de libro Excel a vista SQL | Pendiente |
-| Retirar los CSV | Pendiente |
-| Postgres en el VPS y corte | Pendiente |
+| Control de Costos: de libro Excel a vista SQL | **Hecho** — `erp.vw_gastos` + 3 resúmenes |
+| Retirar los CSV | **Hecho** — archivados en `data/_archivo-csv-2026/` |
+| Postgres en el VPS y corte | **Pendiente** — la única que falta |
 
-### Lo que la aplicación ya lee y escribe en Postgres
+Las cinco fuentes de datos originales están resueltas:
 
-Configuración, proveedores, proyectos, insumos, usuarios, requerimientos,
-órdenes de compra, órdenes de servicio, remisiones e inventario. Verificado por
-HTTP contra las rutas reales:
+| Fuente original | Hoy |
+|---|---|
+| 11 listas de SharePoint | Migradas. La aplicación no las lee |
+| `Control Costos.xlsx` | Vista SQL; el libro es un reporte que se regenera |
+| `compras.csv` | Archivado |
+| `proveedores_depurados_final.csv`, `tabla_proyectos.csv` | Archivados |
+| `data/local.db` (SQLite) | Solo sesiones y mapeo de tesorería |
+
+### Verificado por HTTP contra las rutas reales
 
 | Ruta | Filas |
 |---|---:|
@@ -28,23 +34,23 @@ HTTP contra las rutas reales:
 | `/os/ordenes` | 147 |
 | `/requerimientos` | 132 |
 | `/remisiones` | 130 |
+| `/gastos` | 394 |
 | `/inventario/stock` | 528 |
-| `/inventario/movimientos` | 1.533 |
+| `/inventario/movimientos` | 1.652 |
 | `/proveedores` | 424 |
-| `/inventario/documentos` | 268 |
+| `/insumos` | 880 |
 
-### Lo que todavía va a SharePoint
-
-Solo **`controlCostos.js`**, que escribe en el libro de Excel. Eso es la etapa
-siguiente.
-
-Fuera de `graphStorage.js` no queda ni un `addListItem`, `updateListItem`,
-`getListItem` ni `getListItems` en la aplicación.
+Los gastos suman **$1.297.862.289** repartidos en 185 órdenes de compra, 122
+órdenes de servicio y 87 salidas de almacén.
 
 ### Lo que se queda en SharePoint a propósito
 
-La autenticación, el Drive —los PDF de OC, OS y requerimientos— y la lectura del
-buzón. Por decisión de alcance solo migran los datos, no los archivos.
+La autenticación, el Drive —los PDF de OC, OS y requerimientos—, la lectura del
+buzón y la subida del libro de Control de Costos, que ahora es un entregable.
+Por decisión de alcance solo migran los datos, no los archivos.
+
+Fuera de `graphStorage.js` no queda ni un `addListItem`, `updateListItem`,
+`getListItem` ni `getListItems` en la aplicación.
 
 ## Los documentos
 

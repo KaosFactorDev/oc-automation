@@ -297,26 +297,81 @@ Cero operaciones de datos por Graph. Fuera de `graphStorage.js` no queda un solo
 `addListItem`, `updateListItem`, `getListItem` ni `getListItems` en la
 aplicación, y ninguna lectura de documentos o catálogos sale del caché.
 
+## Control de Costos: de libro Excel a vista SQL
+
+`registrarGasto()` y `actualizarFila()` escribían en `Control Costos.xlsx` una
+fila por documento aprobado, buscando la fila a actualizar recorriendo la hoja
+hasta encontrar el número de OC. Eso es una tabla con búsqueda lineal y sin
+llaves, sostenida por una hoja de cálculo.
+
+Los gastos no son un dato aparte: son los documentos aprobados vistos por otro
+lado. Así que el libro dejó de ser fuente y pasó a ser reporte.
+
+`erp.vw_gastos` es la unión de tres orígenes, con la misma forma de fila:
+
+| Origen | Qué aporta |
+|---|---|
+| `ordenes_compra` aprobadas | una fila por OC |
+| `ordenes_servicio` aprobadas | una fila por OS |
+| `movimientos_inventario` de salida | agrupados por `documento_ref` |
+
+Sobre ella hay tres vistas de resumen —por proyecto, por proveedor y por tipo—
+que antes eran hojas del libro calculadas a mano.
+
+La salida se conserva: `generarXlsx()` arma el libro completo con las mismas
+cinco hojas y catorce columnas, y `exportarXlsx()` lo sube a la misma carpeta de
+SharePoint. La diferencia está en que ya no se actualiza una fila: se reconstruye
+el libro entero desde la vista. Un libro que se regenera no puede quedar
+desincronizado, y el modo de falla que importaba —una fila que no se actualizó y
+nadie notó— desaparece.
+
+## Los tres CSV se retiraron
+
+`compras.csv`, `proveedores_depurados_final.csv` y `tabla_proyectos.csv` fueron
+la fuente original del ERP y quedaron después como respaldo para cuando el caché
+SQLite estuviera vacío. Retirado el caché, el respaldo no tenía de dónde
+respaldar.
+
+`consultaProveedor.js` ya recibía los datos precargados por el llamador, así que
+salieron `loadCSV()`, `cargarDatosCSV()` y el bloque `PATHS` sin tocar la lógica
+de selección de proveedor. Sin historial no hay nada que comparar, así que el
+módulo devuelve el mismo resultado que para un insumo sin compras previas —
+extraído a `sinHistorial()` en vez de duplicado en dos ramas.
+
+Del servidor salieron `leerCSV()`, las tres constantes `PATH_*`,
+`obtenerInsumosCSV()`, `obtenerProyectos()` y las ramas de respaldo dentro de
+`obtenerProveedores()`, `obtenerProyectosSP()` y `obtenerInsumos()`. Todas leían
+un archivo para responder algo que la base ya responde.
+
+`test.js` apuntaba a los tres CSV y llamaba a `cargarDatos()`, que ya no existía.
+Su tercer test habría reportado «sin historial» para todo **sin fallar**: el tipo
+de prueba que da falsa tranquilidad. Ahora precarga de los repositorios y elige
+sus casos entre insumos que existen.
+
+Los archivos quedaron en `data/_archivo-csv-2026/` con una nota que dice qué
+contenían y dónde vive ese dato ahora. Son respaldo histórico de la carga
+inicial, no una fuente. No se borraron porque no cuesta nada guardar 3.771 filas
+de texto; la diferencia con el código muerto es que estos no se ejecutan.
+
+## Las cinco fuentes, al cierre
+
+| Fuente original | Hoy |
+|---|---|
+| 11 listas de SharePoint | Migradas. La aplicación no las lee |
+| `Control Costos.xlsx` | Vista SQL; el libro es un reporte que se regenera |
+| `compras.csv` | Archivado |
+| `proveedores_depurados_final.csv`, `tabla_proyectos.csv` | Archivados |
+| `data/local.db` (SQLite) | Solo sesiones y mapeo de tesorería |
+
 ## Qué falta
 
-### 1. Control de Costos
+### Postgres en el VPS y el corte
 
-`registrarGasto()` y `actualizarFila()` en `controlCostos.js` escriben en un
-libro de Excel de SharePoint con búsqueda lineal por número de OC. Con los
-documentos ya tipados, el control de costos es una vista derivada de
-`ordenes_compra` y `ordenes_servicio`. Se conserva la salida: una ruta que
-exporta la vista a `.xlsx` con ExcelJS y la sube al mismo sitio. El Excel pasa
-de ser base de datos a ser reporte.
+Es la única etapa que queda, y la única que no se puede ensayar en local porque
+necesita el servidor. El servicio `db` ya está definido en `docker-compose.yml`.
 
-### 2. Retirar los CSV
-
-`consultaProveedor.js` ya acepta los datos precargados, así que `loadCSV()` y
-`cargarDatosCSV()` se borran sin tocar la lógica de selección de proveedor.
-Salen `PATH_COMPRAS`, `PATH_PROVEEDORES` y `PATH_PROYECTOS` del `.env`, del
-README y de `test.js`. Los tres archivos se archivan, no se borran.
-
-### 3. Postgres en el VPS
-
-El servicio ya está definido en `docker-compose.yml`. Falta levantarlo, crear el
-rol, migrar, importar y dejar el respaldo en el cron del host. Ver
-[operacion-base-de-datos.md](operacion-base-de-datos.md).
+**El orden importa: importar primero, desplegar después.** Si se despliega antes
+de importar, la aplicación arranca contra una base vacía y la gente ve un ERP en
+blanco. El procedimiento paso a paso, con los puntos de verificación y el plan de
+reversa, está en
+[operacion-base-de-datos.md](operacion-base-de-datos.md#el-corte-en-el-vps).
