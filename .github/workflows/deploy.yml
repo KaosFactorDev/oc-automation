@@ -101,12 +101,20 @@ jobs:
       # En data/ solo importa que el contenido coincida: la fecha y los
       # permisos no aportan nada y cada intento de tocarlos es un fallo
       # potencial siendo no-dueno.
+      #
+      # Por lo mismo, deploy puede reescribir archivos que ya existen —eso solo
+      # exige permiso sobre el archivo— pero NO puede crear entradas nuevas en
+      # data/, que exige permiso sobre el directorio. Por eso se excluye
+      # _archivo-csv-2026/: es el respaldo historico de los tres CSV de la carga
+      # inicial y produccion no lo usa para nada, asi que intentar crearlo solo
+      # servia para romper el deploy con "mkdir failed: Permission denied".
       - name: Sincronizar plantillas (solo data/)
         run: |
           rsync -az -c --inplace --itemize-changes \
             --no-owner --no-group --no-perms --omit-dir-times \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.VPS_PORT || 22 }}" \
             --exclude 'local.db*' \
+            --exclude '_archivo-csv-2026/' \
             ./data/ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_PATH }}/data/"
 
       - name: Reconstruir y levantar contenedores
