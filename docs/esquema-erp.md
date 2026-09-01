@@ -9,12 +9,12 @@ mezclarse.
 
 ## Inventario
 
-18 tablas, 9 funciones, 78 índices.
+18 tablas, 10 funciones, 78 índices.
 
 | Tabla | Col. | Filas hoy | Lista de SharePoint |
 |---|---:|---:|---|
-| `proyectos` | 13 | 50 | Proyectos |
-| `proveedores` | 18 | 433 | Proveedores |
+| `proyectos` | 14 | 50 | Proyectos |
+| `proveedores` | 18 | 424 | Proveedores |
 | `insumos` | 11 | 880 | Insumos |
 | `usuarios` | 9 | 6 | UsuariosERP |
 | `configuracion` | 6 | 6 | ConfiguracionApp |
@@ -63,8 +63,9 @@ puede borrar cuando SharePoint se apague.
 
 Dos excepciones:
 
-- **`proveedores`**: `sp_id` no es único. Cinco pares de items distintos traen
-  el mismo NIT y colapsan en una sola fila. Un índice único ahí haría fallar el
+- **`proveedores`**: `sp_id` no es único. Varios items distintos de SharePoint
+  traen el mismo NIT y colapsan en una sola fila —cinco pares por puntuación y
+  nueve más por el dígito de verificación—. Un índice único ahí haría fallar el
   import.
 - **`usuarios`**: el `ON CONFLICT` del import va contra el **correo**, no contra
   `sp_id`, porque el correo es la clave real. Con `sp_id`, reimportar después de
@@ -108,10 +109,15 @@ Dos funciones `IMMUTABLE`, para poder usarlas en índices:
 - **`erp.norm(text)`** — mayúsculas, sin tildes, sin puntuación, espacios
   colapsados. Réplica de `norm()` en `db.js`. Da la unicidad de proyectos por
   código e insumos por nombre.
-- **`erp.norm_nit(text)`** — quita puntos, comas, espacios y el sufijo `.0` que
-  deja Excel al leer un número como flotante. El `.0` se quita **antes** de
-  borrar la puntuación, porque después ya no se distingue de un separador de
-  miles.
+- **`erp.norm_nit(text)`** — quita puntos, comas, espacios, el sufijo `.0` que
+  deja Excel al leer un número como flotante, y el **dígito de verificación**.
+  El `.0` se quita **antes** de borrar la puntuación, porque después ya no se
+  distingue de un separador de miles.
+
+  Quitar el dígito de verificación es seguro: es un checksum calculado de la
+  raíz, así que para una raíz dada solo existe un dígito válido y dos NIT no
+  pueden diferir únicamente en él. Sin eso, el mismo proveedor entraba dos veces
+  —una con dígito y otra sin él— y su historial de compras quedaba partido.
 
 Usa `translate()` y no la extensión `unaccent`, que es `STABLE` y no sirve en un
 índice.
@@ -161,17 +167,34 @@ Funciones:
 | `erp.siguiente_numero_os()` | `bigint` |
 | `erp.siguiente_numero_remision()` | `text` — `REM-00001` |
 | `erp.siguiente_documento_almacen(tipo)` | `text` — `EA-0001` / `SA-0001` |
+| `erp.siguiente_consecutivo_req(proyecto_id)` | `text` — el consecutivo del requerimiento **dentro de ese proyecto** |
 | `erp.sincronizar_contadores()` | Deja cada contador en el número más alto ya emitido. **Solo se ejecuta una vez, después del import inicial** |
 
 `sincronizar_contadores()` toma el máximo sobre **todos** los números, incluidos
 los de documentos anulados. Ahí está la diferencia con `contador.js`.
+
+### El consecutivo por proyecto
+
+Cada proyecto numera sus requerimientos aparte, y ese contador vive en
+`erp.proyectos.ultimo_consecutivo_req`. En SharePoint estaba en la columna
+`ultimoConsecutivoReq` de la lista Proyectos y se incrementaba con concurrencia
+optimista: leer el item con su ETag, escribir valor+1 con `If-Match`, reintentar
+en 412, y caer a un contador en el SQLite local si fallaba por otra razón.
+
+Ese respaldo explica por qué las dos fuentes no coincidían: SharePoint decía **9**
+para `EQUIPOS GT 2026` cuando los requerimientos de ese proyecto ya llegaban a
+**0012**. El contador de la lista se quedó atrás y nadie lo notó.
+
+Por eso la siembra se tomó del máximo `consecutivo_sistema` realmente usado en
+cada proyecto, y no del contador de SharePoint: sembrar de un contador atrasado
+habría hecho que los siguientes requerimientos repitieran números ya emitidos.
 
 La vista `erp.vw_numeros_duplicados` lista números repetidos. Con los índices
 únicos puestos debería estar siempre vacía.
 
 ## Reglas que la base hace cumplir
 
-29 `CHECK`, más las llaves foráneas y los índices únicos. Los que más importan:
+30 `CHECK`, más las llaves foráneas y los índices únicos. Los que más importan:
 
 | Regla | Constraint |
 |---|---|

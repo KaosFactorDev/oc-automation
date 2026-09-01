@@ -102,6 +102,15 @@ clic en el formulario.
 **El esquema nuevo hace las dos cosas imposibles.** Ver "Numeración" en
 [esquema-erp.md](esquema-erp.md).
 
+Los 17 casos se corrigieron en el origen con `npm run corregir-listas`: 20
+ediciones sobre SharePoint, ninguna destructiva. Los números de documentos
+anulados pasaron a `0036-A`, `0072-B`; la remisión duplicada se marcó anulada
+con el motivo en vez de borrarse; y las fechas de `OS-0095` se intercambiaron.
+
+Se corrigió el origen y no el import a propósito: SharePoint sigue siendo la
+fuente de verdad hasta el corte, y un parche que viviera solo en el import haría
+que cada reimportación lo volviera a aplicar mientras las dos bases divergen.
+
 ### Una orden de servicio que terminaba antes de empezar
 
 `OS-0095`: inicio 2026-08-13, fin 2026-08-06. Error de digitación, corregido
@@ -115,11 +124,28 @@ El código lo parcheaba en nueve lugares con `it.descripcion || it.insumo`. En l
 carga actual, **549 de 1.261 ítems** venían con la segunda forma. Ahora hay una
 sola columna.
 
-### Proveedores duplicados
+### Proveedores duplicados, en dos capas
 
-Cinco pares de proveedores colapsan en uno solo al normalizar el NIT:
-`900.807.426-3`, `800,118,549-1` y `811017552.0` son tres formatos del mismo
-dato. Son el mismo proveedor dado de alta dos veces.
+Cinco pares colapsan al normalizar la puntuación: `900.807.426-3`,
+`800,118,549-1` y `811017552.0` son tres formatos del mismo dato.
+
+Y **nueve pares más** aparecieron después: el mismo proveedor registrado una vez
+con dígito de verificación y otra sin él. `DISTRIBUCIONES TOOLS MED` tenía 66
+órdenes bajo `901413646` y 3 bajo `901413646-9`.
+
+Eso no es cosmético: `consultaProveedor.js` sugiere proveedor y precio a partir
+del historial, y con la historia partida en dos las sugerencias empeoran.
+
+Quitar el dígito es seguro porque es un **checksum calculado de la raíz**: para
+una raíz dada solo existe un dígito válido, así que dos NIT no pueden diferir
+únicamente en él y fusionar por raíz no puede unir dos empresas distintas. Se
+verificó además que los nueve pares tuvieran razón social coincidente, y
+`nit_original` conserva la forma como venía escrita.
+
+La migración repunta los documentos, consolida los campos con `COALESCE` —si a
+la fila que queda le falta el teléfono, lo toma de la otra— y solo entonces
+reemplaza la función. Resultado: 433 proveedores pasan a 424, `TOOLS MED`
+consolida sus 69 órdenes, y los conteos de documentos no cambian.
 
 ### Usuarios con varias filas por correo
 
@@ -163,29 +189,78 @@ Fusionarlos es trabajo de catálogo, no de migración, y no bloquea nada.
 | Números de documento duplicados | 0 |
 | Fechas del historial sin interpretar | 0 de 5.496 |
 
-## Qué falta
+## La capa de repositorio
 
-### 1. Capa de repositorio (el trabajo de fondo)
+Al empezar, `servidor-cotizaciones.js` llamaba a Microsoft Graph directamente en
+88 lugares, más 10 en `requerimientos.js` y el resto en `contador.js`,
+`configApp.js` y `controlCostos.js`: **105 puntos de llamada** que conocían la
+forma de una lista de SharePoint. Mientras eso siguiera así, la aplicación no
+podía leer de Postgres por más completa que estuviera la base.
 
-Hoy `servidor-cotizaciones.js` llama a Microsoft Graph directamente en 88
-lugares, más 10 en `requerimientos.js` y el resto en `contador.js`,
-`configApp.js` y `controlCostos.js`: **105 puntos de llamada** que conocen la
-forma de una lista de SharePoint.
+`src/repo/` es la capa que faltaba. Dos reglas la mantienen útil: **fuera de
+`src/repo/` no se escribe SQL, y ahí adentro no se toman decisiones de negocio.**
+Los valores por defecto, el ensamblado y las reglas siguen en los módulos de
+dominio.
 
-Mientras eso siga así, la aplicación no puede leer de Postgres por más completa
-que esté la base. Hay que introducir `src/repo/` con un módulo por agregado
-—requerimientos, órdenes, remisiones, inventario, catálogos, historial,
-usuarios, configuración— donde cada función sea una operación de negocio
-(`crearOC()`, `cambiarEstadoOC()`) y no un `updateListItem` con un objeto de
-campos.
-
-Como no habrá doble escritura, la capa se escribe **directo contra Postgres**:
+Como no hay doble escritura, cada módulo se escribió **directo contra Postgres**:
 una implementación en vez de dos.
 
-Se quedan sin tocar las 7 llamadas de `leerCorreos.js` (buzón) y las de subir
-PDF al Drive. Eso no son datos.
+| Módulo | Cubre |
+|---|---|
+| `repo/configuracion.js` | Logo, emisor, firmante, IVA por defecto |
+| `repo/catalogos.js` | Proveedores, proyectos, insumos, usuarios |
+| `repo/requerimientos.js` | Requerimientos y sus ítems |
+| `repo/ordenesCompra.js` | OC, sus ítems y la emisión del consecutivo |
+| `repo/ordenesServicio.js` | OS con AIU y tipo de contrato |
+| `repo/remisiones.js` | Remisiones, ítems y el vínculo con las OC |
+| `repo/inventario.js` | Movimientos, stock y consecutivo de almacén |
 
-### 2. Control de Costos
+### El truco que hizo el cambio mecánico
+
+El servidor accede a `reqItem.fields.X` en decenas de lugares, porque así venía
+el item de SharePoint. Cada repo devuelve un objeto **plano con esos mismos
+nombres de campo**, y un adaptador de tres líneas lo envuelve en `{ id, fields }`:
+
+```js
+async function obtenerOC(id) {
+  const o = await repoOrdenesCompra.obtener(id);
+  if (!o) throw new Error(`Orden de compra ${id} no existe`);
+  return { id: o.id, fields: o };
+}
+```
+
+Eso convirtió 21 llamadas de requerimientos y 26 de órdenes de compra en un
+reemplazo mecánico, en vez de reescribir cada acceso.
+
+Los ítems son el otro caso: viven en tablas hijas, pero las funciones de lectura
+vuelven a armar `itemsJson` como string con la forma exacta que tenía. La consola
+y las plantillas quedaron sin tocar.
+
+### Una clase de bug que aparece al migrar
+
+Convertir `{ id, fields }` en un objeto plano hace que `actualizado.fields || {}`
+**no lance error**: devuelve `{}` y el valor queda `undefined` en silencio. Se
+encontraron y corrigieron varios así —el número de OC para Control de Costos, la
+cascada de anulación de remisiones, el id del requerimiento— buscando `.fields`
+sobre las variables ya migradas.
+
+Vale tenerlo presente en lo que falta: el síntoma no es un crash, es un dato que
+desaparece.
+
+### Lo que falta de esta capa
+
+Cuatro operaciones de datos, ninguna un agregado completo: el alta en
+`HistorialPrecios` al confirmar una cotización, la lectura del catálogo
+`Insumos` para una sugerencia por IA, una lectura de `Proyectos`, y el alta del
+admin inicial en `UsuariosERP`.
+
+Y las cuatro funciones `asegurarLista*()` con sus ~21 llamadas a Graph, que
+crean listas y columnas en SharePoint: quedan como código muerto en cuanto nada
+lea esas listas.
+
+## Qué falta
+
+### 1. Control de Costos
 
 `registrarGasto()` y `actualizarFila()` en `controlCostos.js` escriben en un
 libro de Excel de SharePoint con búsqueda lineal por número de OC. Con los
@@ -194,14 +269,14 @@ documentos ya tipados, el control de costos es una vista derivada de
 exporta la vista a `.xlsx` con ExcelJS y la sube al mismo sitio. El Excel pasa
 de ser base de datos a ser reporte.
 
-### 3. Retirar los CSV
+### 2. Retirar los CSV
 
 `consultaProveedor.js` ya acepta los datos precargados, así que `loadCSV()` y
 `cargarDatosCSV()` se borran sin tocar la lógica de selección de proveedor.
 Salen `PATH_COMPRAS`, `PATH_PROVEEDORES` y `PATH_PROYECTOS` del `.env`, del
 README y de `test.js`. Los tres archivos se archivan, no se borran.
 
-### 4. Postgres en el VPS
+### 3. Postgres en el VPS
 
 El servicio ya está definido en `docker-compose.yml`. Falta levantarlo, crear el
 rol, migrar, importar y dejar el respaldo en el cron del host. Ver
