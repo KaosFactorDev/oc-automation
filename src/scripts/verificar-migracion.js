@@ -54,19 +54,35 @@ const TABLA = {
  * negativo. Se comprueban por su llave natural: la pregunta correcta no es "¿está
  * esta fila?" sino "¿está este proveedor?".
  */
+/*
+ * La normalización la hace la BASE, no este script. Se le pasan los valores
+ * crudos del origen y ella responde cuáles no encuentra, aplicando la misma
+ * erp.norm_nit() que usó el import.
+ *
+ * Replicar la normalización en JS ya dio un falso positivo: una versión anterior
+ * le quitaba el último dígito a todo NIT de 10 cifras, suponiendo dígito de
+ * verificación. En una cédula como 1075667356 ese dígito es parte del número, y
+ * erp.norm_nit() no lo toca — así que el script reportaba como ausentes dos
+ * proveedores que estaban. Con una sola definición eso no puede volver a pasar.
+ */
 const COLAPSAN = {
   Proveedores: {
     razon: 'la migración fusionó 14 duplicados (5 por puntuación, 9 por dígito de verificación)',
-    // El NIT sin puntuación ni dígito de verificación es la identidad real.
-    llaveOrigen:  (r) => String(r.nit ?? '').replace(/[^0-9]/g, '').replace(/^(\d{9})\d$/, '$1'),
-    sqlDestino:   "SELECT regexp_replace(nit,'[^0-9]','','g') k FROM erp.proveedores",
-    comoSeLlama:  'NIT',
+    valorOrigen: (r) => String(r.nit ?? '').trim(),
+    sqlFaltan: `SELECT v FROM unnest($1::text[]) v
+                 WHERE v <> ''
+                   AND NOT EXISTS (SELECT 1 FROM erp.proveedores p
+                                    WHERE p.nit = erp.norm_nit(v))`,
+    comoSeLlama: 'NIT',
   },
   UsuariosERP: {
     razon: 'varias filas por persona colapsaron al correo, que es la identidad',
-    llaveOrigen:  (r) => String(r.email ?? '').trim().toLowerCase(),
-    sqlDestino:   'SELECT lower(email) k FROM erp.usuarios',
-    comoSeLlama:  'correo',
+    valorOrigen: (r) => String(r.email ?? '').trim(),
+    sqlFaltan: `SELECT v FROM unnest($1::text[]) v
+                 WHERE v <> ''
+                   AND NOT EXISTS (SELECT 1 FROM erp.usuarios u
+                                    WHERE lower(u.email) = lower(btrim(v)))`,
+    comoSeLlama: 'correo',
   },
 };
 
@@ -142,13 +158,13 @@ async function compararFilas(sp, pgDatos) {
     // En las listas que colapsan, un sp_id ausente no prueba pérdida de datos.
     // La pregunta se replantea sobre la llave natural.
     if (colapsa && faltan.length) {
-      const { rows } = await pg.query(colapsa.sqlDestino);
-      const llavesDestino = new Set(rows.map(r => String(r.k || '')));
-      const perdidas = sp[lista]
-        .filter(r => faltan.includes(String(r.sp_id)))
-        .map(colapsa.llaveOrigen)
-        .filter(k => k && !llavesDestino.has(k));
-      porLlave = [...new Set(perdidas)];
+      const ausentes = new Set(faltan);
+      const valores = [...new Set(
+        sp[lista].filter(r => ausentes.has(String(r.sp_id)))
+                 .map(colapsa.valorOrigen)
+                 .filter(Boolean))];
+      const { rows } = await pg.query(colapsa.sqlFaltan, [valores]);
+      porLlave = rows.map(r => r.v);
     }
 
     const realmenteFalta = colapsa ? (porLlave ? porLlave.length : 0) : faltan.length;

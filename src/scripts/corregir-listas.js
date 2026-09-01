@@ -268,9 +268,9 @@ async function main() {
   }
 
   console.log('\n  Siguiente paso:');
-  console.log('    1. Sincroniza el caché (botón de la consola, o reinicia el servidor)');
-  console.log('    2. npm run revisar-listas       → debe quedar sin bloqueadores');
-  console.log('    3. npm run db:importar\n');
+  console.log('    1. npm run revisar-listas       → debe quedar sin bloqueadores');
+  console.log('    2. npm run db:importar');
+  console.log('    3. npm run db:verificar         → debe quedar en cero\n');
 }
 
 main().catch(err => {
