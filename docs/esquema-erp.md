@@ -27,7 +27,7 @@ mezclarse.
 | `remisiones` | 16 | 130 | Remisiones |
 | `remision_items` | 7 | 693 | ↳ de `itemsJson` |
 | `remision_ordenes` | 2 | 134 | ↳ de `ocIds` |
-| `movimientos_inventario` | 21 | 1.652 | MovimientosInventario |
+| `movimientos_inventario` | 21 | 1.659 | MovimientosInventario |
 | `historial_precios` | 19 | 5.496 | HistorialPrecios |
 | `contadores` | 3 | 5 | *(nueva)* |
 | `zonas` | 2 | 7 | *(nueva)* |

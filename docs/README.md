@@ -28,20 +28,33 @@ Las cinco fuentes de datos originales están resueltas:
 
 ### Verificado por HTTP contra las rutas reales
 
+Son conteos de **ruta**, no de tabla, y no siempre coinciden a propósito:
+`/inventario/movimientos` devuelve 1.540 de las 1.659 filas porque excluye los
+119 movimientos anulados.
+
 | Ruta | Filas |
 |---|---:|
-| `/ordenes` | 282 |
-| `/os/ordenes` | 147 |
-| `/requerimientos` | 132 |
-| `/remisiones` | 130 |
-| `/gastos` | 394 |
-| `/inventario/stock` | 528 |
-| `/inventario/movimientos` | 1.652 |
-| `/proveedores` | 424 |
+| `/ordenes` | 286 |
+| `/os/ordenes` | 156 |
+| `/requerimientos` | 133 |
+| `/remisiones` | 139 |
+| `/gastos` | 405 |
+| `/inventario/stock` | 532 |
+| `/inventario/movimientos` | 1.540 |
+| `/inventario/documentos` | 272 |
+| `/proveedores` | 425 |
 | `/insumos` | 880 |
 
-Los gastos suman **$1.297.862.289** repartidos en 185 órdenes de compra, 122
-órdenes de servicio y 87 salidas de almacén.
+Los gastos suman **$1.318.608.220**.
+
+### Comprobado sin SharePoint
+
+No es solo que la aplicación lea de Postgres: es que **no puede** leer de las
+listas. Con `getListItems`, `getListItem`, `addListItem`, `updateListItem`,
+`deleteListItem`, `getLists` y `getListByName` reemplazadas por funciones que
+lanzan, las 12 rutas de datos respondieron completas y ninguna de esas funciones
+se llamó. Un `grep` demuestra que no aparecen escritas; esto demuestra que no se
+ejecutan.
 
 ### Lo que se queda en SharePoint a propósito
 
