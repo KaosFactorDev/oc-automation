@@ -33,6 +33,7 @@ const repoOrdenesCompra  = require('./repo/ordenesCompra');
 const repoOrdenesServicio = require('./repo/ordenesServicio');
 const repoRemisiones     = require('./repo/remisiones');
 const repoInventario     = require('./repo/inventario');
+const repoHistorial      = require('./repo/historialPrecios');
 const localDb          = require('./db');
 const syncService      = require('./syncService');
 const auth             = require('./authService');
@@ -377,7 +378,6 @@ async function reconciliarRequerimientosVsOCs(ctx) {
       const nuevo = await calcularEstadoRequerimiento(ctx, r);
       if (nuevo && nuevo !== f.estado) {
         await actualizarRequerimiento(r.id, { estado: nuevo });
-        localDb.upsertDocumento('requerimientos', { id: r.id, fields: { ...f, estado: nuevo } });
         cambios++;
       }
     } catch (e) { console.warn(`Reconcilia req ${r.id}:`, e.message); }
@@ -650,7 +650,7 @@ async function asegurarListaUsuariosERP(siteId) {
 }
 
 async function bootstrapAdmin() {
-  if (localDb.countUsuarios() > 0) return;
+  if (await repoCatalogos.contarUsuarios() > 0) return;
   const email = (process.env.USUARIO_EMAIL || '').trim().toLowerCase();
   if (!email) return;
 
@@ -677,8 +677,7 @@ async function bootstrapAdmin() {
     activo: true,
   };
   try {
-    const item = await g.addListItem(ctx.siteId, listId, adminData);
-    localDb.upsertUsuario({ sp_id: String(item.id), ...adminData });
+    await repoCatalogos.guardarUsuario(adminData);
     console.log(`[bootstrap] Admin inicial creado: ${email}`);
   } catch (e) {
     console.warn('[bootstrap] Error al crear admin:', e.message);
@@ -763,18 +762,16 @@ function leerCSV(rutaArchivo) {
 // forceRefresh dispara un sync en segundo plano pero retorna SQLite inmediatamente.
 async function getHistorialPrecios(_ctx, { forceRefresh = false } = {}) {
   if (forceRefresh) syncService.syncAll().catch(() => {});
-  return localDb.getHistorialPrecios();
+  return repoHistorial.listar();
 }
 
 function invalidarHistorialCache() { /* SQLite siempre está actualizado */ }
 
-async function agregarFilasCompras(filas, ctx) {
-  if (!ctx) { try { ctx = await ctxSharePoint(); } catch {} }
-  if (!ctx || !ctx.HistorialPrecios) {
-    console.warn('[agregarFilasCompras] Lista HistorialPrecios no disponible — datos no guardados');
-    return 0;
-  }
-  let guardadas = 0;
+async function agregarFilasCompras(filas) {
+  // Las filas se arman todas y se insertan en una sola transacción. Antes era
+  // una llamada a Graph por fila, así que un fallo a la mitad dejaba la
+  // cotización registrada por partes.
+  const aInsertar = [];
   for (const f of filas) {
     const nit    = String(f.nitProveedor ?? f.nit ?? '').trim().replace(/\.0$/, '');
     const nombre = String(f.nombreProveedor ?? f.proveedor ?? '').trim();
@@ -796,16 +793,9 @@ async function agregarFilasCompras(filas, ctx) {
       formaPago:       'Cotización',
       anticipo:        0,
     };
-    try {
-      const nuevo = await g.addListItem(ctx.siteId, ctx.HistorialPrecios, campos);
-      // Reflejar en SQLite inmediatamente (sin esperar al próximo sync)
-      localDb.upsertHistorialFila({ id: nuevo?.id || String(Date.now()), ...campos });
-      guardadas++;
-    } catch (e) {
-      console.warn('[agregarFilasCompras] Error guardando fila:', e.message);
-    }
+    aInsertar.push(campos);
   }
-  return guardadas;
+  return repoHistorial.agregar(aInsertar);
 }
 
 // ── Extracción con Gemini API ─────────────────────────────────────────────────
@@ -1760,12 +1750,9 @@ const servidor = http.createServer(async (req, res) => {
       try {
         const { nombres } = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         if (!Array.isArray(nombres)) return json({ error: 'nombres debe ser un array' }, 400);
-        const ctx = await ctxSharePoint();
-        if (!ctx.Insumos) return json({ sugerencias: nombres.map(() => null) });
-        const items = await g.getListItems(ctx.siteId, ctx.Insumos);
-        const catalogo = items
-          .map(it => ({ id: it.id, ...(it.fields || {}) }))
-          .filter(i => i.activo !== false && (i.nombre || '').trim());
+        // El repo ya filtra los inactivos y no baja el catálogo por red.
+        const catalogo = (await repoCatalogos.getInsumos({ soloActivos: true }))
+          .filter(i => (i.nombre || '').trim());
         const sugerencias = nombres.map(n => mejorMatchInsumo(String(n || ''), catalogo));
         return json({ sugerencias });
       } catch (err) { return json({ error: err.message }, 500); }
@@ -1793,9 +1780,8 @@ const servidor = http.createServer(async (req, res) => {
   const mProyId = url.match(/^\/proyectos\/([^\/]+)$/);
   if (req.method === 'GET' && mProyId) {
     try {
-      const ctx = await ctxSharePoint();
-      const item = await g.getListItem(ctx.siteId, ctx.Proyectos, mProyId[1]);
-      return json(item?.fields || {});
+      const p = await repoCatalogos.getProyecto(mProyId[1]);
+      return p ? json(p) : json({ error: 'Proyecto no encontrado' }, 404);
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
@@ -1879,7 +1865,7 @@ const servidor = http.createServer(async (req, res) => {
   if (req.method === 'GET' && mComp) {
     try {
       // Leer requerimiento desde SQLite (sin llamada a SharePoint)
-      const todosReqs = localDb.getRequerimientos();
+      const todosReqs = await repoRequerimientos.listar();
       const itemData  = todosReqs.find(r => String(r.id) === mComp[1]);
       if (!itemData) return json({ error: 'Requerimiento no encontrado' }, 404);
       const f = itemData;
@@ -2260,7 +2246,6 @@ const servidor = http.createServer(async (req, res) => {
             messageId:  `manual:${process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
             adjuntoUrl: '',
           });
-          if (!duplicado && item?.id) localDb.upsertDocumento('requerimientos', item);
 
           return json({
             ok: true,
@@ -2310,7 +2295,7 @@ const servidor = http.createServer(async (req, res) => {
         const proyectosSP = await obtenerProyectosSP({ soloActivos: false }).catch(() => []);
         let resultado;
         try {
-          resultado = procesarRequerimientoManual(body, { proyectosExternos: proyectosSP });
+          resultado = await procesarRequerimientoManual(body, { proyectosExternos: proyectosSP });
         } catch (e) {
           return json({ error: e.message }, 400);  // validación de negocio → 400
         }
@@ -2320,7 +2305,6 @@ const servidor = http.createServer(async (req, res) => {
           messageId:  `manual:${sesion?.email || process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
           adjuntoUrl: '',
         });
-        if (item?.id) localDb.upsertDocumento('requerimientos', item);
 
         return json({
           ok: true,
@@ -2471,10 +2455,6 @@ const servidor = http.createServer(async (req, res) => {
           notas:  notasNuevas,
         });
         // Actualizar SQLite inmediatamente para que GET /requerimientos refleje el cambio
-        localDb.upsertDocumento('requerimientos', {
-          id:     reqItem.id,
-          fields: { ...reqItem.fields, estado: 'anulado', notas: notasNuevas },
-        });
         return json({ ok: true });
       } catch (err) {
         const code = /itemNotFound|404/i.test(err.message) ? 404 : 500;
@@ -2518,7 +2498,6 @@ const servidor = http.createServer(async (req, res) => {
         }
 
         // Sincronizar SQLite inmediatamente para que /comparativa vea los ítems descartados
-        if (reqActualizado?.id) localDb.upsertDocumento('requerimientos', reqActualizado);
 
         return json({ ok: true, estado: nuevoEstado, requerimiento: { id: reqItem.id, ...(reqActualizado.fields || {}) } });
       } catch (err) {
@@ -2595,7 +2574,7 @@ const servidor = http.createServer(async (req, res) => {
       ctxSharePoint()
         .then(ctx => reconciliarRequerimientosVsOCs(ctx))
         .catch(e  => console.warn('Reconciliación reqs falló:', e.message));
-      return json(localDb.getRequerimientos());
+      return json(await repoRequerimientos.listar());
     } catch (err) {
       console.error('GET /requerimientos:', err.message);
       return json([], 200);
@@ -2966,7 +2945,7 @@ const servidor = http.createServer(async (req, res) => {
                 };
               });
             if (filasHist.length) {
-              const n = await agregarFilasCompras(filasHist, ctx);
+              const n = await agregarFilasCompras(filasHist);
               console.log(`[OC ${oc.numeroOC}] ${n} precios añadidos a HistorialPrecios SP`);
             }
           } catch (e) { console.warn('No se pudo actualizar histórico de precios:', e.message); }
@@ -2980,10 +2959,6 @@ const servidor = http.createServer(async (req, res) => {
               const estadoPrev  = (reqItem.fields || {}).estado || 'pendiente';
               if (nuevoEstado !== estadoPrev) {
                 await actualizarRequerimiento(reqId, { estado: nuevoEstado });
-                localDb.upsertDocumento('requerimientos', {
-                  id: reqId,
-                  fields: { ...(reqItem.fields || {}), estado: nuevoEstado },
-                });
                 console.log(`[OC ${oc.numeroOC}] Req ${reqId}: ${estadoPrev} → ${nuevoEstado}`);
               }
             }
@@ -3121,10 +3096,6 @@ const servidor = http.createServer(async (req, res) => {
             const estadoPrev  = (reqItem.fields || {}).estado || 'pendiente';
             if (nuevoEstado !== estadoPrev) {
               await actualizarRequerimiento(reqId, { estado: nuevoEstado });
-              localDb.upsertDocumento('requerimientos', {
-                id: reqId,
-                fields: { ...(reqItem.fields || {}), estado: nuevoEstado },
-              });
               requerimientoRecalculado = { id: reqId, estadoPrev, estadoNuevo: nuevoEstado };
             }
           }
@@ -3240,7 +3211,7 @@ const servidor = http.createServer(async (req, res) => {
         for (const f of filas) f.insumo = String(f.insumo || '').trim().toUpperCase();
 
         const ctx = await ctxSharePoint();
-        const guardadas = await agregarFilasCompras(filas, ctx);
+        const guardadas = await agregarFilasCompras(filas);
 
         // Alta en el catálogo de insumos para futuras sugerencias y
         // autocompletado. Ya no hace falta bajar el catálogo entero para
@@ -3995,7 +3966,7 @@ FORMATO:
     try {
       const qp   = new URL(req.url, 'http://x').searchParams;
       const tipo = qp.get('tipo') || null;
-      return json(localDb.getDocumentosInventario({ tipo }));
+      return json(await repoInventario.documentos({ tipo }));
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
@@ -4023,11 +3994,7 @@ FORMATO:
         const items   = Array.isArray(body.items) ? body.items : [body];
         // Idempotencia: rechazar si ya existe una entrada para la misma OC en los últimos 30 s
         if (items.length > 0 && items[0].ocId) {
-          const ventana = new Date(Date.now() - 30000).toISOString();
-          const reciente = localDb.db().prepare(
-            "SELECT COUNT(*) AS n FROM movimientos_inventario WHERE json_extract(data,'$.ocId')=? AND json_extract(data,'$.tipo')='entrada' AND json_extract(data,'$.fechaCreacion')>?"
-          ).get(items[0].ocId, ventana);
-          if (reciente?.n > 0) {
+          if (await repoInventario.hayEntradaReciente(items[0].ocId, 30)) {
             return json({ error: 'Ya existe una entrada registrada para esta OC en los últimos 30 segundos. Espera y recarga antes de intentar de nuevo.' }, 409);
           }
         }
@@ -4183,15 +4150,9 @@ FORMATO:
         const ctx = await ctxSharePoint();
 
         const docRef = await repoInventario.siguienteDocumentoRef(tipo);
-        let movs = localDb.db().prepare(
-          "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.batchId')=?"
-        ).all(batchId).map(r => JSON.parse(r.data));
-        // Fallback for legacy records without batchId (grouped by documentoRef)
-        if (!movs.length) {
-          movs = localDb.db().prepare(
-            "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.documentoRef')=?"
-          ).all(batchId).map(r => JSON.parse(r.data));
-        }
+        // porLote() busca por batch_id o por consecutivo, así que cubre los
+        // registros antiguos que no traen batchId.
+        const movs = await repoInventario.porLote(batchId);
 
         if (!movs.length) return json({ ok: false, error: 'Documento no encontrado' }, 404);
 
@@ -4238,14 +4199,7 @@ FORMATO:
         const batchId = decodeURIComponent(mDocAnular[1]);
         const ctx = await ctxSharePoint();
 
-        let movs = localDb.db().prepare(
-          "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.batchId')=?"
-        ).all(batchId).map(r => JSON.parse(r.data));
-        if (!movs.length) {
-          movs = localDb.db().prepare(
-            "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.documentoRef')=?"
-          ).all(batchId).map(r => JSON.parse(r.data));
-        }
+        const movs = await repoInventario.porLote(batchId);
 
         if (!movs.length) return json({ ok: false, error: 'Documento no encontrado' }, 404);
 
@@ -4362,7 +4316,6 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
       // la consola sin esperar el sync. Devuelve la forma que espera leerCorreos.
       const onOCGenerada = async (resultado, meta = {}) => {
         const { item, duplicado, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, meta);
-        if (!duplicado && item?.id) localDb.upsertDocumento('requerimientos', item);
         const resumen = {
           id:                 item?.id,
           consecutivo:        resultado.solicitud?.consecutivo || '',

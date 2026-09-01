@@ -16,7 +16,8 @@ const { parsearAsunto, resolverProyecto } = require('./parsearAsunto');
 const { leerRequerimiento }          = require('./leerRequerimiento');
 const { leerRequerimientoPDF }       = require('./leerRequerimientoPDF');
 const { consultarProveedor, cargarDatos } = require('./consultaProveedor');
-const localDb                            = require('./db');
+const repoCatalogos                      = require('./repo/catalogos');
+const repoHistorial                      = require('./repo/historialPrecios');
 
 async function leerRequerimientoAuto(rutaArchivo) {
   const ext = path.extname(rutaArchivo).toLowerCase();
@@ -133,13 +134,13 @@ Sistema de Gestión de Compras – Civiltech`,
 // ítem y arma el resultado GENERAR_OC. `infoAsunto` puede provenir de un correo
 // real o ser sintético (captura manual desde la consola).
 
-function construirResultado(infoAsunto, requerimiento, opts = {}) {
+async function construirResultado(infoAsunto, requerimiento, opts = {}) {
   // 3. Resolver proyecto: prioridad asunto > Excel
   // proyPorCodigo se construye desde SQLite; fallback a CSV solo si SQLite está vacío
   const proyPorCodigo = {};
-  const proyectosSQLite = localDb.getProyectos({ soloActivos: false });
-  if (proyectosSQLite.length > 0) {
-    for (const p of proyectosSQLite) {
+  const proyectosCatalogo = await repoCatalogos.getProyectos({ soloActivos: false });
+  if (proyectosCatalogo.length > 0) {
+    for (const p of proyectosCatalogo) {
       const key = String(p.nombre || '').trim().toUpperCase();
       if (key) proyPorCodigo[key] = { zona: p.zona || '' };
     }
@@ -166,8 +167,13 @@ function construirResultado(infoAsunto, requerimiento, opts = {}) {
     || infoAsunto.proyecto;
 
   // 4. Consultar proveedor/precio por ítem (historial y proveedores desde SQLite)
-  const historialSP   = localDb.getHistorialPrecios();
-  const proveedoresSP = localDb.getProveedores();
+  // El historial viene ordenado por fecha real. El caché ordenaba por texto,
+  // así que "septiembre 9, 2025" quedaba antes que "agosto 28, 2026" y el
+  // criterio de "las 3 compras más recientes" elegía las equivocadas.
+  const [historialSP, proveedoresSP] = await Promise.all([
+    repoHistorial.listar(),
+    repoCatalogos.getProveedores(),
+  ]);
   const itemsConsultados = requerimiento.items.map(item => {
     const consulta = consultarProveedor(item.insumo, codigoFinal, {
       historialSP,
@@ -218,7 +224,7 @@ function construirResultado(infoAsunto, requerimiento, opts = {}) {
  * @param {object} datos - { consecutivo, fecha, proyecto, responsable, cargo, items[] }
  * @throws {Error} si no hay proyecto o ningún ítem con insumo diligenciado
  */
-function procesarRequerimientoManual(datos = {}, opts = {}) {
+async function procesarRequerimientoManual(datos = {}, opts = {}) {
   const proyecto = String(datos.proyecto || '').trim();
   if (!proyecto) throw new Error('El proyecto es obligatorio al crear un requerimiento manualmente.');
 

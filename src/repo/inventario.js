@@ -143,6 +143,29 @@ async function stock(proyecto = null) {
   }));
 }
 
+/**
+ * ¿Ya hay una entrada para esta OC en los últimos N segundos? Es el guardián de
+ * idempotencia contra el doble clic — el mismo que produjo la remisión
+ * REM-00011 duplicada.
+ */
+async function hayEntradaReciente(ocId, segundos = 30) {
+  const r = await pg.one(
+    `SELECT 1 FROM erp.movimientos_inventario
+       WHERE orden_compra_id = $1 AND tipo = 'entrada'
+         AND fecha_creacion > now() - make_interval(secs => $2)
+       LIMIT 1`, [Number(ocId), segundos]);
+  return !!r;
+}
+
+/** Los movimientos de un lote, por batch_id o por consecutivo del documento. */
+async function porLote(clave) {
+  const filas = await pg.rows(
+    `SELECT ${CAMPOS} ${DESDE}
+      WHERE m.batch_id = $1 OR m.documento_ref = $1
+      ORDER BY m.id`, [String(clave)]);
+  return filas.map(mapear);
+}
+
 /** Las OC que ya tienen al menos una entrada vigente. */
 async function ocIdsConEntrada() {
   const filas = await pg.rows(
@@ -270,7 +293,38 @@ async function resolverProyecto(c, texto) {
   return creado.rows[0].id;
 }
 
+/**
+ * Agrupa los movimientos en documentos, para la vista de registros de almacén.
+ * Los que aún no tienen consecutivo se agrupan por batch_id, que es lo que los
+ * mantiene juntos mientras están en borrador.
+ */
+async function documentos({ tipo = null } = {}) {
+  const movs = await listar({ incluirAnulados: true });
+  const filtrados = tipo ? movs.filter(m => m.tipo === tipo) : movs;
+
+  const docs = new Map();
+  for (const m of filtrados) {
+    const clave = m.documentoRef || `__BORR__${m.batchId || m.fechaCreacion}`;
+    if (!docs.has(clave)) docs.set(clave, {
+      ref:       m.documentoRef || null,
+      batchId:   m.batchId || clave,
+      tipo:      m.tipo,
+      estadoDoc: m.estadoDoc || "aprobado",
+      fecha:     m.fecha,
+      proyecto:  m.proyecto,
+      numeroOC:  m.numeroOC || "",
+      items:     [],
+      total:     0,
+    });
+    const d = docs.get(clave);
+    d.items.push(m);
+    d.total += m.valorTotal;
+  }
+  return [...docs.values()].sort((a, b) => String(b.fecha || "").localeCompare(String(a.fecha || "")));
+}
+
 module.exports = {
-  listar, obtener, stock, ocIdsConEntrada, siguienteDocumentoRef,
+  listar, obtener, stock, documentos, porLote, hayEntradaReciente,
+  ocIdsConEntrada, siguienteDocumentoRef,
   crear, crearLote, actualizar, aprobarLote, anular,
 };
