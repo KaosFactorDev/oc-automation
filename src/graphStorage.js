@@ -206,6 +206,10 @@ async function appendRowToTable(siteId, driveItemId, tableName, values, { sessio
 
 async function uploadFileToSite(siteId, relativePath, buffer, contentType = 'application/octet-stream') {
   const p     = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
+  // En modo prueba el archivo se guarda en disco. Los llamadores solo leen
+  // webUrl, así que la forma devuelta les sirve igual.
+  const prueba = require('./modoPrueba');
+  if (prueba.activo) return prueba.guardarEnDisco(p, buffer);
   const token = await getToken();
   const url   = `${GRAPH}/sites/${siteId}/drive/root:/${p}:/content`;
   const res   = await fetch(url, {

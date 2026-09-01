@@ -8,7 +8,20 @@
     "dev": "node --watch src/servidor-cotizaciones.js",
     "correos": "node index.js",
     "correos:test": "node index.js --test",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "revisar-listas": "node src/scripts/revisar-listas.js",
+    "db:push": "node src/scripts/db-migrar.js",
+    "db:up": "docker compose -f docker-compose.dev.yml up -d",
+    "db:down": "docker compose -f docker-compose.dev.yml down",
+    "db:psql": "docker exec -it oc-automation-db-dev psql -U postgres -d erp",
+    "db:reset": "docker compose -f docker-compose.dev.yml down -v && docker compose -f docker-compose.dev.yml up -d && node src/scripts/db-esperar.js && node src/scripts/db-migrar.js && node src/scripts/db-clave-app.js",
+    "db:clave": "node src/scripts/db-clave-app.js",
+    "db:esperar": "node src/scripts/db-esperar.js",
+    "db:importar": "node src/scripts/importar-listas.js",
+    "corregir-listas": "node src/scripts/corregir-listas.js",
+    "db:verificar": "node src/scripts/verificar-migracion.js",
+    "revisar-proyectos": "node src/scripts/revisar-proyectos.js",
+    "plan-proyectos": "node src/scripts/plan-proyectos.js"
   },
   "keywords": [],
   "author": "",
@@ -18,7 +31,11 @@
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
     "node-fetch": "^2.7.0",
+    "pg": "^8.23.0",
     "puppeteer": "^25.3.0",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "supabase": "^2.116.0"
   }
 }

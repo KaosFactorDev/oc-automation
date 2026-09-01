@@ -3,24 +3,14 @@
  * consultaProveedor.js
  * Dado un insumo y un proyecto, busca el proveedor óptimo.
  *
- * La función principal acepta datos pre-cargados (historial + proveedores desde SP)
- * o hace fallback a CSV local cuando no se pasan.
+ * El historial y los proveedores llegan precargados desde Postgres. El camino
+ * alternativo que leía tres CSV del disco se retiró junto con los archivos.
  *
  *   1. Filtrar historial de precios por insumo
  *   2. Priorizar proveedores de la misma zona del proyecto
  *   3. De los candidatos, tomar las 3 compras más recientes
  *   4. Elegir la de menor precio entre esas 3
  */
-
-const XLSX = require('xlsx');
-const path = require('path');
-const fs   = require('fs');
-
-const PATHS = {
-  compras:     process.env.PATH_COMPRAS     || path.join(__dirname, '../data/compras.csv'),
-  proveedores: process.env.PATH_PROVEEDORES || path.join(__dirname, '../data/proveedores_depurados_final.csv'),
-  proyectos:   process.env.PATH_PROYECTOS   || path.join(__dirname, '../data/tabla_proyectos.csv'),
-};
 
 // ── Utilidades ────────────────────────────────────────────────────────────────
 
@@ -51,60 +41,6 @@ function normalizar(txt) {
     .normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 
-// ── Fallback CSV ──────────────────────────────────────────────────────────────
-
-function loadCSV(filePath) {
-  try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const wb = XLSX.read(content, { type: 'string' });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    return XLSX.utils.sheet_to_json(ws, { defval: '' });
-  } catch { return []; }
-}
-
-function cargarDatosCSV() {
-  const compras     = loadCSV(PATHS.compras);
-  const proveedores = loadCSV(PATHS.proveedores);
-  const proyectos   = loadCSV(PATHS.proyectos);
-
-  const provPorNit = {};
-  for (const p of proveedores) {
-    const nit = String(p['Identificacion'] || '').trim().replace(/\.0$/, '');
-    if (nit) provPorNit[nit] = {
-      nit,
-      nombre:    p['Razon social'] || '',
-      zona:      p['zona'] || '',
-      municipio: p['Municipio'] || '',
-      telefono:  p['Telefono principal'] || '',
-      correo:    p['Correo electronico'] || '',
-    };
-  }
-
-  const proyPorCodigo = {};
-  for (const p of proyectos) {
-    const cod = normalizar(p['codigo_proyecto'] || '');
-    if (cod) proyPorCodigo[cod] = { zona: p['zona'] || '' };
-  }
-
-  const comprasParsed = compras.map(c => ({
-    insumo:    normalizar(c['Suministro']),
-    insumoRaw: String(c['Suministro'] || '').trim(),
-    precio:    parseMoney(c['Valor Unitario ($)']),
-    nit:       String(c['Tercero'] || '').match(/^(\d+)/)?.[1] || '',
-    fecha:     parseDate(c['Fecha']),
-    fechaRaw:  String(c['Fecha'] || '').trim(),
-    cantidad:  parseMoney(c['Cantidad']),
-    compra:    String(c['Compra'] || '').trim(),
-    proyecto:  String(c['Proyecto'] || '').trim(),
-    prov:      null,
-  }));
-  for (const c of comprasParsed) {
-    if (c.nit && provPorNit[c.nit]) c.prov = provPorNit[c.nit];
-  }
-
-  return { comprasParsed, provPorNit, proyPorCodigo };
-}
-
 // ── Normalizar datos SP al mismo formato interno ──────────────────────────────
 
 function normalizarHistorialSP(historialSP, proveedoresSP) {
@@ -114,8 +50,9 @@ function normalizarHistorialSP(historialSP, proveedoresSP) {
   }
 
   const comprasParsed = (historialSP || []).map(h => {
-    // Acepta nombres de campo de SharePoint (nitProveedor, precioUnitario, numeroCompra)
-    // y nombres de campo de SQLite (nit, precio, documento)
+    // Acepta los dos juegos de nombres: los que traía SharePoint
+    // (nitProveedor, precioUnitario, numeroCompra) y los del repo
+    // (nit, precio, documento).
     const nit = String(h.nitProveedor || h.nit || '').trim();
     return {
       insumo:    normalizar(h.insumo),
@@ -135,28 +72,41 @@ function normalizarHistorialSP(historialSP, proveedoresSP) {
 }
 
 // ── Consulta principal ────────────────────────────────────────────────────────
-// opts.historialSP   → array de items de HistorialPrecios (fields de SP)
-// opts.proveedoresSP → array de proveedores {nit, nombre, zona, ...}
-// opts.zonaProyecto  → string de zona del proyecto
-// Si no se pasan, usa fallback CSV.
+// opts.historialSP   → filas de erp.historial_precios
+// opts.proveedoresSP → proveedores {nit, nombre, zona, ...}
+// opts.zonaProyecto  → zona del proyecto
 
+/**
+ * El historial y los proveedores llegan siempre precargados por el llamador,
+ * que los lee de Postgres. Antes había un camino alternativo que cargaba tres
+ * CSV del disco cuando no venían; se retiró junto con los archivos.
+ *
+ * Sin historial no hay nada que comparar, así que se devuelve el mismo
+ * resultado que daba un insumo sin registros previos.
+ */
 function consultarProveedor(insumo, codigoProyecto, opts = {}) {
-  let comprasParsed, provPorNit, zonaProyecto;
-
-  if (opts.historialSP && opts.historialSP.length > 0) {
-    const norm = normalizarHistorialSP(opts.historialSP, opts.proveedoresSP || []);
-    comprasParsed = norm.comprasParsed;
-    provPorNit    = norm.provPorNit;
-    zonaProyecto  = opts.zonaProyecto || '';
-  } else {
-    const datos   = cargarDatosCSV();
-    comprasParsed = datos.comprasParsed;
-    provPorNit    = datos.provPorNit;
-    const proyNorm = normalizar(codigoProyecto);
-    zonaProyecto  = datos.proyPorCodigo[proyNorm]?.zona || '';
+  if (!opts.historialSP || !opts.historialSP.length) {
+    return sinHistorial(insumo);
   }
 
+  const { comprasParsed } = normalizarHistorialSP(opts.historialSP, opts.proveedoresSP || []);
+  const zonaProyecto = opts.zonaProyecto || '';
+
   return ejecutarConsulta(insumo, codigoProyecto, comprasParsed, zonaProyecto);
+}
+
+/** El resultado de un insumo sin registros previos. */
+function sinHistorial(insumo, codigoProyecto = '') {
+  return {
+    insumo, codigoProyecto,
+    encontrado:   false,
+    sinHistorial: true,
+    mensaje:      `Sin historial para "${insumo}". Incluido en OC sin precio.`,
+    proveedor:    null,
+    precio:       null,
+    historial:    [],
+    alertas:      [`🔍 Ítem nuevo: "${insumo}" — complete el precio antes de aprobar la OC.`],
+  };
 }
 
 function ejecutarConsulta(insumo, codigoProyecto, comprasParsed, zonaProyecto) {
@@ -170,16 +120,7 @@ function ejecutarConsulta(insumo, codigoProyecto, comprasParsed, zonaProyecto) {
   }
 
   if (registros.length === 0) {
-    return {
-      insumo, codigoProyecto,
-      encontrado:   false,
-      sinHistorial: true,
-      mensaje:      `Sin historial para "${insumo}". Incluido en OC sin precio.`,
-      proveedor:    null,
-      precio:       null,
-      historial:    [],
-      alertas:      [`🔍 Ítem nuevo: "${insumo}" — complete el precio antes de aprobar la OC.`],
-    };
+    return sinHistorial(insumo, codigoProyecto);
   }
 
   const enriquecidos = registros
@@ -264,4 +205,4 @@ function fmtHistorial(c) {
 
 function invalidarCache() { /* no-op — cache en servidor-cotizaciones.js */ }
 
-module.exports = { consultarProveedor, invalidarCache, cargarDatos: cargarDatosCSV };
+module.exports = { consultarProveedor, invalidarCache };

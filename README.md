@@ -2,9 +2,21 @@
 
 Consola web de gestión de requerimientos, órdenes de compra, órdenes de servicio e inventarios para **Civiltech Ingeniería y Construcción S.A.S.**
 
-Desde julio 2026 el sistema está **centralizado en un VPS Linux con Docker**: una sola consola web a la que todos entran por navegador (ya no se instala en cada equipo). La información vive en SharePoint (nube corporativa) con un caché SQLite local que hace las lecturas instantáneas.
+Desde julio 2026 el sistema está **centralizado en un VPS Linux con Docker**: una sola consola web a la que todos entran por navegador (ya no se instala en cada equipo). Los datos viven en una base **Postgres autoalojada** que corre en el mismo Docker. Los archivos de respaldo —los PDF de OC, OS y requerimientos— siguen en el Drive de SharePoint, que es donde la gente los busca.
 
 > **¿Vas a trabajar en el código?** Lee primero [CONTRIBUTING.md](CONTRIBUTING.md) — flujo de ramas, convención de commits y entorno local. Ten presente que **un merge a `main` despliega a producción de inmediato**.
+
+> **Migración a Postgres: hecha en código, pendiente el corte.** Las cinco
+> fuentes de datos —once listas de SharePoint, el libro `Control Costos.xlsx`,
+> tres CSV y el caché SQLite— están en Postgres, y la aplicación lee y escribe
+> ahí. Comprobado sustituyendo las funciones de listas por funciones que lanzan:
+> las 12 rutas de datos respondieron completas y ninguna se llamó.
+>
+> Lo que falta es **levantar la base en el VPS y hacer el corte**. Hasta
+> entonces, producción sigue corriendo la versión anterior contra SharePoint. El
+> procedimiento, los comandos y el esquema están en [docs/](docs/README.md).
+>
+> Para trabajar en local sin ensuciar producción: `MODO_PRUEBA=1` en el `.env`.
 
 ---
 
@@ -45,8 +57,10 @@ Consola web (http://localhost:3001)
          │
          ├─ authService.js          ← Login Microsoft OAuth 2.0 + sesiones
          ├─ graphStorage.js         ← Wrapper Microsoft Graph API (SharePoint)
-         ├─ db.js                   ← Caché SQLite (lectura rápida sin red)
-         ├─ syncService.js          ← Sincronización SharePoint → SQLite (c/2 min)
+         ├─ pg.js                   ← Pool de conexiones a Postgres
+         ├─ repo/                   ← Capa de repositorio: todo el SQL vive acá
+         ├─ db.js                   ← SQLite: solo sesiones y mapeo de tesorería
+         ├─ modoPrueba.js           ← Corta las escrituras externas en desarrollo
          ├─ contador.js             ← Numeración consecutiva OC / OS
          ├─ configApp.js            ← Configuración de la aplicación
          ├─ consultaProveedor.js    ← Comparativa de proveedores
@@ -68,12 +82,21 @@ gana).
 
 **Base de datos dual:**
 
-- **SharePoint** — fuente de verdad. Todas las escrituras van primero a SharePoint.
-- **SQLite local** (`data/local.db`, gestionado por `db.js`) — caché de lectura rápida. Se sincroniza automáticamente desde SharePoint cada 2 minutos via `syncService.js`. Permite que la consola cargue instantáneamente aunque SharePoint tarde.
+- **Postgres** (`erp`, autoalojado en Docker) — fuente de verdad. Todo el SQL vive
+  en `src/repo/`: fuera de ahí no se escribe SQL, y ahí adentro no se toman
+  decisiones de negocio.
+- **SQLite local** (`data/local.db`) — ya no es un caché. Le quedan dos tablas que
+  nunca fueron datos del ERP: las sesiones de login y el mapeo de proyectos hacia
+  tesorería.
+- **SharePoint** — solo archivos: los PDF de respaldo en el Drive. Ninguna
+  operación de datos sale por Microsoft Graph.
 
-> Cada escritura a SharePoint actualiza también SQLite de forma inmediata para que la UI refleje los cambios sin esperar el ciclo de sincronización.
+> Antes SharePoint era la fuente y SQLite un caché que se sincronizaba cada 2
+> minutos. Ese montaje se retiró: con Postgres en el mismo host una consulta
+> tarda menos de un milisegundo, así que el caché dejó de tener razón de ser —y
+> con él la ventana en que quedaba viejo.
 
-| Lista SharePoint | Tabla SQLite | Contenido |
+| Lista SharePoint | Tabla Postgres | Contenido |
 |-----------------|-------------|-----------|
 | `HistorialPrecios` | `historial_precios` | Precios pagados por OC y cotización (Buscador de Precios) |
 | `Proveedores` | `proveedores` | Catálogo activo de proveedores con NIT, nombre, zona, municipio |
@@ -263,9 +286,6 @@ solo es necesario actualizar los campos personales:
 
 ```env
 # ── Rutas a las bases de datos (fallback CSV — usar solo si SQLite está vacío) ──
-PATH_COMPRAS=./data/compras.csv
-PATH_PROVEEDORES=./data/proveedores_depurados_final.csv
-PATH_PROYECTOS=./data/tabla_proyectos.csv
 
 # ── Microsoft Graph API ───────────────────────────────────────────────────────
 TENANT_ID=<azure-tenant-id>
@@ -307,9 +327,20 @@ PUERTO_COTIZACIONES=3001
 # ── Procesamiento automático de correos ───────────────────────────────────────
 POLLING_INTERVAL_MIN=5
 
-# ── SQLite (caché local) ──────────────────────────────────────────────────────
+# ── Postgres (fuente de datos) ────────────────────────────────────────────────
+# Ver .env.example para el detalle de cada variable y por qué van sueltas y no
+# como una URL.
+ERP_DB_HOST=localhost      # en el VPS: db
+ERP_DB_PORT=55432          # en el VPS: 5432
+ERP_DB_NAME=erp
+ERP_DB_USER=erp_app
+ERP_DB_PASSWORD=
+
+# ── SQLite (sesiones y mapeo de tesorería) ────────────────────────────────────
 SQLITE_PATH=./data/local.db
-SYNC_INTERVAL_MIN=2
+
+# ── Desarrollo: corta las escrituras hacia SharePoint, correo y tesorería ─────
+MODO_PRUEBA=1
 
 # ── Tesorería / Pagos Diarios (opcional) ─────────────────────────────────────
 # Si falta cualquiera de las cuatro, la integración no aparece en la consola.
@@ -448,7 +479,11 @@ al VPS directamente.
 
 ### Primer despliegue (dar de alta el sistema en el VPS)
 
-> **Importante:** llevar también el `data/local.db` existente del equipo central, no arrancar con la carpeta `data/` vacía. `bootstrapAdmin()` y el registro de usuario en el login (`servidor-cotizaciones.js`) deciden si un usuario ya existe mirando el **caché SQLite local** (`localDb.countUsuarios()` / `getUsuarioByEmail()`), no la lista `UsuariosERP` de SharePoint real. Si arranca vacía, la primera vez que el servidor levante o que alguien haga login va a **crear un usuario/admin duplicado en SharePoint**, aunque ya exista. Copiando el `local.db` real se evita ese arranque en frío.
+> **Importante:** el arranque en frío ya no duplica usuarios. `bootstrapAdmin()` y
+> el registro en el login consultan `erp.usuarios` en Postgres, donde el correo es
+> único, así que una carpeta `data/` vacía no crea nada duplicado. Lo que sí se
+> pierde al arrancar sin el `local.db` anterior son las **sesiones abiertas**: la
+> gente tendrá que volver a entrar. Eso es todo.
 >
 > `data/` se monta directo desde la carpeta del proyecto en el VPS (`./data:/app/data`, ver `docker-compose.yml`) — no es un volumen aparte, así que lo que copies ahí con `scp` es exactamente lo que va a usar el contenedor. El contenedor corre con un usuario de sistema fijo (UID/GID `10001`), por eso el `chown` del paso 2 es necesario: sin él, Docker no puede escribir `local.db` en esa carpeta.
 
@@ -480,7 +515,13 @@ docker compose logs -f mailer   # procesamiento de correos
 
 Con esto el sistema queda dado de alta: ya **no** hace falta instalar Node.js, Python, `npm install`, `iniciar-erp.bat` ni `instalar-tarea.ps1` en el VPS — todo vive dentro de los contenedores. Esos pasos (documentados en `INSTALACION.md`) solo aplican al modelo anterior de instalación local por equipo.
 
-El directorio `data/` (caché SQLite, incluye sesiones y consecutivos por proyecto) se monta directo desde la carpeta del proyecto en el VPS (bind mount, no un volumen aparte) y persiste entre reinicios y actualizaciones mientras no se borre esa carpeta.
+El directorio `data/` (el SQLite con las sesiones y el mapeo de tesorería) se
+monta directo desde la carpeta del proyecto en el VPS (bind mount, no un volumen
+aparte) y persiste entre reinicios y actualizaciones mientras no se borre.
+
+Los **datos del ERP no están ahí**: viven en el volumen con nombre
+`oc-automation-pgdata`, que Docker gestiona aparte y que `rsync` del despliegue
+no toca. Solo se borra con `docker compose down -v`.
 
 ### Reverse proxy compartido (`edge-proxy`)
 
@@ -614,15 +655,17 @@ oc-automation/
 ├── src/
 │   ├── servidor-cotizaciones.js      ← Servidor web (puerto 3001) + API REST + auth middleware
 │   ├── authService.js                ← Autenticación Microsoft OAuth 2.0 + sesiones
-│   ├── db.js                         ← Caché SQLite local + usuarios, sesiones y consecutivos
-│   ├── syncService.js                ← Sincronización SharePoint → SQLite (cada 2 min)
-│   ├── graphStorage.js               ← Wrapper Microsoft Graph API (SharePoint / OneDrive)
+│   ├── pg.js                         ← Pool de conexiones a Postgres
+│   ├── repo/                         ← Capa de repositorio: 9 módulos, todo el SQL
+│   ├── db.js                         ← SQLite: solo sesiones y mapeo de tesorería
+│   ├── modoPrueba.js                 ← Corta escrituras externas en desarrollo
+│   ├── graphStorage.js               ← Wrapper Microsoft Graph (Drive, buzón, auth)
 │   ├── leerCorreos.js                ← Lectura de correos vía Microsoft Graph
 │   ├── procesarCorreo.js             ← Orquestador de procesamiento de correos
 │   ├── parsearAsunto.js              ← Parser de asunto de correo
 │   ├── leerRequerimiento.js          ← Extracción desde Excel de requerimiento
 │   ├── leerRequerimientoPDF.js       ← Extracción desde PDF/imagen (Gemini AI)
-│   ├── requerimientos.js             ← Operaciones sobre lista Requerimientos
+│   ├── requerimientos.js             ← Operaciones sobre requerimientos
 │   ├── consultaProveedor.js          ← Búsqueda de proveedor óptimo (historial + zona)
 │   ├── contador.js                   ← Numeración consecutiva OC / OS
 │   ├── configApp.js                  ← Configuración persistente de la app
@@ -644,9 +687,6 @@ oc-automation/
 │
 └── data/                             ← Bind mount en el VPS; persiste entre despliegues
     ├── local.db                      ← SQLite caché (generado automáticamente)
-    ├── compras.csv                   ← Fallback CSV historial precios (solo si SQLite vacío)
-    ├── proveedores_depurados_final.csv ← Fallback CSV proveedores (solo si SQLite vacío)
-    ├── tabla_proyectos.csv           ← Fallback CSV proyectos (solo si SQLite vacío)
     ├── plantilla_oc.xlsx             ← Plantilla Excel para OCs
     └── CT-ADMIN-FO-002_...xlsx       ← Formato de solicitud de requerimiento
 ```
@@ -660,17 +700,26 @@ producción ya no se usan: todo corre en el VPS.
 
 Son utilidades de una sola ejecución, no parte del ciclo normal. Se corren a mano con `node`.
 
-| Script | Para qué |
-|--------|----------|
-| `crear-listas.js` · `esquemas.js` | Crea las listas en SharePoint según su esquema (setup inicial) |
-| `init-sqlite.js` | Poblado inicial SharePoint → SQLite |
-| `migrarCSV.js` | Migra `compras.csv` → lista `HistorialPrecios` |
-| `migrarOC.js` | Retroalimenta `HistorialPrecios` con las OC ya aprobadas |
-| `migrar-proveedores.js` · `cargar-insumos.js` · `provisionar-proyectos.js` | Siembra de catálogos |
-| `crear-control-costos.js` | Genera el libro `Control Costos.xlsx` |
-| `backfill-pdf-requerimientos.js` · `backfill-pdf-ordenes-compra.js` · `backfill-pdf-ordenes-servicio.js` | Genera y sube los PDF de documentos anteriores a la función de PDF automático |
-| `verificar-tesoreria.js` | Diagnostica la integración con tesorería (variables, login, rol) |
-| `limpiar-ocs-prueba.js` · `wipe-datos-prueba.js` | Limpieza de datos de prueba — **destructivos** |
+| Script | Para qué | Comando |
+|--------|----------|---------|
+| `db-admin.js` | Levanta, baja y abre `psql` contra la base local | `npm run db:up` · `db:down` · `db:psql` |
+| `db-migrar.js` | Aplica las migraciones de `supabase/migrations/` | `npm run db:push` |
+| `db-clave-app.js` | Asigna la contraseña del rol `erp_app` | `npm run db:clave` |
+| `db-esperar.js` | Espera a que la base acepte conexiones | `npm run db:esperar` |
+| `revisar-listas.js` | Chequeo previo: qué rechazaría el esquema | `npm run revisar-listas` |
+| `corregir-listas.js` | Corrige en SharePoint lo que se puede corregir solo | `npm run corregir-listas` |
+| `importar-listas.js` | Carga las 11 listas de SharePoint en Postgres | `npm run db:importar` |
+| `verificar-migracion.js` | Compara SharePoint contra Postgres: ¿están todos los datos? | `npm run db:verificar` |
+| `backfill-pdf-*.js` (3) | Genera y sube los PDF de documentos anteriores al PDF automático | a mano |
+| `verificar-tesoreria.js` | Diagnostica la integración con tesorería | a mano |
+
+Los scripts de la era SharePoint se retiraron con la migración: los que creaban
+las listas y sembraban catálogos (`crear-listas.js`, `esquemas.js`,
+`migrar-proveedores.js`, `provisionar-proyectos.js`, `cargar-insumos.js`,
+`init-sqlite.js`, `migrarOC.js`), el que armaba el libro de Control de Costos
+—ahora lo hace `controlCostos.generarXlsx()` desde `erp.vw_gastos`— y los de
+limpieza de datos de prueba, que borraban de las listas y habrían dejado
+Postgres intacto.
 
 ---
 

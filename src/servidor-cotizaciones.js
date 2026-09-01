@@ -1,13 +1,13 @@
 'use strict';
 /**
  * servidor-cotizaciones.js
- * App web local para cargar cotizaciones y actualizar precios en compras.csv
+ * App web local para cargar cotizaciones y registrar precios en el historial
  * Puerto: 3001 — abrir en navegador: http://localhost:3001
  *
  * Endpoints:
  *   GET  /               → UI principal
  *   POST /extraer        → recibe archivo, extrae precios con Gemini API
- *   POST /confirmar      → guarda filas confirmadas en compras.csv
+ *   POST /confirmar      → guarda filas confirmadas en erp.historial_precios
  *   GET  /proveedores    → lista de proveedores activos para autocompletado
  *   GET  /insumos        → lista de insumos históricos para autocompletado
  *   GET  /proyectos      → lista de proyectos activos
@@ -27,19 +27,100 @@ const ocTemplate       = require('./ocTemplate');
 const remisionTemplate = require('./remisionTemplate');
 const osTemplate       = require('./osTemplate');
 const configApp        = require('./configApp');
+const repoCatalogos    = require('./repo/catalogos');
+const repoRequerimientos = require('./repo/requerimientos');
+const repoOrdenesCompra  = require('./repo/ordenesCompra');
+const repoOrdenesServicio = require('./repo/ordenesServicio');
+const repoRemisiones     = require('./repo/remisiones');
+const repoInventario     = require('./repo/inventario');
+const repoHistorial      = require('./repo/historialPrecios');
+const repoGastos         = require('./repo/gastos');
 const localDb          = require('./db');
-const syncService      = require('./syncService');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
 const geminiConfig     = require('./geminiConfig');
 
+// ── Requerimientos: adaptadores a la forma de SharePoint ─────────────────────
+// El código accede a reqItem.fields.X en decenas de lugares. repo/requerimientos
+// devuelve un objeto plano con esos mismos nombres de campo, así que envolverlo
+// en { id, fields } lo hace un reemplazo directo y evita tocar cada acceso.
+
+async function obtenerRequerimiento(id) {
+  const r = await repoRequerimientos.obtener(id);
+  if (!r) throw new Error(`Requerimiento ${id} no existe`);
+  return { id: r.id, fields: r };
+}
+
+async function listarRequerimientos(filtro) {
+  const rs = await repoRequerimientos.listar(filtro || {});
+  return rs.map(r => ({ id: r.id, fields: r }));
+}
+
+/**
+ * Traduce un PATCH con nombres de SharePoint. Dos campos necesitan trato
+ * aparte: itemsJson, que ahora vive en una tabla hija, y ocsGeneradas, que se
+ * deriva de ordenes_compra.requerimiento_id y por eso se ignora.
+ */
+async function actualizarRequerimiento(id, cambios) {
+  const { itemsJson, ocsGeneradas, ...resto } = cambios || {};
+  if (itemsJson !== undefined) {
+    let items = [];
+    try { items = JSON.parse(itemsJson || '[]'); } catch {}
+    await repoRequerimientos.reemplazarItems(id, items);
+  }
+  if (Object.keys(resto).length) await repoRequerimientos.actualizar(id, resto);
+  return { ok: true };
+}
+
+// ── Remisiones e inventario: adaptadores a la forma de SharePoint ────────────
+
+async function obtenerRemision(id) {
+  const r = await repoRemisiones.obtener(id);
+  if (!r) throw new Error(`Remisión ${id} no existe`);
+  return { id: r.id, fields: r };
+}
+
+async function listarRemisiones(filtro) {
+  const rs = await repoRemisiones.listar(filtro || {});
+  return rs.map(r => ({ id: r.id, fields: r }));
+}
+
+// ── Órdenes de servicio: adaptadores a la forma de SharePoint ────────────────
+
+async function obtenerOS(id) {
+  const o = await repoOrdenesServicio.obtener(id);
+  if (!o) throw new Error(`Orden de servicio ${id} no existe`);
+  return { id: o.id, fields: o };
+}
+
+// ── Órdenes de compra: adaptadores a la forma de SharePoint ──────────────────
+
+async function obtenerOC(id) {
+  const o = await repoOrdenesCompra.obtener(id);
+  if (!o) throw new Error(`Orden de compra ${id} no existe`);
+  return { id: o.id, fields: o };
+}
+
+async function listarOC(filtro) {
+  const os = await repoOrdenesCompra.listar(filtro || {});
+  return os.map(o => ({ id: o.id, fields: o }));
+}
+
+// Misma normalización que erp.norm_nit(): quita puntos, comas, el sufijo ".0"
+// que deja Excel al leer un NIT como número, y el dígito de verificación —que
+// es un checksum de la raíz y no distingue empresas—.
+const erpNormNit = (s) => String(s || '')
+  .replace(/\.0+$/, '')
+  .replace(/[^0-9A-Za-z-]/g, '')
+  .split('-')[0];
+
 // Sobreescribe cfg.firmante con el usuario de la sesión activa.
-// La configuración de empresa (logo, emisor, IVA) sigue viniendo de SharePoint.
-function cfgConFirmante(cfg, sesion) {
+// La configuración de empresa (logo, emisor, IVA) sale de erp.configuracion.
+async function cfgConFirmante(cfg, sesion) {
   const nombre = (sesion?.nombre || '').trim();
   if (!nombre) return cfg;
-  const usuario = localDb.getUsuarioByEmail(sesion.email) || {};
+  const usuario = (await repoCatalogos.getUsuarioByEmail(sesion.email)) || {};
   const cargo = (usuario.cargo || '').trim();
   return { ...cfg, firmante: { nombre, cargo } };
 }
@@ -74,8 +155,7 @@ async function ocDesdeSharePoint(itemId) {
     };
   }
   const ctx = await ctxSharePoint();
-  if (!ctx.OrdenesCompra) throw new Error('Lista OrdenesCompra no existe');
-  const item = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, itemId);
+  const item = await obtenerOC(itemId);
   const f = item.fields || {};
   let itemsRaw = [];
   try { itemsRaw = JSON.parse(f.itemsJson || '[]'); } catch { itemsRaw = []; }
@@ -107,17 +187,17 @@ async function ocDesdeSharePoint(itemId) {
   };
 }
 
-// Genera el PDF de la OC (mismo motor que /oc/:id.html) y lo sube a SharePoint,
-// guardando el link en el campo pdfUrl. Se relee el item fresco de Graph para
-// tener itemsJson completo (actualizado.fields del PATCH no lo incluye).
+// Genera el PDF de la OC (mismo motor que /oc/:id.html) y lo sube al Drive de
+// SharePoint, guardando el link en pdfUrl. Los archivos se quedan en SharePoint
+// por decisión de alcance; solo los datos migran.
 async function guardarPdfOCEnSharePoint(ctx, itemId, sesion) {
   const oc  = await ocDesdeSharePoint(itemId);
-  const cfg = cfgConFirmante(await configApp.getConfig(), sesion);
+  const cfg = await cfgConFirmante(await configApp.getConfig(), sesion);
   const html   = ocTemplate.generarHTML(oc, cfg);
   const buffer = await pdfGenerator.htmlAPdf(html);
   const nombre = `${oc.numeroOC || itemId}_${oc.proyecto || 'SIN-PROYECTO'}`.replace(/[\\/:*?"<>|]/g, '-');
   const driveItem = await g.uploadFileToSite(ctx.siteId, `/OrdenesCompraPDF/${nombre}.pdf`, buffer, 'application/pdf');
-  await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, itemId, { pdfUrl: driveItem.webUrl });
+  await repoOrdenesCompra.actualizar(itemId, { pdfUrl: driveItem.webUrl });
   return driveItem.webUrl;
 }
 
@@ -126,8 +206,7 @@ async function guardarPdfOCEnSharePoint(ctx, itemId, sesion) {
 // se listan los ítems del requerimiento y (si hay) las OC asociadas.
 async function remisionDesdeRequerimiento(itemId) {
   const ctx = await ctxSharePoint();
-  if (!ctx.Requerimientos) throw new Error('Lista Requerimientos no existe');
-  const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, itemId);
+  const reqItem = await obtenerRequerimiento(itemId);
   const f = reqItem.fields || {};
 
   let items = [];
@@ -161,12 +240,11 @@ async function remisionDesdeRequerimiento(itemId) {
 // Los ítems se consolidan por descripción+unidad sumando cantidades.
 async function remisionDesdeOCs(ocIds, extra = {}) {
   const ctx = await ctxSharePoint();
-  if (!ctx.OrdenesCompra) throw new Error('Lista OrdenesCompra no existe');
   if (!Array.isArray(ocIds) || !ocIds.length) throw new Error('Debe indicar al menos una OC');
 
   const ocsRaw = [];
   for (const id of ocIds) {
-    const it = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, id);
+    const it = await obtenerOC(id);
     ocsRaw.push(it);
   }
   const proyectos = [...new Set(ocsRaw.map(o => (o.fields?.proyecto || '').trim()).filter(Boolean))];
@@ -217,17 +295,15 @@ async function crearRemisionYGuardar(ctx, ocIds, extra, usuario) {
   const rem = await remisionDesdeOCs(ocIds, extra);
 
   const now = new Date().toISOString();
-  const existentes = await g.getListItems(ctx.siteId, ctx.Remisiones);
-  const numero = 'REM-' + String((existentes?.length || 0) + 1).padStart(5, '0');
-  rem.numero = numero;
 
-  const creado = await g.addListItem(ctx.siteId, ctx.Remisiones, {
-    numero,
+  // El número lo emite erp.siguiente_numero_remision() dentro de la
+  // transacción. Antes salía de (cantidad de remisiones + 1), y con eso dos
+  // remisiones creadas en el mismo segundo obtenían el mismo número —
+  // REM-00011 existía dos veces por un doble clic en el formulario.
+  // ocIds y ocsAsociadas ya no se guardan: se derivan de remision_ordenes.
+  const { id, numero } = await repoRemisiones.crear({
     fecha:                extra.fecha || now,
     proyecto:             rem.proyecto,
-    ocIds:                JSON.stringify(ocIds),
-    ocsAsociadas:         rem.ocsAsociadas,
-    itemsJson:            JSON.stringify(rem.items),
     observaciones:        rem.observaciones,
     responsableEntrega:   rem.responsableEntrega,
     responsableRecepcion: rem.responsableRecepcion,
@@ -235,10 +311,10 @@ async function crearRemisionYGuardar(ctx, ocIds, extra, usuario) {
     creadoPor:            usuario,
     fechaCreacion:        now,
     estado:               'activa',
-  });
+  }, rem.items, ocIds);
 
-  if (creado?.id) localDb.upsertDocumento('remisiones', creado);
-  return { id: creado.id, numero, rem };
+  rem.numero = numero;
+  return { id, numero, rem };
 }
 
 // Al anular una OC, propaga el cambio a las remisiones que la incluyan.
@@ -246,8 +322,7 @@ async function crearRemisionYGuardar(ctx, ocIds, extra, usuario) {
 // - Si tenía varias OC → estado='requiere-reemplazo' + alerta para generar nueva remisión con las OC restantes.
 // Devuelve el listado de remisiones afectadas para que el UI pueda avisar.
 async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, now) {
-  if (!ctx.Remisiones) return [];
-  const remisiones = await g.getListItems(ctx.siteId, ctx.Remisiones);
+  const remisiones = await listarRemisiones();
   const afectadas = [];
   const numOCAnulada = ocFields.numeroOC || `id:${ocIdAnulada}`;
 
@@ -263,31 +338,27 @@ async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, n
 
     if (quedanIds.length === 0) {
       // Única OC en la remisión → se anula completa
-      await g.updateListItem(ctx.siteId, ctx.Remisiones, rem.id, {
+      await repoRemisiones.actualizar(rem.id, {
         estado: 'anulada',
         motivoAnulacion: `OC ${numOCAnulada} anulada por ${usuario} el ${fechaStr}`,
       });
-      localDb.upsertDocumento('remisiones', { id: rem.id, fields: { ...f, estado: 'anulada',
-        motivoAnulacion: `OC ${numOCAnulada} anulada por ${usuario} el ${fechaStr}` } });
       afectadas.push({ id: rem.id, numero: f.numero, accion: 'anulada' });
     } else {
       // Remisión multi-OC → mantiene estado pero queda marcada con alerta
       let numerosRestantes = [];
       try {
         for (const id of quedanIds) {
-          const oc = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, id);
+          const oc = await obtenerOC(id);
           if (oc?.fields?.numeroOC) numerosRestantes.push(oc.fields.numeroOC);
           else numerosRestantes.push(`id:${id}`);
         }
       } catch {}
       const alerta = `⚠ OC ${numOCAnulada} fue anulada el ${fechaStr}. Se requiere generar una nueva remisión para las OC restantes: ${numerosRestantes.join(', ')}`;
       const alertasPrev = f.alertas || '';
-      await g.updateListItem(ctx.siteId, ctx.Remisiones, rem.id, {
+      await repoRemisiones.actualizar(rem.id, {
         estado: 'requiere-reemplazo',
         alertas: alertasPrev ? `${alertasPrev}\n${alerta}` : alerta,
       });
-      localDb.upsertDocumento('remisiones', { id: rem.id, fields: { ...f, estado: 'requiere-reemplazo',
-        alertas: alertasPrev ? `${alertasPrev}\n${alerta}` : alerta } });
       afectadas.push({ id: rem.id, numero: f.numero, accion: 'requiere-reemplazo', ocRestantes: numerosRestantes });
     }
   }
@@ -298,8 +369,7 @@ async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, n
 // Útil para reparar requerimientos que quedaron 'gestionado' después de anular OCs
 // antes de que existiera la cascada de re-evaluación. Llamado desde GET /requerimientos.
 async function reconciliarRequerimientosVsOCs(ctx) {
-  if (!ctx.Requerimientos || !ctx.OrdenesCompra) return 0;
-  const reqs = await g.getListItems(ctx.siteId, ctx.Requerimientos);
+  const reqs = await listarRequerimientos();
   let cambios = 0;
   for (const r of reqs) {
     const f = r.fields || {};
@@ -307,8 +377,7 @@ async function reconciliarRequerimientosVsOCs(ctx) {
     try {
       const nuevo = await calcularEstadoRequerimiento(ctx, r);
       if (nuevo && nuevo !== f.estado) {
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, r.id, { estado: nuevo });
-        localDb.upsertDocumento('requerimientos', { id: r.id, fields: { ...f, estado: nuevo } });
+        await actualizarRequerimiento(r.id, { estado: nuevo });
         cambios++;
       }
     } catch (e) { console.warn(`Reconcilia req ${r.id}:`, e.message); }
@@ -320,8 +389,7 @@ async function reconciliarRequerimientosVsOCs(ctx) {
 // Útil para reparar remisiones que quedaron activas después de anular OCs antes de que
 // existiera la cascada. Llamado desde GET /remisiones para auto-corrección continua.
 async function reconciliarRemisionesVsOCs(ctx) {
-  if (!ctx.Remisiones || !ctx.OrdenesCompra) return 0;
-  const remisiones = await g.getListItems(ctx.siteId, ctx.Remisiones);
+  const remisiones = await listarRemisiones();
   let cambios = 0;
   for (const rem of remisiones) {
     const f = rem.fields || {};
@@ -333,7 +401,7 @@ async function reconciliarRemisionesVsOCs(ctx) {
     const estadosOCs = [];
     for (const id of ids) {
       try {
-        const oc = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, id);
+        const oc = await obtenerOC(id);
         estadosOCs.push({ id, numero: oc.fields?.numeroOC || `id:${id}`, estado: oc.fields?.estado || 'borrador' });
       } catch { estadosOCs.push({ id, numero: `id:${id}`, estado: 'desconocida' }); }
     }
@@ -344,20 +412,18 @@ async function reconciliarRemisionesVsOCs(ctx) {
     if (!vigentes.length) {
       const motivo = `OCs anuladas: ${anuladas.map(o => o.numero).join(', ')}`;
       const motivoFinal = f.motivoAnulacion ? f.motivoAnulacion : motivo;
-      await g.updateListItem(ctx.siteId, ctx.Remisiones, rem.id, {
+      await repoRemisiones.actualizar(rem.id, {
         estado: 'anulada',
         motivoAnulacion: motivoFinal,
       });
-      localDb.upsertDocumento('remisiones', { id: rem.id, fields: { ...f, estado: 'anulada', motivoAnulacion: motivoFinal } });
       cambios++;
     } else if (f.estado !== 'requiere-reemplazo') {
       const alerta = `⚠ OCs anuladas: ${anuladas.map(o => o.numero).join(', ')}. Generar nueva remisión para OCs vigentes: ${vigentes.map(o => o.numero).join(', ')}`;
       const alertasFinal = f.alertas ? `${f.alertas}\n${alerta}` : alerta;
-      await g.updateListItem(ctx.siteId, ctx.Remisiones, rem.id, {
+      await repoRemisiones.actualizar(rem.id, {
         estado: 'requiere-reemplazo',
         alertas: alertasFinal,
       });
-      localDb.upsertDocumento('remisiones', { id: rem.id, fields: { ...f, estado: 'requiere-reemplazo', alertas: alertasFinal } });
       cambios++;
     }
   }
@@ -381,9 +447,7 @@ async function calcularEstadoRequerimiento(ctx, reqItem) {
   if (!itemsReq.length) return reqF.estado || 'pendiente';
 
   // Obtener todas las OC de este requerimiento
-  const ocsAll = await g.getListItems(ctx.siteId, ctx.OrdenesCompra, {
-    filter: `fields/requerimientoId eq '${String(reqItem.id).replace(/'/g,"''")}'`,
-  });
+  const ocsAll = await listarOC({ requerimientoId: reqItem.id });
 
   // Acumular cantidades por insumo (ignorando OC anuladas)
   const cubierto = {};
@@ -415,196 +479,17 @@ async function calcularEstadoRequerimiento(ctx, reqItem) {
 
 // Cache de IDs de listas SharePoint para no resolverlas en cada request
 const _listCache = {}; // { siteId, Requerimientos, OrdenesCompra, Insumos, Proveedores }
-let _columnasMigradas     = false;
-let _osListProvisioned    = false;
-let _hpListProvisioned    = false;
-let _miListProvisioned    = false;
 let _carpetaPdfReqUrl     = null; // cache del webUrl de RequerimientosPDF
 let _carpetaPdfOCUrl      = null; // cache del webUrl de OrdenesCompraPDF
 let _carpetaPdfOSUrl      = null; // cache del webUrl de OrdenesServicioPDF
-let _usrListProvisioned   = false;
-
-async function asegurarListaOS(siteId) {
-  // Intenta obtener la lista; si no existe, la crea con todas las columnas del esquema
-  const { OrdenesServicio: schema } = require('./scripts/esquemas');
-  let listId;
-  try {
-    const lst = await g.getListByName(siteId, 'OrdenesServicio');
-    listId = lst?.id;
-  } catch {}
-
-  if (!listId) {
-    try {
-      const created = await g.post(`/sites/${siteId}/lists`, {
-        displayName: schema.displayName,
-        description: schema.description || '',
-        list: schema.list,
-      });
-      listId = created?.id;
-      console.log('[asegurarListaOS] Lista OrdenesServicio creada:', listId);
-    } catch (e) {
-      if (!String(e.message).includes('409')) {
-        console.warn('[asegurarListaOS] No se pudo crear lista:', e.message);
-        return;
-      }
-      // Ya existe — reintentar GET
-      try { const lst = await g.getListByName(siteId, 'OrdenesServicio'); listId = lst?.id; } catch {}
-    }
-  }
-
-  if (!listId) return;
-  _listCache.OrdenesServicio = listId;
-
-  // Agregar columnas (ignora 409 = ya existe)
-  for (const col of schema.columns) {
-    const { name, required, ...tipo } = col;
-    const body = { name, ...tipo };
-    if (required) body.required = true;
-    try {
-      await g.post(`/sites/${siteId}/lists/${listId}/columns`, body);
-    } catch (e) {
-      if (!String(e.message).includes('409')) {
-        console.warn(`[asegurarListaOS] Col "${name}":`, e.message);
-      }
-    }
-  }
-}
-
-async function asegurarListaHP(siteId) {
-  const { HistorialPrecios: schema } = require('./scripts/esquemas');
-  let listId;
-  try { const lst = await g.getListByName(siteId, 'HistorialPrecios'); listId = lst?.id; } catch {}
-  if (!listId) {
-    try {
-      const created = await g.post(`/sites/${siteId}/lists`, {
-        displayName: schema.displayName,
-        description: schema.description || '',
-        list: schema.list,
-      });
-      listId = created?.id;
-      console.log('[asegurarListaHP] Lista HistorialPrecios creada:', listId);
-    } catch (e) {
-      if (!String(e.message).includes('409')) { console.warn('[asegurarListaHP]', e.message); return; }
-      try { const lst = await g.getListByName(siteId, 'HistorialPrecios'); listId = lst?.id; } catch {}
-    }
-  }
-  if (!listId) return;
-  _listCache.HistorialPrecios = listId;
-  for (const col of schema.columns) {
-    const { name, required, ...tipo } = col;
-    const body = { name, ...tipo };
-    if (required) body.required = true;
-    try { await g.post(`/sites/${siteId}/lists/${listId}/columns`, body); }
-    catch (e) { if (!String(e.message).includes('409')) console.warn(`[asegurarListaHP] Col "${name}":`, e.message); }
-  }
-}
-
-async function asegurarListaMI(siteId) {
-  const { MovimientosInventario: schema } = require('./scripts/esquemas');
-  let listId;
-  try { const lst = await g.getListByName(siteId, 'MovimientosInventario'); listId = lst?.id; } catch {}
-  if (!listId) {
-    try {
-      const created = await g.post(`/sites/${siteId}/lists`, {
-        displayName: schema.displayName,
-        description: schema.description || '',
-        list: schema.list,
-      });
-      listId = created?.id;
-      console.log('[asegurarListaMI] Lista MovimientosInventario creada:', listId);
-    } catch (e) {
-      if (!String(e.message).includes('409')) { console.warn('[asegurarListaMI]', e.message); return; }
-      try { const lst = await g.getListByName(siteId, 'MovimientosInventario'); listId = lst?.id; } catch {}
-    }
-  }
-  if (!listId) return;
-  _listCache.MovimientosInventario = listId;
-  for (const col of schema.columns) {
-    const { name, required, ...tipo } = col;
-    const body = { name, ...tipo };
-    if (required) body.required = true;
-    try { await g.post(`/sites/${siteId}/lists/${listId}/columns`, body); }
-    catch (e) { if (!String(e.message).includes('409')) console.warn(`[asegurarListaMI] Col "${name}":`, e.message); }
-  }
-}
-
-async function migrarColumnasOC(siteId, listId) {
-  const columnas = [
-    { name: 'requerimientoOrigen',  text: { maxLength: 50 } },
-    { name: 'fechaEntregaPrevista', dateTime: {} },
-    // Solicitud de pago en tesorería (Pagos Diarios). Se guardan acá y no solo
-    // en SQLite porque upsertDocumento() reescribe el JSON local con lo que
-    // venga de SharePoint en cada sync.
-    { name: 'solicitudTesoreriaId',    text: { maxLength: 50 } },  // egreso_id CE-YYMMNNNN
-    { name: 'fechaSolicitudTesoreria', dateTime: {} },
-    { name: 'solicitudTesoreriaPor',   text: { maxLength: 200 } },
-  ];
-  for (const col of columnas) {
-    try {
-      await g.post(`/sites/${siteId}/lists/${listId}/columns`, col);
-    } catch (e) {
-      // 409 = columna ya existe — es el estado normal en ejecuciones subsiguientes
-      if (!String(e.message).includes('409')) {
-        console.warn(`[migrarColumnasOC] No se pudo agregar columna "${col.name}":`, e.message);
-      }
-    }
-  }
-}
-
-async function asegurarListaUsuariosERP(siteId) {
-  const columns = [
-    { name: 'email',  text: { maxLength: 200 }, required: true },
-    { name: 'nombre', text: { maxLength: 200 } },
-    { name: 'cargo',  text: { maxLength: 200 } },
-    { name: 'rol',    choice: { choices: ['admin', 'operador'], displayAs: 'dropDownMenu' } },
-    { name: 'activo', boolean: {} },
-  ];
-  let listId;
-  try { const lst = await g.getListByName(siteId, 'UsuariosERP'); listId = lst?.id; } catch {}
-  if (!listId) {
-    try {
-      const created = await g.post(`/sites/${siteId}/lists`, {
-        displayName: 'UsuariosERP',
-        description: 'Usuarios habilitados para acceder al ERP',
-        list: { template: 'genericList' },
-      });
-      listId = created?.id;
-      console.log('[asegurarListaUsuariosERP] Lista creada:', listId);
-    } catch (e) {
-      if (!String(e.message).includes('409')) { console.warn('[asegurarListaUsuariosERP]', e.message); return; }
-      try { const lst = await g.getListByName(siteId, 'UsuariosERP'); listId = lst?.id; } catch {}
-    }
-  }
-  if (!listId) return;
-  _listCache.UsuariosERP = listId;
-  for (const col of columns) {
-    const { required, ...body } = col;
-    if (required) body.required = true;
-    try { await g.post(`/sites/${siteId}/lists/${listId}/columns`, body); }
-    catch (e) { if (!String(e.message).includes('409')) console.warn(`[asegurarListaUsuariosERP] Col "${col.name}":`, e.message); }
-  }
-}
 
 async function bootstrapAdmin() {
-  if (localDb.countUsuarios() > 0) return;
+  if (await repoCatalogos.contarUsuarios() > 0) return;
   const email = (process.env.USUARIO_EMAIL || '').trim().toLowerCase();
   if (!email) return;
 
-  const ctx = await ctxSharePoint();
-  let listId = ctx.UsuariosERP;
-
-  if (!listId) {
-    // Esperar hasta 15s a que la lista sea aprovisionada en segundo plano
-    for (let i = 0; i < 5; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        const lst = await g.getListByName(ctx.siteId, 'UsuariosERP');
-        if (lst?.id) { listId = lst.id; _listCache.UsuariosERP = listId; break; }
-      } catch {}
-    }
-  }
-  if (!listId) { console.warn('[bootstrap] Lista UsuariosERP no disponible'); return; }
-
+  // Antes había que esperar hasta 15 s a que se aprovisionara la lista
+  // UsuariosERP en SharePoint. La tabla ya existe por migración.
   const adminData = {
     email,
     nombre: email,
@@ -613,8 +498,7 @@ async function bootstrapAdmin() {
     activo: true,
   };
   try {
-    const item = await g.addListItem(ctx.siteId, listId, adminData);
-    localDb.upsertUsuario({ sp_id: String(item.id), ...adminData });
+    await repoCatalogos.guardarUsuario(adminData);
     console.log(`[bootstrap] Admin inicial creado: ${email}`);
   } catch (e) {
     console.warn('[bootstrap] Error al crear admin:', e.message);
@@ -634,38 +518,13 @@ async function ctxSharePoint() {
       if (lst) _listCache[nombre] = lst.id;
     } catch { /* lista no existe todavía */ }
   }
-  // Migrar columnas nuevas a la lista OrdenesCompra (solo una vez por proceso)
-  if (!_columnasMigradas && _listCache.OrdenesCompra) {
-    _columnasMigradas = true;
-    migrarColumnasOC(_listCache.siteId, _listCache.OrdenesCompra).catch(() => {});
-  }
-  // Aprovisionar lista OrdenesServicio si no existe (solo una vez por proceso)
-  if (!_osListProvisioned) {
-    _osListProvisioned = true;
-    asegurarListaOS(_listCache.siteId).catch(() => {});
-  }
-  // Aprovisionar lista HistorialPrecios si no existe (solo una vez por proceso)
-  if (!_hpListProvisioned) {
-    _hpListProvisioned = true;
-    asegurarListaHP(_listCache.siteId).catch(() => {});
-  }
-  // Aprovisionar lista MovimientosInventario si no existe (solo una vez por proceso)
-  if (!_miListProvisioned) {
-    _miListProvisioned = true;
-    asegurarListaMI(_listCache.siteId).catch(() => {});
-  }
-  // Aprovisionar lista UsuariosERP si no existe (solo una vez por proceso)
-  if (!_usrListProvisioned) {
-    _usrListProvisioned = true;
-    asegurarListaUsuariosERP(_listCache.siteId).catch(() => {});
-  }
+  // Ya no se aprovisionan listas ni columnas en SharePoint. Eso creaba y
+  // modificaba estructura en cada arranque del servidor, en el sistema del que
+  // estamos saliendo. El esquema vive en supabase/migrations.
   return _listCache;
 }
 
 const PORT         = process.env.PUERTO_COTIZACIONES || 3001;
-const PATH_COMPRAS = process.env.PATH_COMPRAS     || path.join(__dirname, '../data/compras.csv');
-const PATH_PROV    = process.env.PATH_PROVEEDORES || path.join(__dirname, '../data/proveedores_depurados_final.csv');
-const PATH_PROY    = process.env.PATH_PROYECTOS   || path.join(__dirname, '../data/tabla_proyectos.csv');
 const GEMINI_KEY   = process.env.GEMINI_API_KEY || '';
 // Saneado y validado en geminiConfig.js: el .env de produccion se edita a mano y un
 // typo ahi antes no se veia hasta que un usuario subia un archivo.
@@ -687,30 +546,19 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
-function leerCSV(rutaArchivo) {
-  const XLSX = require('xlsx');
-  const content = fs.readFileSync(rutaArchivo, 'utf-8');
-  const wb = XLSX.read(content, { type: 'string' });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  return XLSX.utils.sheet_to_json(ws, { defval: '' });
-}
-
 // ── HistorialPrecios — lee de SQLite (sin latencia de red) ───────────────────
 // forceRefresh dispara un sync en segundo plano pero retorna SQLite inmediatamente.
 async function getHistorialPrecios(_ctx, { forceRefresh = false } = {}) {
-  if (forceRefresh) syncService.syncAll().catch(() => {});
-  return localDb.getHistorialPrecios();
+  return repoHistorial.listar();
 }
 
 function invalidarHistorialCache() { /* SQLite siempre está actualizado */ }
 
-async function agregarFilasCompras(filas, ctx) {
-  if (!ctx) { try { ctx = await ctxSharePoint(); } catch {} }
-  if (!ctx || !ctx.HistorialPrecios) {
-    console.warn('[agregarFilasCompras] Lista HistorialPrecios no disponible — datos no guardados');
-    return 0;
-  }
-  let guardadas = 0;
+async function agregarFilasCompras(filas) {
+  // Las filas se arman todas y se insertan en una sola transacción. Antes era
+  // una llamada a Graph por fila, así que un fallo a la mitad dejaba la
+  // cotización registrada por partes.
+  const aInsertar = [];
   for (const f of filas) {
     const nit    = String(f.nitProveedor ?? f.nit ?? '').trim().replace(/\.0$/, '');
     const nombre = String(f.nombreProveedor ?? f.proveedor ?? '').trim();
@@ -732,16 +580,9 @@ async function agregarFilasCompras(filas, ctx) {
       formaPago:       'Cotización',
       anticipo:        0,
     };
-    try {
-      const nuevo = await g.addListItem(ctx.siteId, ctx.HistorialPrecios, campos);
-      // Reflejar en SQLite inmediatamente (sin esperar al próximo sync)
-      localDb.upsertHistorialFila({ id: nuevo?.id || String(Date.now()), ...campos });
-      guardadas++;
-    } catch (e) {
-      console.warn('[agregarFilasCompras] Error guardando fila:', e.message);
-    }
+    aInsertar.push(campos);
   }
-  return guardadas;
+  return repoHistorial.agregar(aInsertar);
 }
 
 // ── Extracción con Gemini API ─────────────────────────────────────────────────
@@ -1113,14 +954,14 @@ function osDesdeFields(item) {
 // Genera el PDF de la OS (mismo motor que /os/:id/html) y lo sube a SharePoint,
 // guardando el link en el campo pdfUrl.
 async function guardarPdfOSEnSharePoint(ctx, osId, sesion) {
-  const item = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, osId);
+  const item = await obtenerOS(osId);
   const os   = osDesdeFields(item);
-  const cfg  = cfgConFirmante(await configApp.getConfig(), sesion);
+  const cfg  = await cfgConFirmante(await configApp.getConfig(), sesion);
   const html   = osTemplate.generarHTML(os, cfg);
   const buffer = await pdfGenerator.htmlAPdf(html);
   const nombre = `${os.numeroOS || osId}_${os.proyecto || 'SIN-PROYECTO'}`.replace(/[\\/:*?"<>|]/g, '-');
   const driveItem = await g.uploadFileToSite(ctx.siteId, `/OrdenesServicioPDF/${nombre}.pdf`, buffer, 'application/pdf');
-  await g.updateListItem(ctx.siteId, ctx.OrdenesServicio, osId, { pdfUrl: driveItem.webUrl });
+  await repoOrdenesServicio.actualizar(osId, { pdfUrl: driveItem.webUrl });
   return driveItem.webUrl;
 }
 
@@ -1160,16 +1001,8 @@ function parsearMultipart(body, boundary) {
 // ── Rutas de datos para autocompletado ───────────────────────────────────────
 
 async function obtenerProveedores(_ctx) {
-  const rows = localDb.getProveedores();
-  if (rows.length) return rows.map(r => ({ nit: r.nit, nombre: r.nombre, zona: r.zona }));
-  // Fallback CSV si SQLite aún no se ha sincronizado
-  try {
-    return leerCSV(PATH_PROV).map(p => ({
-      nit:    String(p['Identificacion'] || '').trim().replace(/\.0$/, ''),
-      nombre: p['Razon social'] || '',
-      zona:   p['zona'] || '',
-    })).filter(p => p.nit);
-  } catch { return []; }
+  const rows = await repoCatalogos.getProveedores();
+  return rows.map(r => ({ nit: r.nit, nombre: r.nombre, zona: r.zona }));
 }
 
 // Match fuzzy de un nombre libre contra el catálogo de Insumos.
@@ -1209,22 +1042,15 @@ function mejorMatchInsumo(query, catalogo) {
   return mejor;
 }
 
-function obtenerInsumosCSV() {
-  try {
-    const rows = leerCSV(PATH_COMPRAS);
-    return rows.map(r => r['Suministro'] || r['Insumo'] || '').filter(Boolean);
-  } catch { return []; }
-}
-
 async function obtenerInsumosHistorial(ctx) {
   try {
     const rows = await getHistorialPrecios(ctx);
     return rows.map(r => String(r.insumo || '').trim()).filter(Boolean);
-  } catch { return obtenerInsumosCSV(); }
+  } catch { return []; }
 }
 
 // Busca los mejores candidatos de homologación para un insumo sin historial,
-// buscando contra todos los nombres únicos en compras.csv.
+// buscando contra todos los nombres únicos del historial de precios.
 // Si GEMINI_KEY está disponible y el score del top candidato es bajo, usa Gemini para reordenar.
 async function sugerirHomologacionCSV(query) {
   const norm = (s) => String(s || '').toUpperCase()
@@ -1281,26 +1107,17 @@ async function sugerirHomologacionCSV(query) {
 // Devuelve catálogo de insumos en MAYÚSCULAS, dedupe.
 async function obtenerInsumos() {
   const set = new Set();
-  const rows = localDb.getInsumos({ soloActivos: true });
+  const rows = await repoCatalogos.getInsumos({ soloActivos: true });
   for (const r of rows) if (r.nombre) set.add(r.nombre.toUpperCase());
-  if (!set.size) {
-    // Fallback CSV si SQLite aún no tiene datos
-    for (const n of obtenerInsumosCSV()) set.add(String(n).trim().toUpperCase());
-  }
   return [...set].filter(Boolean).sort();
 }
 
-function obtenerProyectos() {
-  try {
-    return leerCSV(PATH_PROY).map(p => p['codigo_proyecto'] || '').filter(Boolean);
-  } catch { return []; }
-}
-
-// Lee proyectos desde SQLite (sin latencia). Fallback a CSV si está vacío.
+// Lee proyectos desde Postgres. Fallback a CSV si la tabla está vacía.
 async function obtenerProyectosSP({ soloActivos = true } = {}) {
-  const rows = localDb.getProyectos({ soloActivos });
-  if (rows.length) return rows.map(r => ({ id: r.sp_id, codigo: r.nombre, nombre: r.nombre, zona: r.zona, activo: r.activo !== 0 }));
-  return obtenerProyectos().map(c => ({ codigo: c, nombre: c, activo: true }));
+  const rows = await repoCatalogos.getProyectos({ soloActivos });
+  // El id ya no es el de SharePoint: los 23 proyectos que el import creó para
+  // no perder referencias huérfanas no tienen sp_id y quedarían sin id.
+  return rows.map(r => ({ id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo }));
 }
 
 // ── Servidor HTTP ─────────────────────────────────────────────────────────────
@@ -1407,31 +1224,25 @@ const servidor = http.createServer(async (req, res) => {
       const { email, nombre } = await auth.exchangeCode(code, state, AUTH_REDIRECT_URI);
 
       // Verificar que el usuario esté registrado y activo
-      let usuario = localDb.getUsuarioByEmail(email);
+      let usuario = await repoCatalogos.getUsuarioByEmail(email);
       if (!usuario) {
         // Auto-registrar como pendiente de aprobación
         try {
-          const ctx = await ctxSharePoint();
-          if (ctx.UsuariosERP) {
-            const item = await g.addListItem(ctx.siteId, ctx.UsuariosERP, {
-              email, nombre, cargo: '', rol: 'operador', activo: false,
-            });
-            localDb.upsertUsuario({ sp_id: String(item.id), email, nombre, cargo: '', rol: 'operador', activo: false });
-          }
-        } catch {}
+          await repoCatalogos.guardarUsuario({ email, nombre, cargo: '', rol: 'operador', activo: false });
+        } catch (e) {
+          console.warn('[auth] No se pudo registrar el usuario pendiente:', e.message);
+        }
         res.writeHead(302, { 'Location': '/?auth_error=pendiente' });
         res.end();
         return;
       }
       if (!usuario.activo) {
-        // Puede que la aprobación vino de otro equipo y aún no sincronizó — forzar sync
-        await syncService.syncAll().catch(() => {});
-        usuario = localDb.getUsuarioByEmail(email);
-        if (!usuario?.activo) {
-          res.writeHead(302, { 'Location': '/?auth_error=pendiente' });
-          res.end();
-          return;
-        }
+        // Antes acá se forzaba un sync, porque la aprobación podía haberse hecho
+        // desde otro equipo y el caché local todavía no la tenía. Leyendo de
+        // Postgres esa ventana no existe: la aprobación ya está visible.
+        res.writeHead(302, { 'Location': '/?auth_error=pendiente' });
+        res.end();
+        return;
       }
 
       const sessionId = auth.createSession(email, nombre, usuario.rol);
@@ -1461,13 +1272,13 @@ const servidor = http.createServer(async (req, res) => {
 
   // ── GET /proveedores → lista completa desde SQLite ──────────────────────
   if (req.method === 'GET' && url === '/proveedores') {
-    return json(localDb.getProveedores());
+    return json(await repoCatalogos.getProveedores());
   }
 
   // ── GET /proveedores/:id ─────────────────────────────────────────────────
   const mProvId = url.match(/^\/proveedores\/([^\/]+)$/);
   if (req.method === 'GET' && mProvId) {
-    const p = localDb.getProveedores().find(x => String(x.id) === mProvId[1]);
+    const p = await repoCatalogos.getProveedorPorNit(mProvId[1]);
     return p ? json(p) : json({ error: 'Proveedor no encontrado' }, 404);
   }
 
@@ -1492,11 +1303,11 @@ const servidor = http.createServer(async (req, res) => {
           correo:      String(body.correo || '').trim().toLowerCase(),
           activo:      true,
         };
-        const ctx = await ctxSharePoint();
-        if (!ctx.Proveedores) return json({ error: 'Lista Proveedores no disponible en SharePoint.' }, 500);
-        const creado = await g.addListItem(ctx.siteId, ctx.Proveedores, campos);
-        if (creado?.id) localDb.upsertProveedor({ id: creado.id, fields: { nombre, ...campos, ...(creado.fields || {}) } });
-        return json({ ok: true, id: creado?.id });
+        // El NIT se normaliza en la base, así que "900.807.426-3" y
+        // "900807426-3" son el mismo proveedor: dar de alta uno que ya existe
+        // lo actualiza en vez de duplicarlo, que es lo que pasaba en SharePoint.
+        const creado = await repoCatalogos.guardarProveedor(campos);
+        return json({ ok: true, id: creado.id });
       } catch (err) { return json({ error: err.message }, 500); }
     });
     return;
@@ -1518,14 +1329,17 @@ const servidor = http.createServer(async (req, res) => {
         if (body.telefono != null) cambios.telefono     = String(body.telefono).trim();
         if (body.correo   != null) cambios.correo       = String(body.correo).trim().toLowerCase();
         if (body.activo   != null) cambios.activo       = !!body.activo;
-        const ctx = await ctxSharePoint();
-        if (!ctx.Proveedores) return json({ error: 'Lista Proveedores no disponible.' }, 500);
-        await g.updateListItem(ctx.siteId, ctx.Proveedores, mProvId[1], cambios);
-        const actual = localDb.getProveedores().find(x => String(x.id) === mProvId[1]) || {};
-        // incluir nombre en SQLite para que getProveedores() lo resuelva correctamente
-        const cambosSQLite = { ...cambios };
-        if (cambios.razonSocial) cambosSQLite.nombre = cambios.razonSocial;
-        localDb.upsertProveedor({ id: mProvId[1], fields: { ...actual, ...cambosSQLite } });
+
+        // mProvId[1] es el NIT, que es la clave primaria del proveedor.
+        // Cambiar el NIT en sí no se soporta acá: sería mover la fila de
+        // identidad y hay que rehacer las referencias de los documentos.
+        if (cambios.nit && erpNormNit(cambios.nit) !== erpNormNit(mProvId[1])) {
+          return json({ error: 'El NIT identifica al proveedor y no se puede cambiar desde acá.' }, 400);
+        }
+        delete cambios.nit;
+
+        const actualizado = await repoCatalogos.actualizarProveedor(mProvId[1], cambios);
+        if (!actualizado) return json({ error: 'Proveedor no encontrado' }, 404);
         return json({ ok: true });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -1640,7 +1454,7 @@ const servidor = http.createServer(async (req, res) => {
 
       // — Fuente OS: OrdenesServicio SQLite —
       if (inclOS) {
-        const osItems = localDb.getOrdenesServicio();
+        const osItems = await repoOrdenesServicio.listar();
         for (const os of osItems) {
           const proyecto  = String(os.proyecto          || '').trim();
           const proveedor = String(os.proveedorNombre   || os.proveedorNit || '').trim();
@@ -1697,12 +1511,9 @@ const servidor = http.createServer(async (req, res) => {
       try {
         const { nombres } = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         if (!Array.isArray(nombres)) return json({ error: 'nombres debe ser un array' }, 400);
-        const ctx = await ctxSharePoint();
-        if (!ctx.Insumos) return json({ sugerencias: nombres.map(() => null) });
-        const items = await g.getListItems(ctx.siteId, ctx.Insumos);
-        const catalogo = items
-          .map(it => ({ id: it.id, ...(it.fields || {}) }))
-          .filter(i => i.activo !== false && (i.nombre || '').trim());
+        // El repo ya filtra los inactivos y no baja el catálogo por red.
+        const catalogo = (await repoCatalogos.getInsumos({ soloActivos: true }))
+          .filter(i => (i.nombre || '').trim());
         const sugerencias = nombres.map(n => mejorMatchInsumo(String(n || ''), catalogo));
         return json({ sugerencias });
       } catch (err) { return json({ error: err.message }, 500); }
@@ -1715,7 +1526,7 @@ const servidor = http.createServer(async (req, res) => {
     try {
       const lst = await obtenerProyectosSP({ soloActivos: true });
       return json(lst.map(p => p.codigo).filter(Boolean));
-    } catch (err) { return json(obtenerProyectos()); }
+    } catch (err) { return json({ error: err.message }, 500); }
   }
 
   // ── GET /proyectos/admin → lista completa (incluye inactivos) para la UI de configuración
@@ -1730,9 +1541,8 @@ const servidor = http.createServer(async (req, res) => {
   const mProyId = url.match(/^\/proyectos\/([^\/]+)$/);
   if (req.method === 'GET' && mProyId) {
     try {
-      const ctx = await ctxSharePoint();
-      const item = await g.getListItem(ctx.siteId, ctx.Proyectos, mProyId[1]);
-      return json(item?.fields || {});
+      const p = await repoCatalogos.getProyecto(mProyId[1]);
+      return p ? json(p) : json({ error: 'Proyecto no encontrado' }, 404);
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
@@ -1743,22 +1553,17 @@ const servidor = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const ctx  = await ctxSharePoint();
         const campos = {};
         if (body.codigo       !== undefined) campos.codigo       = String(body.codigo).trim();
-        if (body.nombre       !== undefined) campos.nombre       = String(body.nombre).trim();
+        // En SharePoint "nombre" era el descriptivo, aparte del código.
+        if (body.nombre       !== undefined) campos.descripcion  = String(body.nombre).trim();
         if (body.tipo         !== undefined) campos.tipo         = String(body.tipo).trim();
         if (body.ciudad       !== undefined) campos.ciudad       = String(body.ciudad).trim();
         if (body.zona         !== undefined) campos.zona         = String(body.zona).trim();
         if (body.departamento !== undefined) campos.departamento = String(body.departamento).trim();
-        await g.updateListItem(ctx.siteId, ctx.Proyectos, mProyId[1], campos);
-        localDb.bulkUpsertProyectos([{
-          id:         mProyId[1],
-          codigo:     campos.codigo || '',
-          nombre:     campos.nombre || campos.codigo || '',
-          zona:       campos.zona   || 'Centro',
-          updated_at: new Date().toISOString(),
-        }]);
+
+        const actualizado = await repoCatalogos.actualizarProyecto(mProyId[1], campos);
+        if (!actualizado) return json({ error: 'Proyecto no encontrado' }, 404);
         return json({ ok: true });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -1774,15 +1579,15 @@ const servidor = http.createServer(async (req, res) => {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         const codigo = String(body.codigo || '').trim();
         if (!codigo) return json({ error: 'codigo requerido' }, 400);
-        const ctx = await ctxSharePoint();
-        if (!ctx.Proyectos) return json({ error: 'Lista Proyectos no existe — ejecuta provisionar-proyectos.js' }, 500);
-        const existentes = await g.getListItems(ctx.siteId, ctx.Proyectos);
-        if (existentes.some(it => String(it.fields?.codigo || '').trim().toUpperCase() === codigo.toUpperCase())) {
-          return json({ error: `Proyecto "${codigo}" ya existe` }, 400);
-        }
-        const creado = await g.addListItem(ctx.siteId, ctx.Proyectos, {
+        // El duplicado lo detecta el índice único sobre erp.norm(codigo), que
+        // además compara sin tildes ni mayúsculas. Antes había que bajar la
+        // lista completa de SharePoint y compararla en memoria.
+        const yaExiste = await repoCatalogos.getProyectoPorCodigo(codigo);
+        if (yaExiste) return json({ error: `Proyecto "${codigo}" ya existe` }, 400);
+
+        const creado = await repoCatalogos.crearProyecto({
           codigo,
-          nombre:       String(body.nombre || codigo).trim(),
+          descripcion:  String(body.nombre || codigo).trim(),
           tipo:         String(body.tipo || '').trim(),
           ciudad:       String(body.ciudad || '').trim(),
           departamento: String(body.departamento || '').trim(),
@@ -1790,16 +1595,6 @@ const servidor = http.createServer(async (req, res) => {
           activo:       true,
           notas:        String(body.notas || '').trim(),
         });
-        if (creado?.id) {
-          localDb.bulkUpsertProyectos([{
-            id:         creado.id,
-            codigo:     codigo,
-            nombre:     String(body.nombre || codigo).trim(),
-            zona:       String(body.zona || 'Centro').trim(),
-            activo:     true,
-            updated_at: new Date().toISOString(),
-          }]);
-        }
         return json({ ok: true, id: creado.id });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -1814,20 +1609,12 @@ const servidor = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const ctx = await ctxSharePoint();
-        if (!ctx.Proyectos) return json({ error: 'Lista Proyectos no existe' }, 500);
         const activo = body.activo === undefined ? null : !!body.activo;
-        const item = await g.getListItem(ctx.siteId, ctx.Proyectos, mToggle[1]);
-        const nuevo = activo === null ? !(item.fields?.activo !== false) : activo;
-        await g.updateListItem(ctx.siteId, ctx.Proyectos, mToggle[1], { activo: nuevo });
-        localDb.bulkUpsertProyectos([{
-          id:         mToggle[1],
-          codigo:     item.fields?.codigo || '',
-          nombre:     item.fields?.nombre || item.fields?.codigo || '',
-          zona:       item.fields?.zona   || 'Centro',
-          activo:     nuevo,
-          updated_at: new Date().toISOString(),
-        }]);
+        const item = await repoCatalogos.getProyecto(mToggle[1]);
+        if (!item) return json({ error: 'Proyecto no encontrado' }, 404);
+        // Sin body.activo, alterna el estado actual.
+        const nuevo = activo === null ? !item.activo : activo;
+        await repoCatalogos.actualizarProyecto(mToggle[1], { activo: nuevo });
         return json({ ok: true, activo: nuevo });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -1839,7 +1626,7 @@ const servidor = http.createServer(async (req, res) => {
   if (req.method === 'GET' && mComp) {
     try {
       // Leer requerimiento desde SQLite (sin llamada a SharePoint)
-      const todosReqs = localDb.getRequerimientos();
+      const todosReqs = await repoRequerimientos.listar();
       const itemData  = todosReqs.find(r => String(r.id) === mComp[1]);
       if (!itemData) return json({ error: 'Requerimiento no encontrado' }, 404);
       const f = itemData;
@@ -1862,7 +1649,7 @@ const servidor = http.createServer(async (req, res) => {
       // Calcular cobertura desde SQLite (sin llamada a SharePoint)
       const cubiertoPorInsumo = {};
       try {
-        const todasOCs = localDb.getOrdenesCompra();
+        const todasOCs = await repoOrdenesCompra.listar();
         const ocsPrevias = todasOCs.filter(oc => oc.requerimientoId === String(f.id || mComp[1]));
         for (const ocF of ocsPrevias) {
           if (ocF.estado === 'anulada') continue;
@@ -1944,7 +1731,7 @@ const servidor = http.createServer(async (req, res) => {
         if (!nombreHomologado) return json({ error: 'nombreHomologado requerido' }, 400);
 
         const ctx = await ctxSharePoint();
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, mRecons[1]);
+        const reqItem = await obtenerRequerimiento(mRecons[1]);
         const f = reqItem.fields || {};
 
         const { consultarProveedor } = require('./consultaProveedor');
@@ -1963,9 +1750,7 @@ const servidor = http.createServer(async (req, res) => {
         // Calcular cobertura previa para este ítem
         const cubiertoPorInsumo = {};
         try {
-          const ocsPrevias = await g.getListItems(ctx.siteId, ctx.OrdenesCompra, {
-            filter: `fields/requerimientoId eq '${String(reqItem.id).replace(/'/g,"''")}'`,
-          });
+          const ocsPrevias = await listarOC({ requerimientoId: reqItem.id });
           for (const oc of ocsPrevias) {
             const ocF = oc.fields || {};
             if (ocF.estado === 'anulada') continue;
@@ -2022,7 +1807,7 @@ const servidor = http.createServer(async (req, res) => {
         let estadoReq = null;
         if (insumoOriginal && claveInsumo(insumoOriginal) !== claveInsumo(nombreHomologado)) {
           estadoReq = await calcularEstadoRequerimiento(ctx, reqItem);
-          await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+          await actualizarRequerimiento(reqItem.id, {
             itemsJson: JSON.stringify(itemsActualizados),
             estado: estadoReq,
           });
@@ -2071,7 +1856,7 @@ const servidor = http.createServer(async (req, res) => {
         }
 
         const ctx = await ctxSharePoint();
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, mGenReq[1]);
+        const reqItem = await obtenerRequerimiento(mGenReq[1]);
         const reqF = reqItem.fields || {};
 
         // Parsear ítems del requerimiento para registrar homologaciones
@@ -2092,21 +1877,19 @@ const servidor = http.createServer(async (req, res) => {
           const iva      = grupo.items.reduce((s, it) => s + (Number(it.cantidad) * Number(it.precioUnitario) * (1 - Number(it.descuentoPct || 0)/100) * Number(it.ivaPct || 0)/100), 0);
           const total    = subtotal + iva;
 
-          const oc = await g.addListItem(ctx.siteId, ctx.OrdenesCompra, {
-            numeroOC:            '',                      // se asigna al aprobar
+          const ocId = await repoOrdenesCompra.crear({
+            // Sin número: el consecutivo se emite al aprobar.
             requerimientoId:     reqItem.id,
             requerimientoOrigen: `REQ-${reqF.consecutivo || reqItem.id}`,
             proveedorNit:        grupo.nit || '',
             proveedorNombre:     grupo.nombre || '',
             proyecto:            reqF.proyecto || '',
-            itemsJson:           JSON.stringify(grupo.items),
             subtotal, iva, total,
             estado:              'borrador',
             creadoPor:           process.env.USUARIO_EMAIL || 'sistema',
             fechaCreacion:       new Date().toISOString(),
-          });
-          if (oc?.id) localDb.upsertDocumento('ordenes_compra', oc);
-          creadas.push({ id: oc.id, proveedor: grupo.nombre, total });
+          }, grupo.items);
+          creadas.push({ id: ocId, proveedor: grupo.nombre, total });
         }
 
         // Registrar homologaciones en itemsReq para que el cálculo de cobertura funcione
@@ -2128,7 +1911,7 @@ const servidor = http.createServer(async (req, res) => {
         const idsNuevos = creadas.map(c => c.id);
         const ocsExistentes = (reqF.ocsGeneradas || '').split(',').map(s => s.trim()).filter(Boolean);
         const ocsTodas = [...new Set([...ocsExistentes, ...idsNuevos])];
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+        await actualizarRequerimiento(reqItem.id, {
           estado: estadoReq,
           ocsGeneradas: ocsTodas.join(', '),
           ...(selHomologadas.length ? { itemsJson: JSON.stringify(itemsReq) } : {}),
@@ -2224,7 +2007,6 @@ const servidor = http.createServer(async (req, res) => {
             messageId:  `manual:${process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
             adjuntoUrl: '',
           });
-          if (!duplicado && item?.id) localDb.upsertDocumento('requerimientos', item);
 
           return json({
             ok: true,
@@ -2274,7 +2056,7 @@ const servidor = http.createServer(async (req, res) => {
         const proyectosSP = await obtenerProyectosSP({ soloActivos: false }).catch(() => []);
         let resultado;
         try {
-          resultado = procesarRequerimientoManual(body, { proyectosExternos: proyectosSP });
+          resultado = await procesarRequerimientoManual(body, { proyectosExternos: proyectosSP });
         } catch (e) {
           return json({ error: e.message }, 400);  // validación de negocio → 400
         }
@@ -2284,7 +2066,6 @@ const servidor = http.createServer(async (req, res) => {
           messageId:  `manual:${sesion?.email || process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
           adjuntoUrl: '',
         });
-        if (item?.id) localDb.upsertDocumento('requerimientos', item);
 
         return json({
           ok: true,
@@ -2311,7 +2092,7 @@ const servidor = http.createServer(async (req, res) => {
     const [, reqId, fmt] = mRem;
     try {
       const rem = await remisionDesdeRequerimiento(reqId);
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       if (fmt === 'xlsx') {
         const buffer = await remisionTemplate.generarExcelBuffer(rem, cfg);
         res.writeHead(200, {
@@ -2341,7 +2122,6 @@ const servidor = http.createServer(async (req, res) => {
         if (ocIds.length < 1) return json({ error: 'Debe seleccionar al menos una OC' }, 400);
 
         const ctx = await ctxSharePoint();
-        if (!ctx.Remisiones) return json({ error: 'Lista Remisiones no existe. Ejecute el setup de SharePoint.' }, 500);
 
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const { id, numero } = await crearRemisionYGuardar(ctx, ocIds, {
@@ -2359,13 +2139,12 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── GET /remisiones → lista remisiones (desde SQLite, reconciliación en background)
+  // ── GET /remisiones → lista remisiones; la reconciliación corre en segundo plano
   if (req.method === 'GET' && url === '/remisiones') {
-    json(localDb.getRemisiones());
-    ctxSharePoint().then(ctx => {
-      if (ctx.Remisiones)
-        reconciliarRemisionesVsOCs(ctx).catch(e => console.warn('[reconciliar remisiones]', e.message));
-    }).catch(() => {});
+    json(await repoRemisiones.listar());
+    ctxSharePoint()
+      .then(ctx => reconciliarRemisionesVsOCs(ctx))
+      .catch(e => console.warn('[reconciliar remisiones]', e.message));
     return;
   }
 
@@ -2375,8 +2154,7 @@ const servidor = http.createServer(async (req, res) => {
     const [, remId, fmt] = mRemView;
     try {
       const ctx = await ctxSharePoint();
-      if (!ctx.Remisiones) return json({ error: 'Lista Remisiones no existe' }, 500);
-      const it = await g.getListItem(ctx.siteId, ctx.Remisiones, remId);
+      const it = await obtenerRemision(remId);
       const f = it.fields || {};
       let items = [];
       try { items = JSON.parse(f.itemsJson || '[]'); } catch {}
@@ -2397,7 +2175,7 @@ const servidor = http.createServer(async (req, res) => {
         alertas:              f.alertas || '',
         items,
       };
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       if (fmt === 'xlsx') {
         const buffer = await remisionTemplate.generarExcelBuffer(rem, cfg);
         res.writeHead(200, {
@@ -2425,8 +2203,7 @@ const servidor = http.createServer(async (req, res) => {
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         const motivo = (body.motivo || '').toString().trim();
         const ctx = await ctxSharePoint();
-        if (!ctx.Requerimientos) return json({ error: 'Lista Requerimientos no existe' }, 500);
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, mAnulReq[1]);
+        const reqItem = await obtenerRequerimiento(mAnulReq[1]);
         const estadoActual = reqItem.fields?.estado;
         if (estadoActual === 'anulado')   return json({ error: 'Ya está anulado' }, 400);
         if (estadoActual === 'gestionado') return json({ error: 'No se puede anular un requerimiento ya gestionado' }, 400);
@@ -2434,15 +2211,11 @@ const servidor = http.createServer(async (req, res) => {
         const usuario   = process.env.USUARIO_EMAIL || 'sistema';
         const notasNuevas = (notasPrev ? notasPrev + ' | ' : '') +
           `ANULADO por ${usuario} el ${new Date().toLocaleDateString('es-CO')}${motivo ? ` — ${motivo}` : ''}`;
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+        await actualizarRequerimiento(reqItem.id, {
           estado: 'anulado',
           notas:  notasNuevas,
         });
         // Actualizar SQLite inmediatamente para que GET /requerimientos refleje el cambio
-        localDb.upsertDocumento('requerimientos', {
-          id:     reqItem.id,
-          fields: { ...reqItem.fields, estado: 'anulado', notas: notasNuevas },
-        });
         return json({ ok: true });
       } catch (err) {
         const code = /itemNotFound|404/i.test(err.message) ? 404 : 500;
@@ -2461,8 +2234,7 @@ const servidor = http.createServer(async (req, res) => {
       try {
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         const ctx = await ctxSharePoint();
-        if (!ctx.Requerimientos) return json({ error: 'Lista Requerimientos no existe' }, 500);
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, mEditReq[1]);
+        const reqItem = await obtenerRequerimiento(mEditReq[1]);
         const estadoActual = reqItem.fields?.estado;
         if (estadoActual === 'gestionado') return json({ error: 'No se puede editar un requerimiento ya gestionado' }, 400);
         if (estadoActual === 'anulado')    return json({ error: 'No se puede editar un requerimiento anulado' }, 400);
@@ -2476,18 +2248,17 @@ const servidor = http.createServer(async (req, res) => {
         }
         if (!Object.keys(campos).length) return json({ error: 'Nada que actualizar' }, 400);
 
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, campos);
+        await actualizarRequerimiento(reqItem.id, campos);
 
         // Recalcular estado (los ítems descartados ya se excluyen dentro de calcularEstadoRequerimiento)
-        const reqActualizado = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqItem.id);
+        const reqActualizado = await obtenerRequerimiento(reqItem.id);
         const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqActualizado);
         if (nuevoEstado !== estadoActual) {
-          await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, { estado: nuevoEstado });
+          await actualizarRequerimiento(reqItem.id, { estado: nuevoEstado });
           reqActualizado.fields.estado = nuevoEstado;
         }
 
         // Sincronizar SQLite inmediatamente para que /comparativa vea los ítems descartados
-        if (reqActualizado?.id) localDb.upsertDocumento('requerimientos', reqActualizado);
 
         return json({ ok: true, estado: nuevoEstado, requerimiento: { id: reqItem.id, ...(reqActualizado.fields || {}) } });
       } catch (err) {
@@ -2564,7 +2335,7 @@ const servidor = http.createServer(async (req, res) => {
       ctxSharePoint()
         .then(ctx => reconciliarRequerimientosVsOCs(ctx))
         .catch(e  => console.warn('Reconciliación reqs falló:', e.message));
-      return json(localDb.getRequerimientos());
+      return json(await repoRequerimientos.listar());
     } catch (err) {
       console.error('GET /requerimientos:', err.message);
       return json([], 200);
@@ -2574,8 +2345,7 @@ const servidor = http.createServer(async (req, res) => {
   // ── GET /ordenes → lista desde SQLite ───────────────────────────────────
   if (req.method === 'GET' && url === '/ordenes') {
     try {
-      return json(localDb.getOrdenesCompra()
-        .sort((a, b) => (b.fechaCreacion || b.updated_at || '').localeCompare(a.fechaCreacion || a.updated_at || '')));
+      return json(await repoOrdenesCompra.listar());
     } catch (err) {
       console.error('GET /ordenes:', err.message);
       return json([], 200);
@@ -2591,8 +2361,7 @@ const servidor = http.createServer(async (req, res) => {
       const filtroTexto    = String(qs.q        || '').trim().toLowerCase();
 
       const ctx = await ctxSharePoint();
-      if (!ctx.OrdenesCompra) return json({ error: 'Lista OrdenesCompra no existe' }, 500);
-      const items = await g.getListItems(ctx.siteId, ctx.OrdenesCompra);
+      const items = await listarOC();
       let rows = items.map(it => ({ id: it.id, ...(it.fields || {}) }));
 
       if (filtroEstado === 'pagada')         rows = rows.filter(o => o.pagado);
@@ -2650,7 +2419,7 @@ const servidor = http.createServer(async (req, res) => {
   if (req.method === 'GET' && mOcHtml) {
     try {
       const oc  = await ocDesdeSharePoint(mOcHtml[1]);
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       return html(ocTemplate.generarHTML(oc, cfg));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -2663,7 +2432,7 @@ const servidor = http.createServer(async (req, res) => {
   if (req.method === 'GET' && mOcXlsx) {
     try {
       const oc  = await ocDesdeSharePoint(mOcXlsx[1]);
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       const buffer = await ocTemplate.generarExcelBuffer(oc, cfg);
       res.writeHead(200, {
         'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -2760,7 +2529,7 @@ const servidor = http.createServer(async (req, res) => {
           try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { body = {}; }
         }
 
-        const oc = localDb.getOrdenesCompra().find(o => String(o.id) === String(itemId));
+        const oc = await repoOrdenesCompra.obtener(itemId);
         if (!oc) return json({ error: 'OC no encontrada' }, 404);
 
         // El documento pide validar 'aprobada'; se acepta también 'finalizada'
@@ -2804,17 +2573,13 @@ const servidor = http.createServer(async (req, res) => {
         // Los dos registros van en try/catch separados a propósito: si
         // SharePoint no responde, la elección de proyecto igual se recuerda.
         try {
-          const ctx = await ctxSharePoint();
-          if (ctx.OrdenesCompra) {
-            const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, itemId, {
-              solicitudTesoreriaId:    resultado.egreso_id || '',
-              fechaSolicitudTesoreria: new Date().toISOString(),
-              solicitudTesoreriaPor:   req._sesion?.email || '',
-            });
-            if (actualizado?.id) localDb.upsertDocumento('ordenes_compra', actualizado);
-          }
+          await repoOrdenesCompra.actualizar(itemId, {
+            solicitudTesoreriaId:    resultado.egreso_id || '',
+            fechaSolicitudTesoreria: new Date().toISOString(),
+            solicitudTesoreriaPor:   req._sesion?.email || '',
+          });
         } catch (e) {
-          console.warn(`[OC ${numeroOC}] Solicitud ${resultado.egreso_id} creada, pero no se pudo marcar la OC en SharePoint:`, e.message);
+          console.warn(`[OC ${numeroOC}] Solicitud ${resultado.egreso_id} creada, pero no se pudo marcar la OC:`, e.message);
         }
 
         // Recordar la elección humana de proyecto para preseleccionarla luego
@@ -2856,21 +2621,15 @@ const servidor = http.createServer(async (req, res) => {
         try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { body = {}; }
       }
       const ctx = await ctxSharePoint();
-      if (!ctx.OrdenesCompra) return json({ error: 'Lista OrdenesCompra no existe' }, 500);
 
       const now = new Date().toISOString();
       const usuario = process.env.USUARIO_EMAIL || 'sistema';
       const cambios = {};
 
       if (accion === 'aprobar')  {
-        // Asignar número real solo al aprobar (el contador avanza aquí, no antes)
-        const contador = require('./contador');
-        const siguiente = await contador.siguienteNumeroSP(ctx.siteId, ctx.OrdenesCompra);
-        cambios.numeroOC = contador.formato(siguiente);
-        cambios.estado = 'aprobada';
-        cambios.aprobadoPor = usuario;
-        cambios.fechaAprobacion = now;
-        // Condiciones comerciales estructuradas (tipo + días si aplica) + observaciones separadas
+        // Condiciones comerciales estructuradas (tipo + días si aplica) + observaciones separadas.
+        // El número NO se pone acá: lo emite repoOrdenesCompra.aprobar() dentro
+        // de la misma transacción que escribe el documento.
         if (body.condicionesComerciales != null) cambios.condicionesComerciales = String(body.condicionesComerciales).trim();
         if (body.observaciones != null)          cambios.observaciones          = String(body.observaciones).trim();
         if (body.fechaEntregaPrevista)           cambios.fechaEntregaPrevista   = String(body.fechaEntregaPrevista).trim();
@@ -2881,7 +2640,7 @@ const servidor = http.createServer(async (req, res) => {
 
       // Auto-finalizar: si tras este cambio quedan pago + entrega completos → estado 'finalizada'
       if (accion === 'pagar' || accion === 'entregar') {
-        const actual = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, itemId);
+        const actual = await obtenerOC(itemId);
         const f = actual.fields || {};
         const pagado    = accion === 'pagar'    ? true : !!f.pagado;
         const entregado = accion === 'entregar' ? true : !!f.entregado;
@@ -2890,31 +2649,33 @@ const servidor = http.createServer(async (req, res) => {
         }
       }
 
-      // Leer OC de SQLite ANTES del PATCH para preservar itemsJson y requerimientoId
-      const ocLocalPre = accion === 'aprobar'
-        ? localDb.getOrdenesCompra().find(o => String(o.id) === String(itemId))
-        : null;
-
-      const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, itemId, cambios);
-      if (actualizado?.id) localDb.upsertDocumento('ordenes_compra', actualizado);
+      // Ya no hace falta leer la OC antes del PATCH para preservar itemsJson: la
+      // lectura de Postgres siempre lo trae armado desde la tabla de ítems.
+      let actualizado;
+      if (accion === 'aprobar') {
+        // El número se emite DENTRO de la transacción que aprueba. Con el
+        // MAX(numeroOC) anterior —que además excluía los estados anulados—,
+        // anular la orden más alta dejaba que la siguiente reutilizara su
+        // número: ya ocurrió 16 veces en producción.
+        const contador = require('./contador');
+        await repoOrdenesCompra.aprobar(itemId, {
+          usuario,
+          formatear: contador.formato,
+          cambios,
+        });
+        actualizado = await repoOrdenesCompra.obtener(itemId);
+      } else {
+        actualizado = await repoOrdenesCompra.actualizar(itemId, cambios);
+      }
+      if (!actualizado) return json({ error: 'Orden de compra no encontrada' }, 404);
 
       // Si se aprueba → ejecutar tareas secundarias en segundo plano (no bloquean la respuesta)
       if (accion === 'aprobar') {
-        const oc = actualizado || {};
-        const itemsJson = ocLocalPre?.itemsJson || oc.itemsJson || '[]';
+        const oc = actualizado;
+        const itemsJson = oc.itemsJson || '[]';
         (async () => {
-          try {
-            await cc.registrarGasto({
-              fechaOC:         (oc.fechaCreacion || now).slice(0,10),
-              numeroOC:        oc.numeroOC,        proyecto:        oc.proyecto,
-              proveedorNit:    oc.proveedorNit,    proveedorNombre: oc.proveedorNombre,
-              tipoGasto:       oc.tipoGasto || '', subtotal:        oc.subtotal,
-              iva:             oc.iva,             total:           oc.total,
-              estado:          'aprobada',         fechaAprobacion: now.slice(0,10),
-              creadoPor:       usuario,
-            });
-          } catch (e) { console.warn('No se pudo registrar en Control Costos:', e.message); }
-
+          // Ya no se registra el gasto en ninguna parte: erp.vw_gastos lo deriva
+          // de la orden aprobada.
           try {
             let itemsOC = [];
             try { itemsOC = JSON.parse(itemsJson); } catch {}
@@ -2935,7 +2696,7 @@ const servidor = http.createServer(async (req, res) => {
                 };
               });
             if (filasHist.length) {
-              const n = await agregarFilasCompras(filasHist, ctx);
+              const n = await agregarFilasCompras(filasHist);
               console.log(`[OC ${oc.numeroOC}] ${n} precios añadidos a HistorialPrecios SP`);
             }
           } catch (e) { console.warn('No se pudo actualizar histórico de precios:', e.message); }
@@ -2943,50 +2704,35 @@ const servidor = http.createServer(async (req, res) => {
           // Recalcular estado del requerimiento de origen (la aprobación no lo hacía)
           try {
             const reqId = oc.requerimientoId || ocLocalPre?.requerimientoId;
-            if (reqId && ctx.Requerimientos) {
-              const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqId);
+            if (reqId) {
+              const reqItem = await obtenerRequerimiento(reqId);
               const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqItem);
               const estadoPrev  = (reqItem.fields || {}).estado || 'pendiente';
               if (nuevoEstado !== estadoPrev) {
-                await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqId, { estado: nuevoEstado });
-                localDb.upsertDocumento('requerimientos', {
-                  id: reqId,
-                  fields: { ...(reqItem.fields || {}), estado: nuevoEstado },
-                });
+                await actualizarRequerimiento(reqId, { estado: nuevoEstado });
                 console.log(`[OC ${oc.numeroOC}] Req ${reqId}: ${estadoPrev} → ${nuevoEstado}`);
               }
             }
           } catch (e) { console.warn('No se pudo recalcular estado del requerimiento:', e.message); }
         })();
       }
-      // Si cambia estado de pago/entrega → actualizar fila en Control Costos (async)
-      if (accion === 'pagar' || accion === 'entregar') {
-        (async () => {
-          try {
-            const numOC = (actualizado.fields || {}).numeroOC;
-            if (numOC) {
-              const c = {};
-              if (accion === 'pagar')    c.fechaPago    = now.slice(0,10);
-              if (accion === 'entregar') c.fechaEntrega = now.slice(0,10);
-              await cc.actualizarFila(numOC, c);
-            }
-          } catch (e) { console.warn('No se pudo actualizar Control Costos:', e.message); }
-        })();
-      }
+      // Las fechas de pago y entrega ya no se copian a ninguna parte: la orden
+      // las tiene y erp.vw_gastos las lee de ahí. Antes esto buscaba la fila en
+      // el libro de Excel recorriendo toda la tabla hasta encontrar el número.
 
       // Auto-entrada/salida de inventario al marcar como Entregada
       const autoRefs = {};
       if (accion === 'entregar' && (body.autoEntrada || body.autoSalida)) {
-        // Leer datos completos de SQLite (actualizado.fields no incluye itemsJson)
-        const ocLocal    = localDb.getOrdenesCompra().find(oc => String(oc.id) === String(itemId));
-        const ocFields   = ocLocal || actualizado.fields || {};
+        // La lectura de Postgres ya trae itemsJson armado desde la tabla de ítems.
+        const ocFields   = actualizado;
         const ocProyecto = ocFields.proyecto || '';
         let itemsOC = [];
         try { itemsOC = JSON.parse(ocFields.itemsJson || '[]'); } catch {}
-        if (itemsOC.length && ctx.MovimientosInventario) {
-          const batchIdEntrada = `BORR-EA-${Date.now()}`;
-          const batchIdSalida  = `BORR-SA-${Date.now() + 1}`;
-          const movPromises = [];
+        if (itemsOC.length) {
+          // Cada movimiento se arma desde los ítems de la OC. El precio incluye
+          // el IVA porque el almacén valora lo que costó, no la base gravable.
+          const movsEntrada = [];
+          const movsSalida  = [];
           for (const it of itemsOC) {
             const base         = Number(it.precioUnitario || it.precio || 0);
             const ivaPct       = Number(it.ivaPct || 0);
@@ -2996,111 +2742,52 @@ const servidor = http.createServer(async (req, res) => {
             const movBase = {
               proyecto:       ocProyecto,
               ocId:           String(itemId),
-              numeroOC:       ocFields.numeroOC || '',
               insumo:         it.descripcion || it.insumo || '',
               unidad:         it.unidad || 'UND',
               cantidad:       cant,
               precioUnitario: precioConIva,
-              valorTotal:     cant * precioConIva,
               responsable:    usuario,
               creadoPor:      usuario,
               fechaCreacion:  now,
               fecha:          now,
-              notas:          '',
               estado:         'activo',
-              documentoRef:   null,
-              estadoDoc:      'borrador',
             };
-            if (body.autoEntrada) {
-              const entradaFields = { ...movBase, tipo: 'entrada', batchId: batchIdEntrada };
-              movPromises.push(
-                g.addListItem(ctx.siteId, ctx.MovimientosInventario, entradaFields)
-                  .then(item => {
-                    if (item?.id) {
-                      const spFields = item.fields || item;
-                      localDb.upsertDocumento('movimientos_inventario', {
-                        id: item.id,
-                        fields: { ...entradaFields, ...spFields, batchId: batchIdEntrada, estadoDoc: 'borrador', documentoRef: null },
-                      });
-                    }
-                  })
-                  .catch(e => console.warn('[inventario entrada]', e.message))
-              );
-            }
-            if (body.autoSalida) {
-              const salidaFields = { ...movBase, tipo: 'salida', batchId: batchIdSalida };
-              movPromises.push(
-                g.addListItem(ctx.siteId, ctx.MovimientosInventario, salidaFields)
-                  .then(item => {
-                    if (item?.id) {
-                      const spFields = item.fields || item;
-                      localDb.upsertDocumento('movimientos_inventario', {
-                        id: item.id,
-                        fields: { ...salidaFields, ...spFields, batchId: batchIdSalida, estadoDoc: 'borrador', documentoRef: null },
-                      });
-                    }
-                  })
-                  .catch(e => console.warn('[inventario salida]', e.message))
-              );
-            }
+            if (body.autoEntrada) movsEntrada.push({ ...movBase, tipo: 'entrada' });
+            if (body.autoSalida)  movsSalida.push({ ...movBase, tipo: 'salida' });
           }
-          await Promise.allSettled(movPromises);
-          // Aprobar los documentos creados para que afecten el stock inmediatamente
-          const hayItems = itemsOC.some(it => Number(it.cantidad || 0) > 0);
-          async function aprobarBatchInline(batchId, tipo, proyecto) {
-            const docRef = localDb.getNextDocRef(tipo, proyecto);
-            const movs = localDb.db().prepare(
-              "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.batchId')=?"
-            ).all(batchId).map(r => JSON.parse(r.data));
-            if (!movs.length) return { docRef, actualizados: 0 };
-            for (const m of movs) {
-              const updated = { ...m, documentoRef: docRef, estadoDoc: 'aprobado' };
-              await g.updateListItem(ctx.siteId, ctx.MovimientosInventario, m.id, { documentoRef: docRef, estadoDoc: 'aprobado' });
-              localDb.upsertDocumento('movimientos_inventario', { id: m.id, fields: updated });
-            }
-            if (tipo === 'salida' && movs.length > 0) {
-              const totalSalida = movs.reduce((s, m) => s + (Number(m.valorTotal) || 0), 0);
-              if (totalSalida > 0) {
-                cc.registrarGasto({
-                  fechaOC:   new Date().toISOString().slice(0, 10),
-                  numeroOC:  docRef, proyecto,
-                  tipoGasto: 'Salida Almacén',
-                  subtotal:  totalSalida, iva: 0, total: totalSalida,
-                  estado:    'ejecutado',
-                  creadoPor: movs[0].creadoPor || process.env.USUARIO_EMAIL || 'sistema',
-                }).catch(e => console.warn('[inventario aprobar] Control Costos:', e.message));
-              }
-            }
-            return { docRef, actualizados: movs.length };
+
+          // crearLote inserta los movimientos Y emite el consecutivo del
+          // documento en una sola transacción. Antes eran N altas en paralelo
+          // contra Graph, seguidas de un MAX() para el número: si algo fallaba a
+          // la mitad quedaban movimientos sin documento, y dos registros
+          // simultáneos podían recibir el mismo EA-####.
+          // El consumo entra al control de costos solo: erp.vw_gastos agrupa las
+          // salidas aprobadas por su documento_ref.
+          async function registrarLote(movs) {
+            if (!movs.length) return null;
+            const { documentoRef } = await repoInventario.crearLote(movs, { emitirDocumento: true });
+            return documentoRef;
           }
-          if (body.autoEntrada && hayItems) {
-            try {
-              const r = await aprobarBatchInline(batchIdEntrada, 'entrada', ocProyecto);
-              if (r.actualizados > 0) autoRefs.entrada = r.docRef;
-            } catch(e) { console.warn('[entregar] aprobar entrada:', e.message); }
-          }
-          if (body.autoSalida && hayItems) {
-            try {
-              const r = await aprobarBatchInline(batchIdSalida, 'salida', ocProyecto);
-              if (r.actualizados > 0) autoRefs.salida = r.docRef;
-            } catch(e) { console.warn('[entregar] aprobar salida:', e.message); }
-          }
+
+          try {
+            autoRefs.entrada = await registrarLote(movsEntrada);
+          } catch (e) { console.warn('[entregar] entrada de inventario:', e.message); }
+          try {
+            autoRefs.salida = await registrarLote(movsSalida);
+          } catch (e) { console.warn('[entregar] salida de inventario:', e.message); }
         }
       }
 
       // Generación automática de remisión individual al marcar la OC como entregada
       let remisionGenerada = null;
-      if (accion === 'entregar' && ctx.Remisiones) {
+      if (accion === 'entregar') {
         try {
-          const yaTieneRemision = localDb.getRemisiones().some(r => {
-            if (r.estado === 'anulada') return false;
-            let ids = [];
-            try { ids = JSON.parse(r.ocIds || '[]'); } catch { ids = []; }
-            return ids.map(String).includes(String(itemId));
-          });
-          const ocLocal = localDb.getOrdenesCompra().find(oc => String(oc.id) === String(itemId));
+          // Antes: recorrer todas las remisiones parseando su columna ocIds.
+          // Ahora lo resuelve la tabla de unión con un join.
+          const yaTieneRemision = (await repoRemisiones.porOrdenCompra(itemId))
+            .some(r => r.estado !== 'anulada');
           let itemsOC = [];
-          try { itemsOC = JSON.parse((ocLocal || {}).itemsJson || '[]'); } catch {}
+          try { itemsOC = JSON.parse(actualizado.itemsJson || '[]'); } catch {}
           if (!yaTieneRemision && itemsOC.length) {
             const { id, numero } = await crearRemisionYGuardar(ctx, [itemId], {
               fecha: now, responsableEntrega: usuario,
@@ -3120,27 +2807,23 @@ const servidor = http.createServer(async (req, res) => {
 
       // Cascada de anulación sobre remisiones
       let remisionesAfectadas = [];
-      if (accion === 'anular' && ctx.Remisiones) {
+      if (accion === 'anular') {
         try {
-          remisionesAfectadas = await cascadaAnulacionRemisiones(ctx, itemId, actualizado.fields || {}, usuario, now);
+          remisionesAfectadas = await cascadaAnulacionRemisiones(ctx, itemId, actualizado, usuario, now);
         } catch (e) { console.warn('No se pudo propagar anulación a remisiones:', e.message); }
       }
 
       // Cascada de re-evaluación del requerimiento origen (liberar cantidades, volver a habilitar)
       let requerimientoRecalculado = null;
-      if (accion === 'anular' && ctx.Requerimientos) {
+      if (accion === 'anular') {
         try {
-          const reqId = (actualizado?.fields || actualizado || {}).requerimientoId;
+          const reqId = actualizado.requerimientoId;
           if (reqId) {
-            const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqId);
+            const reqItem = await obtenerRequerimiento(reqId);
             const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqItem);
             const estadoPrev  = (reqItem.fields || {}).estado || 'pendiente';
             if (nuevoEstado !== estadoPrev) {
-              await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqId, { estado: nuevoEstado });
-              localDb.upsertDocumento('requerimientos', {
-                id: reqId,
-                fields: { ...(reqItem.fields || {}), estado: nuevoEstado },
-              });
+              await actualizarRequerimiento(reqId, { estado: nuevoEstado });
               requerimientoRecalculado = { id: reqId, estadoPrev, estadoNuevo: nuevoEstado };
             }
           }
@@ -3242,7 +2925,7 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── POST /confirmar → guardar en compras.csv + upsert catálogo Insumos ──
+  // ── POST /confirmar → guardar en el historial + alta en el catálogo ──
   if (req.method === 'POST' && url === '/confirmar') {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -3256,32 +2939,28 @@ const servidor = http.createServer(async (req, res) => {
         for (const f of filas) f.insumo = String(f.insumo || '').trim().toUpperCase();
 
         const ctx = await ctxSharePoint();
-        const guardadas = await agregarFilasCompras(filas, ctx);
+        const guardadas = await agregarFilasCompras(filas);
 
-        // Upsert en lista SharePoint "Insumos" para futuras sugerencias/autocompletado
+        // Alta en el catálogo de insumos para futuras sugerencias y
+        // autocompletado. Ya no hace falta bajar el catálogo entero para
+        // comparar: guardarInsumo() resuelve el conflicto contra el índice
+        // único de nombre_norm, que además ignora tildes y mayúsculas.
         let insumosNuevos = 0;
         try {
-          if (ctx.Insumos) {
-            const existentes = await g.getListItems(ctx.siteId, ctx.Insumos);
-            const yaEnCatalogo = new Set(
-              existentes.map(it => String(it.fields?.nombre || '').trim().toUpperCase()).filter(Boolean)
-            );
-            const unicosNuevos = [...new Set(filas.map(f => f.insumo).filter(Boolean))]
-              .filter(nom => !yaEnCatalogo.has(nom));
-            for (const nom of unicosNuevos) {
-              try {
-                const filaFuente = filas.find(f => f.insumo === nom) || {};
-                await g.addListItem(ctx.siteId, ctx.Insumos, {
-                  nombre:             nom,
-                  nombreNormalizado:  nom.normalize('NFD').replace(/[̀-ͯ]/g, ''),
-                  unidadEstandar:     String(filaFuente.unidad || '').trim().toUpperCase(),
-                  activo:             true,
-                });
-                insumosNuevos++;
-              } catch (e) { console.warn(`Insumo "${nom}" no se pudo registrar:`, e.message); }
-            }
+          const antes = new Set(
+            (await repoCatalogos.getInsumos({ soloActivos: false })).map(i => i.nombreNorm));
+          for (const nom of [...new Set(filas.map(f => f.insumo).filter(Boolean))]) {
+            try {
+              const filaFuente = filas.find(f => f.insumo === nom) || {};
+              const guardado = await repoCatalogos.guardarInsumo({
+                nombre: nom,
+                unidad: String(filaFuente.unidad || '').trim().toUpperCase() || null,
+                activo: true,
+              });
+              if (!antes.has(guardado.nombreNorm)) insumosNuevos++;
+            } catch (e) { console.warn(`Insumo "${nom}" no se pudo registrar:`, e.message); }
           }
-        } catch (e) { console.warn('Upsert Insumos falló:', e.message); }
+        } catch (e) { console.warn('Alta de insumos falló:', e.message); }
 
         json({ ok: true, guardadas, insumosNuevos });
       } catch (err) {
@@ -3302,12 +2981,11 @@ const servidor = http.createServer(async (req, res) => {
         if (!items?.length) return json({ error: 'No hay ítems' }, 400);
 
         const ctx = await ctxSharePoint();
-        if (!ctx.OrdenesCompra) return json({ error: 'Lista OrdenesCompra no existe' }, 500);
 
         // Si se vincula a un requerimiento, validar que existe
         let reqItem = null;
-        if (reqId && ctx.Requerimientos) {
-          try { reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqId); } catch {}
+        if (reqId) {
+          try { reqItem = await obtenerRequerimiento(reqId); } catch {}
         }
 
         // Agrupar por NIT → una OC por proveedor
@@ -3339,21 +3017,18 @@ const servidor = http.createServer(async (req, res) => {
             s + (it.cantidad * it.precioUnitario * (1 - it.descuentoPct/100) * it.ivaPct/100), 0);
           const total = subtotal + iva;
 
-          const oc = await g.addListItem(ctx.siteId, ctx.OrdenesCompra, {
-            numeroOC:         '',
+          const ocId = await repoOrdenesCompra.crear({
             requerimientoId:  reqItem ? String(reqItem.id) : '',
             cotizacionId:     String(numCotizacion || '').trim(),
             proveedorNit:     grupo.nit || '',
             proveedorNombre:  grupo.nombre || '',
             proyecto:         proyecto || '',
-            itemsJson:        JSON.stringify(grupo.items),
             subtotal, iva, total,
             estado:           'borrador',
             creadoPor:        process.env.USUARIO_EMAIL || 'sistema',
             fechaCreacion:    new Date().toISOString(),
-          });
-          if (oc?.id) localDb.upsertDocumento('ordenes_compra', oc);
-          creadas.push({ id: oc.id, proveedor: grupo.nombre, total });
+          }, grupo.items);
+          creadas.push({ id: ocId, proveedor: grupo.nombre, total });
         }
 
         // Si se vinculó a un requerimiento, actualizar su estado y lista de OCs
@@ -3363,7 +3038,7 @@ const servidor = http.createServer(async (req, res) => {
           const reqF = reqItem.fields || {};
           const ocsExistentes = (reqF.ocsGeneradas || '').split(',').map(s => s.trim()).filter(Boolean);
           const ocsTodas = [...new Set([...ocsExistentes, ...creadas.map(c => c.id)])];
-          await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+          await actualizarRequerimiento(reqItem.id, {
             estado: estadoRequerimiento,
             ocsGeneradas: ocsTodas.join(', '),
           });
@@ -3388,11 +3063,11 @@ const servidor = http.createServer(async (req, res) => {
         if (!reqId) return json({ error: 'requerimientoId requerido' }, 400);
 
         const ctx = await ctxSharePoint();
-        const ocItem  = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, mVincular[1]);
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqId);
+        const ocItem  = await obtenerOC(mVincular[1]);
+        const reqItem = await obtenerRequerimiento(reqId);
 
         // Actualizar OC con el requerimientoId
-        await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, ocItem.id, {
+        await repoOrdenesCompra.actualizar(ocItem.id, {
           requerimientoId: String(reqItem.id),
         });
 
@@ -3401,7 +3076,7 @@ const servidor = http.createServer(async (req, res) => {
         const reqF = reqItem.fields || {};
         const ocsExistentes = (reqF.ocsGeneradas || '').split(',').map(s => s.trim()).filter(Boolean);
         const ocsTodas = [...new Set([...ocsExistentes, ocItem.id])];
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+        await actualizarRequerimiento(reqItem.id, {
           estado: estadoRequerimiento,
           ocsGeneradas: ocsTodas.join(', '),
         });
@@ -3627,7 +3302,7 @@ FORMATO:
     req.on('end', async () => {
       try {
         const osData = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+        const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
         const htmlStr = osTemplate.generarHTML(osData, cfg);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(htmlStr);
@@ -3644,7 +3319,6 @@ FORMATO:
       try {
         const osData = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         const ctx = await ctxSharePoint();
-        if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible — espere unos segundos y reintente');
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const now = new Date().toISOString();
 
@@ -3676,9 +3350,9 @@ FORMATO:
         if (osData.fechaInicio) fields.fechaInicio = new Date(osData.fechaInicio).toISOString();
         if (osData.fechaFin)    fields.fechaFin    = new Date(osData.fechaFin).toISOString();
 
-        const created = await g.addListItem(ctx.siteId, ctx.OrdenesServicio, fields);
-        if (created?.id) localDb.upsertDocumento('ordenes_servicio', created);
-        json({ ok: true, id: created.id, numeroOS: fields.numeroOS });
+        const createdId = await repoOrdenesServicio.crear(fields, osData.items || []);
+        // numeroOS va vacío a propósito: el consecutivo se emite al aprobar.
+        json({ ok: true, id: createdId, numeroOS: '' });
       } catch (err) { json({ error: err.message }, 500); }
     });
     return;
@@ -3687,7 +3361,7 @@ FORMATO:
   // ── OS: listar órdenes de servicio ───────────────────────────────────────────
   if (req.method === 'GET' && url === '/os/ordenes') {
     try {
-      const lista = localDb.getOrdenesServicio()
+      const lista = (await repoOrdenesServicio.listar())
         .sort((a, b) => (b.fechaCreacion || b.updated_at || '').localeCompare(a.fechaCreacion || a.updated_at || ''))
         .map(osDesdeFields);
       json(lista);
@@ -3703,7 +3377,7 @@ FORMATO:
       const filtroProyecto = String(qs.proyecto || '').trim();
       const filtroTexto    = String(qs.q        || '').trim().toLowerCase();
 
-      let rows = localDb.getOrdenesServicio()
+      let rows = (await repoOrdenesServicio.listar())
         .map(osDesdeFields)
         .sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
 
@@ -3763,10 +3437,9 @@ FORMATO:
   if (req.method === 'GET' && mOsHtml) {
     try {
       const ctx = await ctxSharePoint();
-      if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible');
-      const item = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, mOsHtml[1]);
+      const item = await obtenerOS(mOsHtml[1]);
       const os  = osDesdeFields(item);
-      const cfg = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(osTemplate.generarHTML(os, cfg));
     } catch (err) {
@@ -3781,10 +3454,9 @@ FORMATO:
   if (req.method === 'GET' && mOsXlsx) {
     try {
       const ctx = await ctxSharePoint();
-      if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible');
-      const item  = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, mOsXlsx[1]);
+      const item  = await obtenerOS(mOsXlsx[1]);
       const os    = osDesdeFields(item);
-      const cfg   = cfgConFirmante(await configApp.getConfig(), req._sesion);
+      const cfg   = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       const buffer = await osTemplate.generarExcelBuffer(os, cfg);
       res.writeHead(200, {
         'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -3808,19 +3480,13 @@ FORMATO:
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         const ctx = await ctxSharePoint();
-        if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible');
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const now = new Date().toISOString();
         const cambios = {};
 
-        if (accion === 'aprobar') {
-          const contador = require('./contador');
-          const siguiente = await contador.siguienteNumeroOS(ctx.siteId, ctx.OrdenesServicio);
-          cambios.numeroOS       = contador.formatoOS(siguiente);
-          cambios.estado         = 'aprobada';
-          cambios.aprobadoPor    = usuario;
-          cambios.fechaAprobacion = now;
-        } else if (accion === 'anular') {
+        // El número de OS no se pone acá: lo emite
+        // repoOrdenesServicio.aprobar() dentro de la transacción que aprueba.
+        if (accion === 'anular') {
           cambios.estado          = 'anulada';
           cambios.anuladoPor      = usuario;
           cambios.fechaAnulacion  = now;
@@ -3837,8 +3503,8 @@ FORMATO:
 
         // Auto-finalizar: si tras este cambio quedan pago + cumplido completos → 'finalizada'
         if (accion === 'pagar' || accion === 'cumplir') {
-          const actual = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, osId);
-          const f = actual.fields || {};
+          const f = await repoOrdenesServicio.obtener(osId);
+          if (!f) return json({ error: 'Orden de servicio no encontrada' }, 404);
           const pagado   = accion === 'pagar'   ? true : !!f.pagado;
           const cumplido = accion === 'cumplir' ? true : !!f.cumplido;
           if (pagado && cumplido && f.estado === 'aprobada') {
@@ -3846,42 +3512,22 @@ FORMATO:
           }
         }
 
-        const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesServicio, osId, cambios);
-        if (actualizado?.id) localDb.upsertDocumento('ordenes_servicio', actualizado);
-
-        // Al aprobar → registrar la OS como gasto en Control de Costos (async, no bloquea)
+        let actualizado;
         if (accion === 'aprobar') {
-          const os = actualizado?.fields || {};
-          (async () => {
-            try {
-              await cc.registrarGasto({
-                fechaOC:         (os.fechaCreacion || now).slice(0, 10),
-                numeroOC:        os.numeroOS,          proyecto:        os.proyecto,
-                proveedorNit:    os.proveedorNit,      proveedorNombre: os.proveedorNombre,
-                tipoGasto:       os.tipoGasto || '',   subtotal:        os.valor,
-                iva:             os.iva,               total:           os.total,
-                estado:          'aprobada',           fechaAprobacion: now.slice(0, 10),
-                creadoPor:       usuario,
-              });
-              console.log(`[OS ${os.numeroOS}] gasto registrado en Control Costos`);
-            } catch (e) { console.warn('No se pudo registrar OS en Control Costos:', e.message); }
-          })();
+          const contador = require('./contador');
+          await repoOrdenesServicio.aprobar(osId, {
+            usuario,
+            formatear: contador.formatoOS,
+            cambios,
+          });
+          actualizado = await repoOrdenesServicio.obtener(osId);
+        } else {
+          actualizado = await repoOrdenesServicio.actualizar(osId, cambios);
         }
+        if (!actualizado) return json({ error: 'Orden de servicio no encontrada' }, 404);
 
-        // Al pagar/cumplir → actualizar fecha en la fila de Control de Costos (async)
-        if (accion === 'pagar' || accion === 'cumplir') {
-          (async () => {
-            try {
-              const numOS = (actualizado.fields || {}).numeroOS;
-              if (numOS) {
-                const c = {};
-                if (accion === 'pagar')   c.fechaPago    = now.slice(0, 10);
-                if (accion === 'cumplir') c.fechaEntrega = now.slice(0, 10);
-                await cc.actualizarFila(numOS, c);
-              }
-            } catch (e) { console.warn('No se pudo actualizar Control Costos (OS):', e.message); }
-          })();
-        }
+        // El gasto de la OS y sus fechas de pago y cumplimiento no se copian a
+        // ninguna parte: erp.vw_gastos los deriva de la orden.
 
         // Generar y subir el PDF de la OS pagada a SharePoint (best-effort)
         let pdfOSGenerado = null;
@@ -3891,7 +3537,7 @@ FORMATO:
           } catch (e) { console.warn('No se pudo generar/subir el PDF de la OS:', e.message); }
         }
 
-        json({ ok: true, numeroOS: actualizado?.fields?.numeroOS || cambios.numeroOS || '', pdfOSGenerado });
+        json({ ok: true, numeroOS: actualizado.numeroOS || '', pdfOSGenerado });
       } catch (err) { json({ error: err.message }, 500); }
     });
     return;
@@ -3907,7 +3553,7 @@ FORMATO:
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         const ctx  = await ctxSharePoint();
         const ocId = mOCEditar[1];
-        const item = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, ocId);
+        const item = await obtenerOC(ocId);
         const f    = item?.fields || {};
         if (f.estado !== 'borrador') return json({ error: 'Solo se pueden editar borradores' }, 400);
 
@@ -3936,9 +3582,9 @@ FORMATO:
         if (obs != null) cambios.observaciones          = obs;
         if (le  != null) cambios.lugarEntrega           = le;
         if (fep)         cambios.fechaEntregaPrevista   = fep; // dateTime — no enviar string vacío
-        const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, ocId, cambios);
-        if (actualizado?.id) localDb.upsertDocumento('ordenes_compra', actualizado);
-        json({ ok: true, oc: actualizado?.fields || {} });
+        const actualizado = await repoOrdenesCompra.actualizar(ocId, cambios);
+        
+        json({ ok: true, oc: actualizado || {} });
       } catch (err) { json({ error: err.message }, 500); }
     });
     return;
@@ -3954,7 +3600,7 @@ FORMATO:
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         const ctx  = await ctxSharePoint();
         const osId = mOSEditar[1];
-        const item = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, osId);
+        const item = await obtenerOS(osId);
         const f    = item?.fields || {};
         if (f.estado !== 'borrador') return json({ error: 'Solo se pueden editar borradores' }, 400);
 
@@ -3979,9 +3625,9 @@ FORMATO:
           condicionesComerciales: body.condicionesComerciales != null ? String(body.condicionesComerciales) : f.condicionesComerciales,
           observaciones:          body.observaciones != null          ? String(body.observaciones)          : f.observaciones,
         };
-        const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesServicio, osId, cambios);
-        if (actualizado?.id) localDb.upsertDocumento('ordenes_servicio', actualizado);
-        json({ ok: true, os: actualizado?.fields || {} });
+        const actualizado = await repoOrdenesServicio.actualizar(osId, cambios);
+        
+        json({ ok: true, os: actualizado || {} });
       } catch (err) { json({ error: err.message }, 500); }
     });
     return;
@@ -3994,10 +3640,10 @@ FORMATO:
   // ── GET /inventario/ocs-sin-entrada → OC entregadas sin entrada registrada
   if (req.method === 'GET' && url === '/inventario/ocs-sin-entrada') {
     try {
-      const ocs = localDb.getOrdenesCompra()
+      const ocs = (await repoOrdenesCompra.listar())
         .filter(oc => oc.entregado && oc.estado !== 'anulada')
         .sort((a, b) => (b.fechaCreacion || '').localeCompare(a.fechaCreacion || ''));
-      const conEntrada = localDb.getOcIdsConEntrada();
+      const conEntrada = await repoInventario.ocIdsConEntrada();
       const sinEntrada = ocs.filter(oc => !conEntrada.has(String(oc.id)));
       return json(sinEntrada);
     } catch (err) { return json({ error: err.message }, 500); }
@@ -4008,7 +3654,7 @@ FORMATO:
     try {
       const qp      = new URL(req.url, 'http://x').searchParams;
       const proyecto = qp.get('proyecto') || null;
-      return json(localDb.getStock(proyecto));
+      return json(await repoInventario.stock(proyecto));
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
@@ -4017,7 +3663,7 @@ FORMATO:
     try {
       const qp   = new URL(req.url, 'http://x').searchParams;
       const tipo = qp.get('tipo') || null;
-      return json(localDb.getDocumentosInventario({ tipo }));
+      return json(await repoInventario.documentos({ tipo }));
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
@@ -4027,7 +3673,7 @@ FORMATO:
       const qp   = new URL(req.url, 'http://x').searchParams;
       const proy = qp.get('proyecto') || null;
       const tipo = qp.get('tipo')     || null;
-      let movs = localDb.getMovimientosInventario({ proyecto: proy });
+      let movs = await repoInventario.listar({ proyecto: proy });
       if (tipo) movs = movs.filter(m => m.tipo === tipo);
       movs.sort((a, b) => (b.fechaCreacion || '').localeCompare(a.fechaCreacion || ''));
       return json(movs);
@@ -4045,16 +3691,11 @@ FORMATO:
         const items   = Array.isArray(body.items) ? body.items : [body];
         // Idempotencia: rechazar si ya existe una entrada para la misma OC en los últimos 30 s
         if (items.length > 0 && items[0].ocId) {
-          const ventana = new Date(Date.now() - 30000).toISOString();
-          const reciente = localDb.db().prepare(
-            "SELECT COUNT(*) AS n FROM movimientos_inventario WHERE json_extract(data,'$.ocId')=? AND json_extract(data,'$.tipo')='entrada' AND json_extract(data,'$.fechaCreacion')>?"
-          ).get(items[0].ocId, ventana);
-          if (reciente?.n > 0) {
+          if (await repoInventario.hayEntradaReciente(items[0].ocId, 30)) {
             return json({ error: 'Ya existe una entrada registrada para esta OC en los últimos 30 segundos. Espera y recarga antes de intentar de nuevo.' }, 409);
           }
         }
         const ctx = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista MovimientosInventario no disponible' }, 503);
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const now     = new Date().toISOString();
         const creados = [];
@@ -4083,15 +3724,8 @@ FORMATO:
             estadoDoc:      'borrador',
             batchId,
           };
-          const item = await g.addListItem(ctx.siteId, ctx.MovimientosInventario, fields);
-          if (item?.id) {
-            const spFields = item.fields || item;
-            localDb.upsertDocumento('movimientos_inventario', {
-              id: item.id,
-              fields: { ...fields, ...spFields, batchId: fields.batchId, estadoDoc: fields.estadoDoc, documentoRef: fields.documentoRef },
-            });
-            creados.push({ id: item.id, ...fields });
-          }
+          const movId = await repoInventario.crear(fields);
+          creados.push({ id: movId, ...fields });
         }
         return json({ ok: true, creados, batchId });
       } catch (err) { return json({ error: err.message }, 500); }
@@ -4107,7 +3741,6 @@ FORMATO:
       try {
         const body    = JSON.parse(Buffer.concat(chunks).toString());
         const ctx     = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista MovimientosInventario no disponible' }, 503);
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const now     = new Date().toISOString();
         // Aceptar tanto { items: [...] } como objeto simple (retrocompat)
@@ -4116,7 +3749,7 @@ FORMATO:
 
         const proyecto = String(items[0]?.proyecto || '');
         const batchId  = `BORR-SA-${Date.now()}`;
-        const stock    = localDb.getStock();
+        const stock    = await repoInventario.stock();
         const creados  = [];
 
         for (const it of items) {
@@ -4147,15 +3780,8 @@ FORMATO:
             estadoDoc:      'borrador',
             batchId,
           };
-          const item = await g.addListItem(ctx.siteId, ctx.MovimientosInventario, fields);
-          if (item?.id) {
-            const spFields = item.fields || item;
-            localDb.upsertDocumento('movimientos_inventario', {
-              id: item.id,
-              fields: { ...fields, ...spFields, batchId: fields.batchId, estadoDoc: fields.estadoDoc, documentoRef: fields.documentoRef },
-            });
-            creados.push({ id: item.id, ...fields });
-          }
+          const movId = await repoInventario.crear(fields);
+          creados.push({ id: movId, ...fields });
         }
 
         return json({ ok: true, creados, batchId });
@@ -4172,7 +3798,6 @@ FORMATO:
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString());
         const ctx  = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista no disponible' }, 503);
         const usuario  = process.env.USUARIO_EMAIL || 'sistema';
         const now      = new Date().toISOString();
         const devBatchId = `BORR-DEV-${Date.now()}`;
@@ -4199,15 +3824,8 @@ FORMATO:
             estadoDoc:      'borrador',
             batchId:        devBatchId,
           };
-          const item = await g.addListItem(ctx.siteId, ctx.MovimientosInventario, fields);
-          if (item?.id) {
-            const spFields = item.fields || item;
-            localDb.upsertDocumento('movimientos_inventario', {
-              id: item.id,
-              fields: { ...fields, ...spFields, batchId: devBatchId, estadoDoc: 'borrador', documentoRef: null },
-            });
-            creados.push({ id: item.id, ...fields });
-          }
+          const movId = await repoInventario.crear(fields);
+          creados.push({ id: movId, ...fields });
         }
         return json({ ok: true, creados, batchId: devBatchId });
       } catch (err) { return json({ error: err.message }, 500); }
@@ -4227,49 +3845,22 @@ FORMATO:
         const proyecto = String(body.proyecto || '');
         const tipo     = String(body.tipo || 'entrada');
         const ctx = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista MovimientosInventario no disponible' }, 503);
 
-        const docRef = localDb.getNextDocRef(tipo, proyecto);
-        let movs = localDb.db().prepare(
-          "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.batchId')=?"
-        ).all(batchId).map(r => JSON.parse(r.data));
-        // Fallback for legacy records without batchId (grouped by documentoRef)
-        if (!movs.length) {
-          movs = localDb.db().prepare(
-            "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.documentoRef')=?"
-          ).all(batchId).map(r => JSON.parse(r.data));
-        }
+        const docRef = await repoInventario.siguienteDocumentoRef(tipo);
+        // porLote() busca por batch_id o por consecutivo, así que cubre los
+        // registros antiguos que no traen batchId.
+        const movs = await repoInventario.porLote(batchId);
 
         if (!movs.length) return json({ ok: false, error: 'Documento no encontrado' }, 404);
 
         let actualizados = 0;
         for (const m of movs) {
           const updated = { ...m, documentoRef: docRef, estadoDoc: 'aprobado' };
-          await g.updateListItem(ctx.siteId, ctx.MovimientosInventario, m.id, { documentoRef: docRef, estadoDoc: 'aprobado' });
-          localDb.upsertDocumento('movimientos_inventario', { id: m.id, fields: updated });
+          await repoInventario.actualizar(m.id, { documentoRef: docRef, estadoDoc: 'aprobado' });
           actualizados++;
         }
-        // Registrar salida aprobada en Control Costos (en segundo plano)
-        if (tipo === 'salida' && movs.length > 0) {
-          const totalSalida = movs.reduce((s, m) => s + (Number(m.valorTotal) || 0), 0);
-          if (totalSalida > 0) {
-            (async () => {
-              try {
-                await cc.registrarGasto({
-                  fechaOC:    new Date().toISOString().slice(0, 10),
-                  numeroOC:   docRef,
-                  proyecto,
-                  tipoGasto:  'Salida Almacén',
-                  subtotal:   totalSalida,
-                  iva:        0,
-                  total:      totalSalida,
-                  estado:     'ejecutado',
-                  creadoPor:  movs[0].creadoPor || process.env.USUARIO_EMAIL || 'sistema',
-                });
-              } catch (e) { console.warn('[inventario aprobar] Control Costos:', e.message); }
-            })();
-          }
-        }
+        // La salida aprobada entra al control de costos sola: erp.vw_gastos
+        // agrupa por documento_ref las salidas con estado_doc = aprobado.
         return json({ ok: true, documentoRef: docRef, actualizados });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -4285,25 +3876,13 @@ FORMATO:
       try {
         const batchId = decodeURIComponent(mDocAnular[1]);
         const ctx = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista MovimientosInventario no disponible' }, 503);
 
-        let movs = localDb.db().prepare(
-          "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.batchId')=?"
-        ).all(batchId).map(r => JSON.parse(r.data));
-        if (!movs.length) {
-          movs = localDb.db().prepare(
-            "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.documentoRef')=?"
-          ).all(batchId).map(r => JSON.parse(r.data));
-        }
+        const movs = await repoInventario.porLote(batchId);
 
         if (!movs.length) return json({ ok: false, error: 'Documento no encontrado' }, 404);
 
-        // Actualizar todos en paralelo en vez de secuencialmente (reduce N×150ms → ~150ms)
-        await Promise.all(movs.map(m => {
-          const updated = { ...m, estado: 'anulado', estadoDoc: 'anulado' };
-          return g.updateListItem(ctx.siteId, ctx.MovimientosInventario, m.id, { estado: 'anulado', estadoDoc: 'anulado' })
-            .then(() => localDb.upsertDocumento('movimientos_inventario', { id: m.id, fields: updated }));
-        }));
+        // Un solo UPDATE por lote, en vez de N llamadas en paralelo a Graph.
+        await repoInventario.anular(movs.map(m => m.id));
         return json({ ok: true, anulados: movs.length });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -4320,8 +3899,8 @@ FORMATO:
         // body: { proyecto, pregunta, apuData (tabla extraída del Excel), historial (turns previos) }
         const { proyecto, pregunta, apuData, historial = [] } = body;
 
-        const stock = localDb.getStock(proyecto || null);
-        const movs  = localDb.getMovimientosInventario({ proyecto: proyecto || null });
+        const stock = await repoInventario.stock(proyecto || null);
+        const movs  = await repoInventario.listar({ proyecto: proyecto || null });
         const salidas = movs.filter(m => m.tipo === 'salida');
 
         // Construir contexto de consumos reales
@@ -4365,8 +3944,7 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
   // ── GET /usuarios → lista de usuarios (solo admin) ──────────────────────
   if (req.method === 'GET' && url === '/usuarios') {
     if (req._sesion?.rol !== 'admin') return json({ error: 'Acceso denegado' }, 403);
-    syncService.syncAll().catch(() => {}); // actualiza en segundo plano para la próxima carga
-    return json(localDb.getUsuarios());
+    return json(await repoCatalogos.getUsuarios());
   }
 
   // ── PATCH /usuarios/:id → actualizar rol/activo (solo admin) ─────────────
@@ -4379,8 +3957,6 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
     req.on('end', async () => {
       try {
         const data = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const ctx = await ctxSharePoint();
-        if (!ctx.UsuariosERP) return json({ error: 'Lista UsuariosERP no disponible' }, 503);
 
         const fields = {};
         if (data.activo !== undefined) fields.activo = Boolean(data.activo);
@@ -4388,9 +3964,8 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
         if (data.nombre !== undefined) fields.nombre = String(data.nombre);
         if (data.cargo  !== undefined) fields.cargo  = String(data.cargo);
 
-        await g.updateListItem(ctx.siteId, ctx.UsuariosERP, spId, fields);
-        const existing = localDb.getUsuarios().find(u => u.sp_id === spId) || {};
-        localDb.upsertUsuario({ ...existing, sp_id: spId, ...fields });
+        const actualizado = await repoCatalogos.actualizarUsuario(spId, fields);
+        if (!actualizado) return json({ error: 'Usuario no encontrado' }, 404);
         return json({ ok: true });
       } catch (e) { return json({ error: e.message }, 500); }
     });
@@ -4418,7 +3993,6 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
       // la consola sin esperar el sync. Devuelve la forma que espera leerCorreos.
       const onOCGenerada = async (resultado, meta = {}) => {
         const { item, duplicado, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, meta);
-        if (!duplicado && item?.id) localDb.upsertDocumento('requerimientos', item);
         const resumen = {
           id:                 item?.id,
           consecutivo:        resultado.solicitud?.consecutivo || '',
@@ -4456,18 +4030,41 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
     }
   }
 
-  // ── GET /sync → fuerza resync SharePoint → SQLite ───────────────────────
-  if (req.method === 'GET' && url === '/sync') {
+  // ── GET /gastos → Control de Costos, derivado de erp.vw_gastos ───────────
+  if (req.method === "GET" && url.startsWith("/gastos")) {
     try {
-      const resultado = await syncService.syncAll();
-      return json({ ok: resultado.ok, duracion: resultado.duracion, conteos: localDb.counts(), lastSync: syncService.lastSync() });
+      const qs = require("url").parse(req.url, true).query;
+      if (url === "/gastos/resumen") {
+        const [porProyecto, porProveedor, porTipo, totales] = await Promise.all([
+          repoGastos.porProyecto(), repoGastos.porProveedor(),
+          repoGastos.porTipo(), repoGastos.totales(),
+        ]);
+        return json({ totales, porProyecto, porProveedor, porTipo });
+      }
+      if (url === "/gastos") {
+        return json(await repoGastos.listar({
+          proyecto: qs.proyecto || null,
+          desde:    qs.desde    || null,
+          hasta:    qs.hasta    || null,
+          origen:   qs.origen   || null,
+        }));
+      }
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
-  // ── GET /sync/estado → estado actual del caché ───────────────────────────
-  if (req.method === 'GET' && url === '/sync/estado') {
-    return json({ lastSync: syncService.lastSync(), syncing: syncService.isSyncing(), conteos: localDb.counts(), estados: localDb.getAllSyncState() });
+  // ── POST /gastos/exportar → regenera el libro y lo sube a SharePoint ──────
+  // El Excel dejó de ser base de datos y pasó a ser reporte: se rehace entero
+  // desde la vista en vez de irse editando fila por fila.
+  if (req.method === "POST" && url === "/gastos/exportar") {
+    try {
+      const webUrl = await cc.exportarXlsx();
+      return json({ ok: true, webUrl, archivo: cc.NOMBRE_ARCHIVO });
+    } catch (err) { return json({ error: err.message }, 500); }
   }
+
+  // Las rutas /sync y /sync/estado se retiraron con el caché: la aplicación
+  // lee de Postgres, así que no hay nada que sincronizar. Para poner Postgres al
+  // día con lo que quede en SharePoint hasta el corte: npm run db:importar.
 
   res.writeHead(404);
   res.end('No encontrado');
@@ -4477,14 +4074,12 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
 servidor.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT}`);
   console.log('  Abre esa URL en tu navegador para cargar cotizaciones.\n');
+  require('./modoPrueba').avisar();
   // Comprueba que GEMINI_MODEL apunte a un modelo que existe. No bloquea el
   // arranque: solo deja el diagnostico en el log, para que un .env mal escrito se
   // vea aqui y no cuando un usuario intente extraer una cotizacion.
   geminiConfig.verificarModelo(GEMINI_KEY)
     .catch(e => console.warn('[geminiConfig] Verificación falló:', e.message));
-  // Sincronización SharePoint → SQLite en segundo plano
-  syncService.init(ctxSharePoint)
-    .catch(e => console.warn('[syncService] No se pudo inicializar:', e.message));
   // Crear admin inicial si la base de usuarios está vacía
   bootstrapAdmin()
     .catch(e => console.warn('[bootstrap]', e.message));

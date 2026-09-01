@@ -1,0 +1,33 @@
+# Finales de línea.
+#
+# Sin este archivo, cada quien commitea con lo que le imponga su core.autocrlf.
+# En Windows eso significa CRLF, y un script de shell con CRLF no arranca: el
+# kernel lee "#!/bin/sh\r" como intérprete y responde "required file not found",
+# que no menciona el retorno de carro por ningún lado. Ya pasó con
+# deploy/respaldo-db.sh.
+#
+# * text=auto deja que git normalice a LF al guardar y convierta al checkout
+# según la plataforma. Lo que va después son las excepciones que NUNCA deben
+# llevar CRLF ni siquiera en el disco de Windows, porque terminan ejecutándose
+# dentro de un contenedor Linux.
+
+* text=auto
+
+*.sh        text eol=lf
+*.bash      text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.sql       text eol=lf
+deploy/crontab text eol=lf
+
+# Binarios: que git no los toque.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.xlsx  binary
+*.xls   binary
+*.db    binary

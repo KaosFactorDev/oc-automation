@@ -1,0 +1,95 @@
+# Solo la base de datos, para levantarla en el VPS ANTES de desplegar el código.
+#
+# Por qué existe este archivo en vez de usar el docker-compose.yml completo:
+#
+#   1. El docker-compose.yml de `main` —el que hoy está en el VPS— no tiene el
+#      servicio `db`. Traerlo implicaría mergear a main, y un merge a main
+#      despliega. Este archivo se copia a mano y no toca lo que está corriendo.
+#
+#   2. Aunque el compose completo ya estuviera allá, `docker compose up -d`
+#      arranca la app inmediatamente después de la base. No quedaría ningún
+#      momento para importar: la app abriría contra una base vacía. Separarlo
+#      crea esa ventana a propósito.
+#
+#   3. Si la infraestructura tiene un problema —disco, memoria, la locale de la
+#      imagen alpine— se descubre acá, con cero impacto para nadie.
+#
+# El volumen y la red llevan nombre explícito y son los MISMOS que declara el
+# docker-compose.yml de producción. Así, cuando se despliegue el código, compose
+# reutiliza ambos en vez de crear otros, y los datos importados siguen ahí.
+#
+#   # Fase 1 — solo la base
+#   docker compose -f docker-compose.db.yml up -d
+#   node src/scripts/db-esperar.js
+#   npm run db:push
+#   npm run db:clave
+#   npm run revisar-listas
+#   npm run db:importar
+#   npm run db:verificar          # tiene que terminar en cero
+#
+#   # Fase 2 — cuando se despliegue el código, primero soltar este compose.
+#   # SIN -v: el volumen con nombre sobrevive y los datos quedan intactos.
+#   docker compose -f docker-compose.db.yml down
+#   # …y el despliegue normal levanta db + app + mailer con el compose completo.
+#
+# Requiere en el .env del VPS: POSTGRES_PASSWORD (obligatoria), y para las
+# migraciones MIGRATION_DB_URL o PGHOST/PGPORT/PGUSER.
+#
+# ⚠ NUNCA con --remove-orphans. Compose ve la app y el mailer como huérfanos,
+# porque este archivo no los declara, y avisa de ello al levantar. Es normal e
+# inofensivo mientras no se le haga caso: agregar --remove-orphans BORRARÍA los
+# dos contenedores en producción.
+#
+# Ojo con el `:?` de POSTGRES_PASSWORD: hace que TODO comando de compose la
+# exija, incluidos `down`, `logs` y `ps`. Si alguno falla con "required variable
+# POSTGRES_PASSWORD is missing", el problema es que no se está leyendo el .env
+# —normalmente por estar en otro directorio—, no la base.
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: oc-automation-db
+    environment:
+      - TZ=America/Bogota
+      - POSTGRES_DB=${POSTGRES_DB:-erp}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatoria en .env}
+      # La imagen alpine inicializa en locale C. C.UTF-8 conserva el orden por
+      # bytes pero maneja UTF-8 correctamente, que es lo que necesitan los
+      # nombres con tilde y ñ.
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=C.UTF-8
+    # Atado a 127.0.0.1: el host lo alcanza para migrar e importar, pero no
+    # queda escuchando en la interfaz pública. Para llegar desde tu equipo:
+    #   ssh -L 55432:localhost:5432 usuario@vps
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - datos
+    # El default de 64 MB es escaso para ordenamientos y VACUUM.
+    shm_size: 256mb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-erp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Mismo nombre que en docker-compose.yml, para que el traspaso la reutilice.
+  datos:
+    name: oc-automation-datos
+    driver: bridge
+
+volumes:
+  # Mismo nombre que en docker-compose.yml. Sobrevive a "down" y a cualquier
+  # despliegue; solo se borra con "down -v".
+  pgdata:
+    name: oc-automation-pgdata

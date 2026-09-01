@@ -16,7 +16,8 @@ require('dotenv').config();
 const g          = require('../graphStorage');
 const ocTemplate = require('../ocTemplate');
 const configApp  = require('../configApp');
-const localDb    = require('../db');
+const repoCatalogos = require('../repo/catalogos');
+const repoOrdenesCompra = require('../repo/ordenesCompra');
 const { htmlAPdf } = require('../pdfGenerator');
 
 const CONFIRM = process.argv.includes('--confirm');
@@ -52,18 +53,16 @@ function ocDesdeFields(f) {
   };
 }
 
-function cfgConFirmantePorEmail(cfg, email) {
+async function cfgConFirmantePorEmail(cfg, email) {
   if (!email) return cfg;
-  const usuario = localDb.getUsuarioByEmail(email) || {};
+  const usuario = (await repoCatalogos.getUsuarioByEmail(email)) || {};
   return { ...cfg, firmante: { nombre: usuario.nombre || email, cargo: usuario.cargo || '' } };
 }
 
 async function main() {
   const site = await g.getSite(process.env.SHAREPOINT_HOSTNAME, process.env.SHAREPOINT_SITE_PATH);
-  const lst  = await g.getListByName(site.id, 'OrdenesCompra');
-  if (!lst) throw new Error('Lista OrdenesCompra no existe');
 
-  const todas = localDb.getOrdenesCompra();
+  const todas = await repoOrdenesCompra.listar();
   const entregadas = todas.filter(oc => oc.entregado);
   const pendientes = TODOS ? entregadas : entregadas.filter(oc => !oc.pdfUrl);
 
@@ -80,15 +79,16 @@ async function main() {
   let ok = 0, fallidos = 0;
   for (const ocLocal of pendientes) {
     try {
-      const item = await g.getListItem(site.id, lst.id, ocLocal.id);
-      const oc   = ocDesdeFields(item.fields || {});
-      const cfg  = cfgConFirmantePorEmail(cfgBase, item.fields?.entregadoPor);
+      // Los datos salen de Postgres; el PDF sigue subiéndose al Drive de
+      // SharePoint, que es donde la gente los busca.
+      const oc  = ocDesdeFields(ocLocal);
+      const cfg = await cfgConFirmantePorEmail(cfgBase, ocLocal.entregadoPor);
 
       const html   = ocTemplate.generarHTML(oc, cfg);
       const buffer = await htmlAPdf(html);
       const nombre = `${oc.numeroOC || ocLocal.id}_${oc.proyecto || 'SIN-PROYECTO'}`.replace(/[\\/:*?"<>|]/g, '-');
       const driveItem = await g.uploadFileToSite(site.id, `/OrdenesCompraPDF/${nombre}.pdf`, buffer, 'application/pdf');
-      await g.updateListItem(site.id, lst.id, ocLocal.id, { pdfUrl: driveItem.webUrl });
+      await repoOrdenesCompra.actualizar(ocLocal.id, { pdfUrl: driveItem.webUrl });
 
       ok++;
       console.log(`  ✓ id ${ocLocal.id} (${ok + fallidos}/${pendientes.length})`);

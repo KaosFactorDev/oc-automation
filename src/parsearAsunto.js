@@ -60,29 +60,66 @@ function parsearAsunto(asunto) {
 }
 
 /**
- * Busca el código de proyecto completo en la tabla de proyectos
- * usando el fragmento extraído del asunto (match parcial).
+ * Busca el proyecto del catálogo que corresponde al fragmento del asunto.
+ *
+ * Devuelve el proyecto con un campo `confianza`, porque no todos los aciertos
+ * valen lo mismo y el llamador tiene que poder distinguirlos:
+ *
+ *   'exacta'    el fragmento ES el código. Se puede usar sin más.
+ *   'contenido' el fragmento está dentro de un único código del catálogo
+ *               ("MISTRAL" → "CT25-134 ANCLAJES MISTRAL"). Confiable.
+ *   'ambigua'   está dentro de VARIOS. "EQUIPOS GT" cabe en "EQUIPOS GT 2025"
+ *               y en "EQUIPOS GT 2026", y el año decide a qué ejercicio va la
+ *               plata. Se informa y NO se elige.
+ *   'palabra'   solo comparten una palabra. Así "CT26-034LT ZIPAQUIRA Norte
+ *               230KV - JE Jaimes" emparejaba con "CT26-026 Micropilotes RSO -
+ *               JE Jaimes": ambos dicen JAIMES. Se informa y NO se elige.
+ *
+ * Antes esto devolvía el primer acierto de cualquiera de las tres estrategias,
+ * sin decir cuál. Da igual mientras nadie use el resultado —y nadie lo usaba,
+ * porque el llamador leía un campo que el objeto no tenía— pero al empezar a
+ * usarlo, un acierto por 'palabra' cargaría el gasto a la obra equivocada.
+ *
+ * `candidatos` trae la lista cuando hay más de uno, para poder mostrarla.
  */
 function resolverProyecto(fragmento, proyPorCodigo) {
   if (!fragmento) return null;
 
   const norm = fragmento.trim().toUpperCase();
 
-  // 1. Match exacto
-  if (proyPorCodigo[norm]) return proyPorCodigo[norm];
+  // 1. El fragmento es el código.
+  if (proyPorCodigo[norm]) return { ...proyPorCodigo[norm], confianza: 'exacta' };
 
-  // 2. Match parcial: el fragmento aparece en algún código
-  for (const [codigo, proyecto] of Object.entries(proyPorCodigo)) {
-    if (codigo.includes(norm)) return proyecto;
+  // 2. El fragmento está contenido en algún código. Solo sirve si es en uno.
+  const dentro = Object.entries(proyPorCodigo).filter(([codigo]) => codigo.includes(norm));
+  if (dentro.length === 1) return { ...dentro[0][1], confianza: 'contenido' };
+  if (dentro.length > 1) {
+    return {
+      ...dentro[0][1],
+      confianza: 'ambigua',
+      candidatos: dentro.map(([codigo]) => codigo),
+    };
   }
 
-  // 3. Match parcial inverso: algún código aparece en el fragmento
-  for (const [codigo, proyecto] of Object.entries(proyPorCodigo)) {
+  // 3. Comparten alguna palabra. Nunca alcanza para decidir.
+  const porPalabra = Object.entries(proyPorCodigo).filter(([codigo]) => {
     const palabras = codigo.split(/[\s\-]+/).filter(p => p.length > 3);
-    if (palabras.some(p => norm.includes(p))) return proyecto;
+    return palabras.some(p => norm.includes(p));
+  });
+  if (porPalabra.length) {
+    return {
+      ...porPalabra[0][1],
+      confianza: 'palabra',
+      candidatos: porPalabra.map(([codigo]) => codigo),
+    };
   }
 
   return null;
 }
 
-module.exports = { parsearAsunto, resolverProyecto };
+/** ¿El acierto alcanza para tomar el código canónico del catálogo? */
+function esConfiable(resuelto) {
+  return resuelto?.confianza === 'exacta' || resuelto?.confianza === 'contenido';
+}
+
+module.exports = { parsearAsunto, resolverProyecto, esConfiable };

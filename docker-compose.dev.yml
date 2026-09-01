@@ -1,0 +1,42 @@
+# Postgres para desarrollo en el equipo local.
+#
+# Solo la base de datos: la app se corre nativa con "npm run dev", que es más
+# cómodo para editar. Por eso acá SÍ se publica el puerto (a diferencia del
+# docker-compose.yml del VPS), pero atado a 127.0.0.1 para que no quede
+# escuchando en la red de la oficina.
+#
+#   docker compose -f docker-compose.dev.yml up -d      levantar
+#   docker compose -f docker-compose.dev.yml logs -f    ver logs
+#   docker compose -f docker-compose.dev.yml down       apagar (conserva datos)
+#   docker compose -f docker-compose.dev.yml down -v    apagar y BORRAR datos
+#
+# El puerto es 55432 y no 5432 a propósito: si algún día hay un Postgres
+# instalado en Windows, no chocan.
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: oc-automation-db-dev
+    environment:
+      - TZ=America/Bogota
+      - POSTGRES_DB=${POSTGRES_DB:-erp}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-desarrollo}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=C.UTF-8
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-erp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  # Volumen aparte del de producción: borrar el de desarrollo nunca puede
+  # tocar los datos reales.
+  pgdata_dev:
+    name: oc-automation-pgdata-dev
