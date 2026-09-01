@@ -12,7 +12,7 @@
  */
 
 const path                           = require('path');
-const { parsearAsunto, resolverProyecto } = require('./parsearAsunto');
+const { parsearAsunto, resolverProyecto, esConfiable } = require('./parsearAsunto');
 const { leerRequerimiento }          = require('./leerRequerimiento');
 const { leerRequerimientoPDF }       = require('./leerRequerimientoPDF');
 const { consultarProveedor } = require('./consultaProveedor');
@@ -138,15 +138,21 @@ async function construirResultado(infoAsunto, requerimiento, opts = {}) {
   // 3. Resolver proyecto: prioridad asunto > Excel.
   // El catálogo sale de Postgres. El fallback que leía tabla_proyectos.csv se
   // retiró con el archivo.
+  // El mapa guarda el código canónico junto con la zona. Sin él, el llamador
+  // leía proyectoFinal.codigo_proyecto —un campo que nunca existió— así que el
+  // primer término del || era siempre undefined y ganaba el texto tecleado. La
+  // resolución funcionaba y su resultado se descartaba.
   const proyPorCodigo = {};
   for (const p of await repoCatalogos.getProyectos({ soloActivos: false })) {
-    const key = String(p.nombre || '').trim().toUpperCase();
-    if (key) proyPorCodigo[key] = { zona: p.zona || '' };
+    const codigo = String(p.nombre || '').trim();
+    const key    = codigo.toUpperCase();
+    if (key) proyPorCodigo[key] = { zona: p.zona || '', codigo };
   }
   // Añadir proyectos externos pasados explícitamente (carga manual)
   for (const p of (opts.proyectosExternos || [])) {
-    const key = String(p.codigo || p).trim().toUpperCase();
-    if (key && !proyPorCodigo[key]) proyPorCodigo[key] = { zona: p.zona || '' };
+    const codigo = String(p.codigo || p).trim();
+    const key    = codigo.toUpperCase();
+    if (key && !proyPorCodigo[key]) proyPorCodigo[key] = { zona: p.zona || '', codigo };
   }
   const proyectoAsunto = infoAsunto.valido
     ? resolverProyecto(infoAsunto.proyecto, proyPorCodigo)
@@ -157,7 +163,11 @@ async function construirResultado(infoAsunto, requerimiento, opts = {}) {
   const asuntoProyecto = (infoAsunto.proyecto === '__AUTO__' || infoAsunto.proyecto === 'SIN_PROYECTO')
     ? null
     : infoAsunto.proyecto;
-  const codigoFinal    = proyectoFinal?.codigo_proyecto
+  // El código del catálogo solo se toma si el acierto es confiable. Un acierto
+  // por palabra suelta cargaría el gasto a otra obra: "CT26-034LT ZIPAQUIRA
+  // Norte 230KV - JE Jaimes" empareja con "CT26-026 Micropilotes RSO - JE
+  // Jaimes" porque ambos dicen JAIMES, y son obras distintas en zonas distintas.
+  const codigoFinal    = (esConfiable(proyectoFinal) ? proyectoFinal.codigo : null)
     || asuntoProyecto
     || requerimiento.cabecera.proyecto
     || infoAsunto.proyecto;
@@ -174,15 +184,27 @@ async function construirResultado(infoAsunto, requerimiento, opts = {}) {
     const consulta = consultarProveedor(item.insumo, codigoFinal, {
       historialSP,
       proveedoresSP,
-      zonaProyecto: proyectoFinal?.zona || '',
+      zonaProyecto: esConfiable(proyectoFinal) ? (proyectoFinal.zona || '') : '',
     });
     return { ...item, consulta };
   });
 
   // 5. Resumen de alertas globales
   const alertasGlobales = [];
+  // Tres situaciones distintas, tres avisos distintos. Antes solo existía el
+  // primero, así que un acierto dudoso —que es peor, porque parece resuelto—
+  // pasaba sin decir nada.
   if (!proyectoFinal) {
-    alertasGlobales.push(`⚠️ Proyecto "${codigoFinal}" no encontrado en la tabla maestra. Verificar código.`);
+    alertasGlobales.push(`⚠️ Proyecto "${codigoFinal}" no está en el catálogo. Se creará como proyecto nuevo: si es una obra que ya existe, corrige el nombre.`);
+  } else if (!esConfiable(proyectoFinal)) {
+    const cands = (proyectoFinal.candidatos || []).join(' · ');
+    alertasGlobales.push(
+      `⚠️ Proyecto "${codigoFinal}" no se pudo identificar con certeza` +
+      (cands ? `. Se parece a: ${cands}` : '') +
+      `. Se registra con el nombre tal cual y sin zona, así que la sugerencia de proveedor usó historial nacional.`);
+  } else if (!proyectoFinal.zona) {
+    alertasGlobales.push(
+      `ℹ️ El proyecto "${proyectoFinal.codigo}" no tiene zona asignada, así que la sugerencia de proveedor usó historial nacional. Se asigna en el panel de proyectos.`);
   }
   const sinPrecio = itemsConsultados.filter(i => i.consulta.sinHistorial);
   if (sinPrecio.length > 0) {
