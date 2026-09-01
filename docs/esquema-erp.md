@@ -9,7 +9,7 @@ mezclarse.
 
 ## Inventario
 
-18 tablas, 5 vistas, 11 funciones, 78 índices.
+18 tablas, 5 vistas, 10 funciones, 78 índices.
 
 | Tabla | Col. | Filas hoy | Lista de SharePoint |
 |---|---:|---:|---|
