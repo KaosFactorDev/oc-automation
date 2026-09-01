@@ -35,6 +35,11 @@
 # Requiere en el .env del VPS: POSTGRES_PASSWORD (obligatoria), y para las
 # migraciones MIGRATION_DB_URL o PGHOST/PGPORT/PGUSER.
 #
+# ⚠ NUNCA con --remove-orphans. Compose ve la app y el mailer como huérfanos,
+# porque este archivo no los declara, y avisa de ello al levantar. Es normal e
+# inofensivo mientras no se le haga caso: agregar --remove-orphans BORRARÍA los
+# dos contenedores en producción.
+#
 # Ojo con el `:?` de POSTGRES_PASSWORD: hace que TODO comando de compose la
 # exija, incluidos `down`, `logs` y `ps`. Si alguno falla con "required variable
 # POSTGRES_PASSWORD is missing", el problema es que no se está leyendo el .env
