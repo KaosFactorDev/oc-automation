@@ -15,7 +15,7 @@ const path                           = require('path');
 const { parsearAsunto, resolverProyecto } = require('./parsearAsunto');
 const { leerRequerimiento }          = require('./leerRequerimiento');
 const { leerRequerimientoPDF }       = require('./leerRequerimientoPDF');
-const { consultarProveedor, cargarDatos } = require('./consultaProveedor');
+const { consultarProveedor } = require('./consultaProveedor');
 const repoCatalogos                      = require('./repo/catalogos');
 const repoHistorial                      = require('./repo/historialPrecios');
 
@@ -135,17 +135,13 @@ Sistema de Gestión de Compras – Civiltech`,
 // real o ser sintético (captura manual desde la consola).
 
 async function construirResultado(infoAsunto, requerimiento, opts = {}) {
-  // 3. Resolver proyecto: prioridad asunto > Excel
-  // proyPorCodigo se construye desde SQLite; fallback a CSV solo si SQLite está vacío
+  // 3. Resolver proyecto: prioridad asunto > Excel.
+  // El catálogo sale de Postgres. El fallback que leía tabla_proyectos.csv se
+  // retiró con el archivo.
   const proyPorCodigo = {};
-  const proyectosCatalogo = await repoCatalogos.getProyectos({ soloActivos: false });
-  if (proyectosCatalogo.length > 0) {
-    for (const p of proyectosCatalogo) {
-      const key = String(p.nombre || '').trim().toUpperCase();
-      if (key) proyPorCodigo[key] = { zona: p.zona || '' };
-    }
-  } else {
-    Object.assign(proyPorCodigo, cargarDatos().proyPorCodigo);
+  for (const p of await repoCatalogos.getProyectos({ soloActivos: false })) {
+    const key = String(p.nombre || '').trim().toUpperCase();
+    if (key) proyPorCodigo[key] = { zona: p.zona || '' };
   }
   // Añadir proyectos externos pasados explícitamente (carga manual)
   for (const p of (opts.proyectosExternos || [])) {

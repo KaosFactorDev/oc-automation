@@ -268,9 +268,6 @@ solo es necesario actualizar los campos personales:
 
 ```env
 # ── Rutas a las bases de datos (fallback CSV — usar solo si SQLite está vacío) ──
-PATH_COMPRAS=./data/compras.csv
-PATH_PROVEEDORES=./data/proveedores_depurados_final.csv
-PATH_PROYECTOS=./data/tabla_proyectos.csv
 
 # ── Microsoft Graph API ───────────────────────────────────────────────────────
 TENANT_ID=<azure-tenant-id>
@@ -649,9 +646,6 @@ oc-automation/
 │
 └── data/                             ← Bind mount en el VPS; persiste entre despliegues
     ├── local.db                      ← SQLite caché (generado automáticamente)
-    ├── compras.csv                   ← Fallback CSV historial precios (solo si SQLite vacío)
-    ├── proveedores_depurados_final.csv ← Fallback CSV proveedores (solo si SQLite vacío)
-    ├── tabla_proyectos.csv           ← Fallback CSV proyectos (solo si SQLite vacío)
     ├── plantilla_oc.xlsx             ← Plantilla Excel para OCs
     └── CT-ADMIN-FO-002_...xlsx       ← Formato de solicitud de requerimiento
 ```
@@ -669,7 +663,6 @@ Son utilidades de una sola ejecución, no parte del ciclo normal. Se corren a ma
 |--------|----------|
 | `crear-listas.js` · `esquemas.js` | Crea las listas en SharePoint según su esquema (setup inicial) |
 | `init-sqlite.js` | Poblado inicial SharePoint → SQLite |
-| `migrarCSV.js` | Migra `compras.csv` → lista `HistorialPrecios` |
 | `migrarOC.js` | Retroalimenta `HistorialPrecios` con las OC ya aprobadas |
 | `migrar-proveedores.js` · `cargar-insumos.js` · `provisionar-proyectos.js` | Siembra de catálogos |
 | `crear-control-costos.js` | Genera el libro `Control Costos.xlsx` |

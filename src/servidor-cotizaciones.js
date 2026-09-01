@@ -1,13 +1,13 @@
 'use strict';
 /**
  * servidor-cotizaciones.js
- * App web local para cargar cotizaciones y actualizar precios en compras.csv
+ * App web local para cargar cotizaciones y registrar precios en el historial
  * Puerto: 3001 — abrir en navegador: http://localhost:3001
  *
  * Endpoints:
  *   GET  /               → UI principal
  *   POST /extraer        → recibe archivo, extrae precios con Gemini API
- *   POST /confirmar      → guarda filas confirmadas en compras.csv
+ *   POST /confirmar      → guarda filas confirmadas en erp.historial_precios
  *   GET  /proveedores    → lista de proveedores activos para autocompletado
  *   GET  /insumos        → lista de insumos históricos para autocompletado
  *   GET  /proyectos      → lista de proyectos activos
@@ -538,9 +538,6 @@ async function ctxSharePoint() {
 }
 
 const PORT         = process.env.PUERTO_COTIZACIONES || 3001;
-const PATH_COMPRAS = process.env.PATH_COMPRAS     || path.join(__dirname, '../data/compras.csv');
-const PATH_PROV    = process.env.PATH_PROVEEDORES || path.join(__dirname, '../data/proveedores_depurados_final.csv');
-const PATH_PROY    = process.env.PATH_PROYECTOS   || path.join(__dirname, '../data/tabla_proyectos.csv');
 const GEMINI_KEY   = process.env.GEMINI_API_KEY || '';
 // Saneado y validado en geminiConfig.js: el .env de produccion se edita a mano y un
 // typo ahi antes no se veia hasta que un usuario subia un archivo.
@@ -561,14 +558,6 @@ let _revisandoCorreo = false;
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
-
-function leerCSV(rutaArchivo) {
-  const XLSX = require('xlsx');
-  const content = fs.readFileSync(rutaArchivo, 'utf-8');
-  const wb = XLSX.read(content, { type: 'string' });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  return XLSX.utils.sheet_to_json(ws, { defval: '' });
-}
 
 // ── HistorialPrecios — lee de SQLite (sin latencia de red) ───────────────────
 // forceRefresh dispara un sync en segundo plano pero retorna SQLite inmediatamente.
@@ -1026,15 +1015,7 @@ function parsearMultipart(body, boundary) {
 
 async function obtenerProveedores(_ctx) {
   const rows = await repoCatalogos.getProveedores();
-  if (rows.length) return rows.map(r => ({ nit: r.nit, nombre: r.nombre, zona: r.zona }));
-  // Fallback CSV si SQLite aún no se ha sincronizado
-  try {
-    return leerCSV(PATH_PROV).map(p => ({
-      nit:    String(p['Identificacion'] || '').trim().replace(/\.0$/, ''),
-      nombre: p['Razon social'] || '',
-      zona:   p['zona'] || '',
-    })).filter(p => p.nit);
-  } catch { return []; }
+  return rows.map(r => ({ nit: r.nit, nombre: r.nombre, zona: r.zona }));
 }
 
 // Match fuzzy de un nombre libre contra el catálogo de Insumos.
@@ -1074,22 +1055,15 @@ function mejorMatchInsumo(query, catalogo) {
   return mejor;
 }
 
-function obtenerInsumosCSV() {
-  try {
-    const rows = leerCSV(PATH_COMPRAS);
-    return rows.map(r => r['Suministro'] || r['Insumo'] || '').filter(Boolean);
-  } catch { return []; }
-}
-
 async function obtenerInsumosHistorial(ctx) {
   try {
     const rows = await getHistorialPrecios(ctx);
     return rows.map(r => String(r.insumo || '').trim()).filter(Boolean);
-  } catch { return obtenerInsumosCSV(); }
+  } catch { return []; }
 }
 
 // Busca los mejores candidatos de homologación para un insumo sin historial,
-// buscando contra todos los nombres únicos en compras.csv.
+// buscando contra todos los nombres únicos del historial de precios.
 // Si GEMINI_KEY está disponible y el score del top candidato es bajo, usa Gemini para reordenar.
 async function sugerirHomologacionCSV(query) {
   const norm = (s) => String(s || '').toUpperCase()
@@ -1148,17 +1122,7 @@ async function obtenerInsumos() {
   const set = new Set();
   const rows = await repoCatalogos.getInsumos({ soloActivos: true });
   for (const r of rows) if (r.nombre) set.add(r.nombre.toUpperCase());
-  if (!set.size) {
-    // Fallback CSV si SQLite aún no tiene datos
-    for (const n of obtenerInsumosCSV()) set.add(String(n).trim().toUpperCase());
-  }
   return [...set].filter(Boolean).sort();
-}
-
-function obtenerProyectos() {
-  try {
-    return leerCSV(PATH_PROY).map(p => p['codigo_proyecto'] || '').filter(Boolean);
-  } catch { return []; }
 }
 
 // Lee proyectos desde Postgres. Fallback a CSV si la tabla está vacía.
@@ -1166,8 +1130,7 @@ async function obtenerProyectosSP({ soloActivos = true } = {}) {
   const rows = await repoCatalogos.getProyectos({ soloActivos });
   // El id ya no es el de SharePoint: los 23 proyectos que el import creó para
   // no perder referencias huérfanas no tienen sp_id y quedarían sin id.
-  if (rows.length) return rows.map(r => ({ id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo }));
-  return obtenerProyectos().map(c => ({ codigo: c, nombre: c, activo: true }));
+  return rows.map(r => ({ id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo }));
 }
 
 // ── Servidor HTTP ─────────────────────────────────────────────────────────────
@@ -1576,7 +1539,7 @@ const servidor = http.createServer(async (req, res) => {
     try {
       const lst = await obtenerProyectosSP({ soloActivos: true });
       return json(lst.map(p => p.codigo).filter(Boolean));
-    } catch (err) { return json(obtenerProyectos()); }
+    } catch (err) { return json({ error: err.message }, 500); }
   }
 
   // ── GET /proyectos/admin → lista completa (incluye inactivos) para la UI de configuración
@@ -2975,7 +2938,7 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── POST /confirmar → guardar en compras.csv + upsert catálogo Insumos ──
+  // ── POST /confirmar → guardar en el historial + alta en el catálogo ──
   if (req.method === 'POST' && url === '/confirmar') {
     const chunks = [];
     req.on('data', c => chunks.push(c));
