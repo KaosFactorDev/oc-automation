@@ -9,7 +9,7 @@ mezclarse.
 
 ## Inventario
 
-18 tablas, 5 vistas, 10 funciones, 78 índices.
+18 tablas, 5 vistas, 11 funciones, 78 índices.
 
 | Tabla | Col. | Filas hoy | Lista de SharePoint |
 |---|---:|---:|---|
@@ -225,6 +225,52 @@ Encima hay tres resúmenes, que antes eran hojas del libro calculadas a mano:
 Como son vistas y no tablas, no hay nada que sincronizar: el número que se lee
 es el que sale de los documentos en ese momento. `controlCostos.js` reconstruye
 el libro completo desde acá y lo sube a SharePoint como entregable.
+
+## Proyectos: el catálogo y sus variantes
+
+En SharePoint el proyecto era **texto libre** en cada documento. El nombre venía
+del asunto del correo o de una celda del Excel, escrito a mano en obra, y nada
+lo validaba. Así una misma obra llegó a existir con cuatro escrituras distintas.
+
+En Postgres es `proyecto_id`, llave foránea a `erp.proyectos`. Un documento no
+puede referenciar un proyecto que no existe — que es lo que permite, más
+adelante, que un catálogo externo realmente gobierne.
+
+### Los 23 aceptados
+
+El import marcó 23 proyectos con `requiere_revision`: nombres que aparecían en
+documentos y no en el catálogo. Se creó la fila para poder apuntar a algo y se
+dejó señalada.
+
+Se decidió **aceptarlos como proyectos propios**, no unificarlos. Dos razones:
+
+- Varios nunca fueron duplicados. `BODEGA CIVILTECH` tiene 1.709 compras propias
+  y `SST` 175: son centros de costo reales que nadie dio de alta.
+- El catálogo va a venir de una fuente externa, y esa fuente no se ligará al
+  histórico. Unificar contra el catálogo viejo sería trabajo que se descarta.
+
+Quedan distinguibles por `sp_id IS NULL` —no venían de SharePoint— y el
+histórico sigue ligado a ellos sin cambios.
+
+**Lo que se acepta tiene un precio.** Una misma obra sigue apareciendo como
+varias líneas en el informe: `CT26-034 LT Norte` muestra $210.658.038 y gastó
+$237.368.780 repartidos en tres escrituras, un 12,7% menos. Y los nombres cortos
+ahora ganan el emparejamiento exacto, así que quien escriba `MISTRAL` cae en el
+proyecto llamado `mistral`, no en `CT25-134 ANCLAJES MISTRAL`. Son 12 pares así.
+
+Ninguno de los 23 tiene zona, y se quedan sin ella por decisión. Sus documentos
+usan historial nacional para sugerir proveedor, y el aviso lo dice.
+
+### Por qué la marca vale más en cero
+
+`requiere_revision` volvió a cero, así que ahora significa «alguien usó un
+proyecto que nadie dio de alta». Con 23 filas aceptadas dentro, la marca era
+ruido que nadie miraba. `npm run revisar-proyectos` dejó de ser una lista de
+pendientes y pasó a ser un monitor.
+
+Por eso la migración limpia una **lista escrita**, no todas las filas marcadas:
+al aplicarse en el VPS sobre datos reimportados puede haber variantes nuevas, y
+limpiarlas también escondería justo lo que hay que ver.
 
 ## Reglas que la base hace cumplir
 

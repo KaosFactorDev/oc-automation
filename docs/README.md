@@ -8,7 +8,7 @@ Postgres autoalojada. Empieza por acá.
 | Etapa | Estado |
 |---|---|
 | Postgres corriendo en Docker (local) | **Hecho** |
-| Esquema `erp` (11 listas de SharePoint) | **Hecho** — 18 tablas, 5 vistas, 10 funciones |
+| Esquema `erp` (11 listas de SharePoint) | **Hecho** — 18 tablas, 5 vistas, 10 funciones, 11 migraciones |
 | Carga inicial de datos | **Hecho** — 12.587 filas |
 | Capa de repositorio en la aplicación | **Hecho** — 0 operaciones de datos por Graph |
 | Caché SQLite retirado | **Hecho** — `db.js` de 737 a 124 líneas |
