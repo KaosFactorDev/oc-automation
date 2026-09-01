@@ -31,6 +31,8 @@ const repoCatalogos    = require('./repo/catalogos');
 const repoRequerimientos = require('./repo/requerimientos');
 const repoOrdenesCompra  = require('./repo/ordenesCompra');
 const repoOrdenesServicio = require('./repo/ordenesServicio');
+const repoRemisiones     = require('./repo/remisiones');
+const repoInventario     = require('./repo/inventario');
 const localDb          = require('./db');
 const syncService      = require('./syncService');
 const auth             = require('./authService');
@@ -68,6 +70,19 @@ async function actualizarRequerimiento(id, cambios) {
   }
   if (Object.keys(resto).length) await repoRequerimientos.actualizar(id, resto);
   return { ok: true };
+}
+
+// ── Remisiones e inventario: adaptadores a la forma de SharePoint ────────────
+
+async function obtenerRemision(id) {
+  const r = await repoRemisiones.obtener(id);
+  if (!r) throw new Error(`Remisión ${id} no existe`);
+  return { id: r.id, fields: r };
+}
+
+async function listarRemisiones(filtro) {
+  const rs = await repoRemisiones.listar(filtro || {});
+  return rs.map(r => ({ id: r.id, fields: r }));
 }
 
 // ── Órdenes de servicio: adaptadores a la forma de SharePoint ────────────────
@@ -279,17 +294,15 @@ async function crearRemisionYGuardar(ctx, ocIds, extra, usuario) {
   const rem = await remisionDesdeOCs(ocIds, extra);
 
   const now = new Date().toISOString();
-  const existentes = await g.getListItems(ctx.siteId, ctx.Remisiones);
-  const numero = 'REM-' + String((existentes?.length || 0) + 1).padStart(5, '0');
-  rem.numero = numero;
 
-  const creado = await g.addListItem(ctx.siteId, ctx.Remisiones, {
-    numero,
+  // El número lo emite erp.siguiente_numero_remision() dentro de la
+  // transacción. Antes salía de (cantidad de remisiones + 1), y con eso dos
+  // remisiones creadas en el mismo segundo obtenían el mismo número —
+  // REM-00011 existía dos veces por un doble clic en el formulario.
+  // ocIds y ocsAsociadas ya no se guardan: se derivan de remision_ordenes.
+  const { id, numero } = await repoRemisiones.crear({
     fecha:                extra.fecha || now,
     proyecto:             rem.proyecto,
-    ocIds:                JSON.stringify(ocIds),
-    ocsAsociadas:         rem.ocsAsociadas,
-    itemsJson:            JSON.stringify(rem.items),
     observaciones:        rem.observaciones,
     responsableEntrega:   rem.responsableEntrega,
     responsableRecepcion: rem.responsableRecepcion,
@@ -297,10 +310,10 @@ async function crearRemisionYGuardar(ctx, ocIds, extra, usuario) {
     creadoPor:            usuario,
     fechaCreacion:        now,
     estado:               'activa',
-  });
+  }, rem.items, ocIds);
 
-  if (creado?.id) localDb.upsertDocumento('remisiones', creado);
-  return { id: creado.id, numero, rem };
+  rem.numero = numero;
+  return { id, numero, rem };
 }
 
 // Al anular una OC, propaga el cambio a las remisiones que la incluyan.
@@ -308,8 +321,7 @@ async function crearRemisionYGuardar(ctx, ocIds, extra, usuario) {
 // - Si tenía varias OC → estado='requiere-reemplazo' + alerta para generar nueva remisión con las OC restantes.
 // Devuelve el listado de remisiones afectadas para que el UI pueda avisar.
 async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, now) {
-  if (!ctx.Remisiones) return [];
-  const remisiones = await g.getListItems(ctx.siteId, ctx.Remisiones);
+  const remisiones = await listarRemisiones();
   const afectadas = [];
   const numOCAnulada = ocFields.numeroOC || `id:${ocIdAnulada}`;
 
@@ -325,12 +337,10 @@ async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, n
 
     if (quedanIds.length === 0) {
       // Única OC en la remisión → se anula completa
-      await g.updateListItem(ctx.siteId, ctx.Remisiones, rem.id, {
+      await repoRemisiones.actualizar(rem.id, {
         estado: 'anulada',
         motivoAnulacion: `OC ${numOCAnulada} anulada por ${usuario} el ${fechaStr}`,
       });
-      localDb.upsertDocumento('remisiones', { id: rem.id, fields: { ...f, estado: 'anulada',
-        motivoAnulacion: `OC ${numOCAnulada} anulada por ${usuario} el ${fechaStr}` } });
       afectadas.push({ id: rem.id, numero: f.numero, accion: 'anulada' });
     } else {
       // Remisión multi-OC → mantiene estado pero queda marcada con alerta
@@ -344,12 +354,10 @@ async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, n
       } catch {}
       const alerta = `⚠ OC ${numOCAnulada} fue anulada el ${fechaStr}. Se requiere generar una nueva remisión para las OC restantes: ${numerosRestantes.join(', ')}`;
       const alertasPrev = f.alertas || '';
-      await g.updateListItem(ctx.siteId, ctx.Remisiones, rem.id, {
+      await repoRemisiones.actualizar(rem.id, {
         estado: 'requiere-reemplazo',
         alertas: alertasPrev ? `${alertasPrev}\n${alerta}` : alerta,
       });
-      localDb.upsertDocumento('remisiones', { id: rem.id, fields: { ...f, estado: 'requiere-reemplazo',
-        alertas: alertasPrev ? `${alertasPrev}\n${alerta}` : alerta } });
       afectadas.push({ id: rem.id, numero: f.numero, accion: 'requiere-reemplazo', ocRestantes: numerosRestantes });
     }
   }
@@ -381,8 +389,7 @@ async function reconciliarRequerimientosVsOCs(ctx) {
 // Útil para reparar remisiones que quedaron activas después de anular OCs antes de que
 // existiera la cascada. Llamado desde GET /remisiones para auto-corrección continua.
 async function reconciliarRemisionesVsOCs(ctx) {
-  if (!ctx.Remisiones) return 0;
-  const remisiones = await g.getListItems(ctx.siteId, ctx.Remisiones);
+  const remisiones = await listarRemisiones();
   let cambios = 0;
   for (const rem of remisiones) {
     const f = rem.fields || {};
@@ -405,20 +412,18 @@ async function reconciliarRemisionesVsOCs(ctx) {
     if (!vigentes.length) {
       const motivo = `OCs anuladas: ${anuladas.map(o => o.numero).join(', ')}`;
       const motivoFinal = f.motivoAnulacion ? f.motivoAnulacion : motivo;
-      await g.updateListItem(ctx.siteId, ctx.Remisiones, rem.id, {
+      await repoRemisiones.actualizar(rem.id, {
         estado: 'anulada',
         motivoAnulacion: motivoFinal,
       });
-      localDb.upsertDocumento('remisiones', { id: rem.id, fields: { ...f, estado: 'anulada', motivoAnulacion: motivoFinal } });
       cambios++;
     } else if (f.estado !== 'requiere-reemplazo') {
       const alerta = `⚠ OCs anuladas: ${anuladas.map(o => o.numero).join(', ')}. Generar nueva remisión para OCs vigentes: ${vigentes.map(o => o.numero).join(', ')}`;
       const alertasFinal = f.alertas ? `${f.alertas}\n${alerta}` : alerta;
-      await g.updateListItem(ctx.siteId, ctx.Remisiones, rem.id, {
+      await repoRemisiones.actualizar(rem.id, {
         estado: 'requiere-reemplazo',
         alertas: alertasFinal,
       });
-      localDb.upsertDocumento('remisiones', { id: rem.id, fields: { ...f, estado: 'requiere-reemplazo', alertas: alertasFinal } });
       cambios++;
     }
   }
@@ -2372,7 +2377,6 @@ const servidor = http.createServer(async (req, res) => {
         if (ocIds.length < 1) return json({ error: 'Debe seleccionar al menos una OC' }, 400);
 
         const ctx = await ctxSharePoint();
-        if (!ctx.Remisiones) return json({ error: 'Lista Remisiones no existe. Ejecute el setup de SharePoint.' }, 500);
 
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const { id, numero } = await crearRemisionYGuardar(ctx, ocIds, {
@@ -2390,13 +2394,12 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── GET /remisiones → lista remisiones (desde SQLite, reconciliación en background)
+  // ── GET /remisiones → lista remisiones; la reconciliación corre en segundo plano
   if (req.method === 'GET' && url === '/remisiones') {
-    json(localDb.getRemisiones());
-    ctxSharePoint().then(ctx => {
-      if (ctx.Remisiones)
-        reconciliarRemisionesVsOCs(ctx).catch(e => console.warn('[reconciliar remisiones]', e.message));
-    }).catch(() => {});
+    json(await repoRemisiones.listar());
+    ctxSharePoint()
+      .then(ctx => reconciliarRemisionesVsOCs(ctx))
+      .catch(e => console.warn('[reconciliar remisiones]', e.message));
     return;
   }
 
@@ -2406,8 +2409,7 @@ const servidor = http.createServer(async (req, res) => {
     const [, remId, fmt] = mRemView;
     try {
       const ctx = await ctxSharePoint();
-      if (!ctx.Remisiones) return json({ error: 'Lista Remisiones no existe' }, 500);
-      const it = await g.getListItem(ctx.siteId, ctx.Remisiones, remId);
+      const it = await obtenerRemision(remId);
       const f = it.fields || {};
       let items = [];
       try { items = JSON.parse(f.itemsJson || '[]'); } catch {}
@@ -3011,10 +3013,11 @@ const servidor = http.createServer(async (req, res) => {
         const ocProyecto = ocFields.proyecto || '';
         let itemsOC = [];
         try { itemsOC = JSON.parse(ocFields.itemsJson || '[]'); } catch {}
-        if (itemsOC.length && ctx.MovimientosInventario) {
-          const batchIdEntrada = `BORR-EA-${Date.now()}`;
-          const batchIdSalida  = `BORR-SA-${Date.now() + 1}`;
-          const movPromises = [];
+        if (itemsOC.length) {
+          // Cada movimiento se arma desde los ítems de la OC. El precio incluye
+          // el IVA porque el almacén valora lo que costó, no la base gravable.
+          const movsEntrada = [];
+          const movsSalida  = [];
           for (const it of itemsOC) {
             const base         = Number(it.precioUnitario || it.precio || 0);
             const ivaPct       = Number(it.ivaPct || 0);
@@ -3024,108 +3027,62 @@ const servidor = http.createServer(async (req, res) => {
             const movBase = {
               proyecto:       ocProyecto,
               ocId:           String(itemId),
-              numeroOC:       ocFields.numeroOC || '',
               insumo:         it.descripcion || it.insumo || '',
               unidad:         it.unidad || 'UND',
               cantidad:       cant,
               precioUnitario: precioConIva,
-              valorTotal:     cant * precioConIva,
               responsable:    usuario,
               creadoPor:      usuario,
               fechaCreacion:  now,
               fecha:          now,
-              notas:          '',
               estado:         'activo',
-              documentoRef:   null,
-              estadoDoc:      'borrador',
             };
-            if (body.autoEntrada) {
-              const entradaFields = { ...movBase, tipo: 'entrada', batchId: batchIdEntrada };
-              movPromises.push(
-                g.addListItem(ctx.siteId, ctx.MovimientosInventario, entradaFields)
-                  .then(item => {
-                    if (item?.id) {
-                      const spFields = item.fields || item;
-                      localDb.upsertDocumento('movimientos_inventario', {
-                        id: item.id,
-                        fields: { ...entradaFields, ...spFields, batchId: batchIdEntrada, estadoDoc: 'borrador', documentoRef: null },
-                      });
-                    }
-                  })
-                  .catch(e => console.warn('[inventario entrada]', e.message))
-              );
-            }
-            if (body.autoSalida) {
-              const salidaFields = { ...movBase, tipo: 'salida', batchId: batchIdSalida };
-              movPromises.push(
-                g.addListItem(ctx.siteId, ctx.MovimientosInventario, salidaFields)
-                  .then(item => {
-                    if (item?.id) {
-                      const spFields = item.fields || item;
-                      localDb.upsertDocumento('movimientos_inventario', {
-                        id: item.id,
-                        fields: { ...salidaFields, ...spFields, batchId: batchIdSalida, estadoDoc: 'borrador', documentoRef: null },
-                      });
-                    }
-                  })
-                  .catch(e => console.warn('[inventario salida]', e.message))
-              );
-            }
+            if (body.autoEntrada) movsEntrada.push({ ...movBase, tipo: 'entrada' });
+            if (body.autoSalida)  movsSalida.push({ ...movBase, tipo: 'salida' });
           }
-          await Promise.allSettled(movPromises);
-          // Aprobar los documentos creados para que afecten el stock inmediatamente
-          const hayItems = itemsOC.some(it => Number(it.cantidad || 0) > 0);
-          async function aprobarBatchInline(batchId, tipo, proyecto) {
-            const docRef = localDb.getNextDocRef(tipo, proyecto);
-            const movs = localDb.db().prepare(
-              "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.batchId')=?"
-            ).all(batchId).map(r => JSON.parse(r.data));
-            if (!movs.length) return { docRef, actualizados: 0 };
-            for (const m of movs) {
-              const updated = { ...m, documentoRef: docRef, estadoDoc: 'aprobado' };
-              await g.updateListItem(ctx.siteId, ctx.MovimientosInventario, m.id, { documentoRef: docRef, estadoDoc: 'aprobado' });
-              localDb.upsertDocumento('movimientos_inventario', { id: m.id, fields: updated });
-            }
-            if (tipo === 'salida' && movs.length > 0) {
-              const totalSalida = movs.reduce((s, m) => s + (Number(m.valorTotal) || 0), 0);
+
+          // crearLote inserta los movimientos Y emite el consecutivo del
+          // documento en una sola transacción. Antes eran N altas en paralelo
+          // contra Graph, seguidas de un MAX() para el número: si algo fallaba a
+          // la mitad quedaban movimientos sin documento, y dos registros
+          // simultáneos podían recibir el mismo EA-####.
+          async function registrarLote(movs, tipo) {
+            if (!movs.length) return null;
+            const { documentoRef } = await repoInventario.crearLote(movs, { emitirDocumento: true });
+
+            if (tipo === 'salida') {
+              const totalSalida = movs.reduce((s, m) => s + m.cantidad * m.precioUnitario, 0);
               if (totalSalida > 0) {
                 cc.registrarGasto({
                   fechaOC:   new Date().toISOString().slice(0, 10),
-                  numeroOC:  docRef, proyecto,
+                  numeroOC:  documentoRef, proyecto: ocProyecto,
                   tipoGasto: 'Salida Almacén',
                   subtotal:  totalSalida, iva: 0, total: totalSalida,
                   estado:    'ejecutado',
-                  creadoPor: movs[0].creadoPor || process.env.USUARIO_EMAIL || 'sistema',
+                  creadoPor: usuario,
                 }).catch(e => console.warn('[inventario aprobar] Control Costos:', e.message));
               }
             }
-            return { docRef, actualizados: movs.length };
+            return documentoRef;
           }
-          if (body.autoEntrada && hayItems) {
-            try {
-              const r = await aprobarBatchInline(batchIdEntrada, 'entrada', ocProyecto);
-              if (r.actualizados > 0) autoRefs.entrada = r.docRef;
-            } catch(e) { console.warn('[entregar] aprobar entrada:', e.message); }
-          }
-          if (body.autoSalida && hayItems) {
-            try {
-              const r = await aprobarBatchInline(batchIdSalida, 'salida', ocProyecto);
-              if (r.actualizados > 0) autoRefs.salida = r.docRef;
-            } catch(e) { console.warn('[entregar] aprobar salida:', e.message); }
-          }
+
+          try {
+            autoRefs.entrada = await registrarLote(movsEntrada, 'entrada');
+          } catch (e) { console.warn('[entregar] entrada de inventario:', e.message); }
+          try {
+            autoRefs.salida = await registrarLote(movsSalida, 'salida');
+          } catch (e) { console.warn('[entregar] salida de inventario:', e.message); }
         }
       }
 
       // Generación automática de remisión individual al marcar la OC como entregada
       let remisionGenerada = null;
-      if (accion === 'entregar' && ctx.Remisiones) {
+      if (accion === 'entregar') {
         try {
-          const yaTieneRemision = localDb.getRemisiones().some(r => {
-            if (r.estado === 'anulada') return false;
-            let ids = [];
-            try { ids = JSON.parse(r.ocIds || '[]'); } catch { ids = []; }
-            return ids.map(String).includes(String(itemId));
-          });
+          // Antes: recorrer todas las remisiones parseando su columna ocIds.
+          // Ahora lo resuelve la tabla de unión con un join.
+          const yaTieneRemision = (await repoRemisiones.porOrdenCompra(itemId))
+            .some(r => r.estado !== 'anulada');
           let itemsOC = [];
           try { itemsOC = JSON.parse(actualizado.itemsJson || '[]'); } catch {}
           if (!yaTieneRemision && itemsOC.length) {
@@ -3147,7 +3104,7 @@ const servidor = http.createServer(async (req, res) => {
 
       // Cascada de anulación sobre remisiones
       let remisionesAfectadas = [];
-      if (accion === 'anular' && ctx.Remisiones) {
+      if (accion === 'anular') {
         try {
           remisionesAfectadas = await cascadaAnulacionRemisiones(ctx, itemId, actualizado, usuario, now);
         } catch (e) { console.warn('No se pudo propagar anulación a remisiones:', e.message); }
@@ -4018,7 +3975,7 @@ FORMATO:
       const ocs = (await repoOrdenesCompra.listar())
         .filter(oc => oc.entregado && oc.estado !== 'anulada')
         .sort((a, b) => (b.fechaCreacion || '').localeCompare(a.fechaCreacion || ''));
-      const conEntrada = localDb.getOcIdsConEntrada();
+      const conEntrada = await repoInventario.ocIdsConEntrada();
       const sinEntrada = ocs.filter(oc => !conEntrada.has(String(oc.id)));
       return json(sinEntrada);
     } catch (err) { return json({ error: err.message }, 500); }
@@ -4029,7 +3986,7 @@ FORMATO:
     try {
       const qp      = new URL(req.url, 'http://x').searchParams;
       const proyecto = qp.get('proyecto') || null;
-      return json(localDb.getStock(proyecto));
+      return json(await repoInventario.stock(proyecto));
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
@@ -4048,7 +4005,7 @@ FORMATO:
       const qp   = new URL(req.url, 'http://x').searchParams;
       const proy = qp.get('proyecto') || null;
       const tipo = qp.get('tipo')     || null;
-      let movs = localDb.getMovimientosInventario({ proyecto: proy });
+      let movs = await repoInventario.listar({ proyecto: proy });
       if (tipo) movs = movs.filter(m => m.tipo === tipo);
       movs.sort((a, b) => (b.fechaCreacion || '').localeCompare(a.fechaCreacion || ''));
       return json(movs);
@@ -4075,7 +4032,6 @@ FORMATO:
           }
         }
         const ctx = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista MovimientosInventario no disponible' }, 503);
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const now     = new Date().toISOString();
         const creados = [];
@@ -4104,15 +4060,8 @@ FORMATO:
             estadoDoc:      'borrador',
             batchId,
           };
-          const item = await g.addListItem(ctx.siteId, ctx.MovimientosInventario, fields);
-          if (item?.id) {
-            const spFields = item.fields || item;
-            localDb.upsertDocumento('movimientos_inventario', {
-              id: item.id,
-              fields: { ...fields, ...spFields, batchId: fields.batchId, estadoDoc: fields.estadoDoc, documentoRef: fields.documentoRef },
-            });
-            creados.push({ id: item.id, ...fields });
-          }
+          const movId = await repoInventario.crear(fields);
+          creados.push({ id: movId, ...fields });
         }
         return json({ ok: true, creados, batchId });
       } catch (err) { return json({ error: err.message }, 500); }
@@ -4128,7 +4077,6 @@ FORMATO:
       try {
         const body    = JSON.parse(Buffer.concat(chunks).toString());
         const ctx     = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista MovimientosInventario no disponible' }, 503);
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const now     = new Date().toISOString();
         // Aceptar tanto { items: [...] } como objeto simple (retrocompat)
@@ -4137,7 +4085,7 @@ FORMATO:
 
         const proyecto = String(items[0]?.proyecto || '');
         const batchId  = `BORR-SA-${Date.now()}`;
-        const stock    = localDb.getStock();
+        const stock    = await repoInventario.stock();
         const creados  = [];
 
         for (const it of items) {
@@ -4168,15 +4116,8 @@ FORMATO:
             estadoDoc:      'borrador',
             batchId,
           };
-          const item = await g.addListItem(ctx.siteId, ctx.MovimientosInventario, fields);
-          if (item?.id) {
-            const spFields = item.fields || item;
-            localDb.upsertDocumento('movimientos_inventario', {
-              id: item.id,
-              fields: { ...fields, ...spFields, batchId: fields.batchId, estadoDoc: fields.estadoDoc, documentoRef: fields.documentoRef },
-            });
-            creados.push({ id: item.id, ...fields });
-          }
+          const movId = await repoInventario.crear(fields);
+          creados.push({ id: movId, ...fields });
         }
 
         return json({ ok: true, creados, batchId });
@@ -4193,7 +4134,6 @@ FORMATO:
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString());
         const ctx  = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista no disponible' }, 503);
         const usuario  = process.env.USUARIO_EMAIL || 'sistema';
         const now      = new Date().toISOString();
         const devBatchId = `BORR-DEV-${Date.now()}`;
@@ -4220,15 +4160,8 @@ FORMATO:
             estadoDoc:      'borrador',
             batchId:        devBatchId,
           };
-          const item = await g.addListItem(ctx.siteId, ctx.MovimientosInventario, fields);
-          if (item?.id) {
-            const spFields = item.fields || item;
-            localDb.upsertDocumento('movimientos_inventario', {
-              id: item.id,
-              fields: { ...fields, ...spFields, batchId: devBatchId, estadoDoc: 'borrador', documentoRef: null },
-            });
-            creados.push({ id: item.id, ...fields });
-          }
+          const movId = await repoInventario.crear(fields);
+          creados.push({ id: movId, ...fields });
         }
         return json({ ok: true, creados, batchId: devBatchId });
       } catch (err) { return json({ error: err.message }, 500); }
@@ -4248,9 +4181,8 @@ FORMATO:
         const proyecto = String(body.proyecto || '');
         const tipo     = String(body.tipo || 'entrada');
         const ctx = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista MovimientosInventario no disponible' }, 503);
 
-        const docRef = localDb.getNextDocRef(tipo, proyecto);
+        const docRef = await repoInventario.siguienteDocumentoRef(tipo);
         let movs = localDb.db().prepare(
           "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.batchId')=?"
         ).all(batchId).map(r => JSON.parse(r.data));
@@ -4266,8 +4198,7 @@ FORMATO:
         let actualizados = 0;
         for (const m of movs) {
           const updated = { ...m, documentoRef: docRef, estadoDoc: 'aprobado' };
-          await g.updateListItem(ctx.siteId, ctx.MovimientosInventario, m.id, { documentoRef: docRef, estadoDoc: 'aprobado' });
-          localDb.upsertDocumento('movimientos_inventario', { id: m.id, fields: updated });
+          await repoInventario.actualizar(m.id, { documentoRef: docRef, estadoDoc: 'aprobado' });
           actualizados++;
         }
         // Registrar salida aprobada en Control Costos (en segundo plano)
@@ -4306,7 +4237,6 @@ FORMATO:
       try {
         const batchId = decodeURIComponent(mDocAnular[1]);
         const ctx = await ctxSharePoint();
-        if (!ctx.MovimientosInventario) return json({ error: 'Lista MovimientosInventario no disponible' }, 503);
 
         let movs = localDb.db().prepare(
           "SELECT data FROM movimientos_inventario WHERE json_extract(data,'$.batchId')=?"
@@ -4319,12 +4249,8 @@ FORMATO:
 
         if (!movs.length) return json({ ok: false, error: 'Documento no encontrado' }, 404);
 
-        // Actualizar todos en paralelo en vez de secuencialmente (reduce N×150ms → ~150ms)
-        await Promise.all(movs.map(m => {
-          const updated = { ...m, estado: 'anulado', estadoDoc: 'anulado' };
-          return g.updateListItem(ctx.siteId, ctx.MovimientosInventario, m.id, { estado: 'anulado', estadoDoc: 'anulado' })
-            .then(() => localDb.upsertDocumento('movimientos_inventario', { id: m.id, fields: updated }));
-        }));
+        // Un solo UPDATE por lote, en vez de N llamadas en paralelo a Graph.
+        await repoInventario.anular(movs.map(m => m.id));
         return json({ ok: true, anulados: movs.length });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -4341,8 +4267,8 @@ FORMATO:
         // body: { proyecto, pregunta, apuData (tabla extraída del Excel), historial (turns previos) }
         const { proyecto, pregunta, apuData, historial = [] } = body;
 
-        const stock = localDb.getStock(proyecto || null);
-        const movs  = localDb.getMovimientosInventario({ proyecto: proyecto || null });
+        const stock = await repoInventario.stock(proyecto || null);
+        const movs  = await repoInventario.listar({ proyecto: proyecto || null });
         const salidas = movs.filter(m => m.tipo === 'salida');
 
         // Construir contexto de consumos reales
