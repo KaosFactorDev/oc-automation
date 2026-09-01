@@ -19,7 +19,9 @@
     "db:esperar": "node src/scripts/db-esperar.js",
     "db:importar": "node src/scripts/importar-listas.js",
     "corregir-listas": "node src/scripts/corregir-listas.js",
-    "db:verificar": "node src/scripts/verificar-migracion.js"
+    "db:verificar": "node src/scripts/verificar-migracion.js",
+    "revisar-proyectos": "node src/scripts/revisar-proyectos.js",
+    "plan-proyectos": "node src/scripts/plan-proyectos.js"
   },
   "keywords": [],
   "author": "",
