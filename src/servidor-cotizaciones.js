@@ -30,6 +30,7 @@ const configApp        = require('./configApp');
 const repoCatalogos    = require('./repo/catalogos');
 const repoRequerimientos = require('./repo/requerimientos');
 const repoOrdenesCompra  = require('./repo/ordenesCompra');
+const repoOrdenesServicio = require('./repo/ordenesServicio');
 const localDb          = require('./db');
 const syncService      = require('./syncService');
 const auth             = require('./authService');
@@ -67,6 +68,14 @@ async function actualizarRequerimiento(id, cambios) {
   }
   if (Object.keys(resto).length) await repoRequerimientos.actualizar(id, resto);
   return { ok: true };
+}
+
+// ── Órdenes de servicio: adaptadores a la forma de SharePoint ────────────────
+
+async function obtenerOS(id) {
+  const o = await repoOrdenesServicio.obtener(id);
+  if (!o) throw new Error(`Orden de servicio ${id} no existe`);
+  return { id: o.id, fields: o };
 }
 
 // ── Órdenes de compra: adaptadores a la forma de SharePoint ──────────────────
@@ -162,9 +171,9 @@ async function ocDesdeSharePoint(itemId) {
   };
 }
 
-// Genera el PDF de la OC (mismo motor que /oc/:id.html) y lo sube a SharePoint,
-// guardando el link en el campo pdfUrl. Se relee el item fresco de Graph para
-// tener itemsJson completo (actualizado.fields del PATCH no lo incluye).
+// Genera el PDF de la OC (mismo motor que /oc/:id.html) y lo sube al Drive de
+// SharePoint, guardando el link en pdfUrl. Los archivos se quedan en SharePoint
+// por decisión de alcance; solo los datos migran.
 async function guardarPdfOCEnSharePoint(ctx, itemId, sesion) {
   const oc  = await ocDesdeSharePoint(itemId);
   const cfg = await cfgConFirmante(await configApp.getConfig(), sesion);
@@ -1163,14 +1172,14 @@ function osDesdeFields(item) {
 // Genera el PDF de la OS (mismo motor que /os/:id/html) y lo sube a SharePoint,
 // guardando el link en el campo pdfUrl.
 async function guardarPdfOSEnSharePoint(ctx, osId, sesion) {
-  const item = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, osId);
+  const item = await obtenerOS(osId);
   const os   = osDesdeFields(item);
   const cfg  = await cfgConFirmante(await configApp.getConfig(), sesion);
   const html   = osTemplate.generarHTML(os, cfg);
   const buffer = await pdfGenerator.htmlAPdf(html);
   const nombre = `${os.numeroOS || osId}_${os.proyecto || 'SIN-PROYECTO'}`.replace(/[\\/:*?"<>|]/g, '-');
   const driveItem = await g.uploadFileToSite(ctx.siteId, `/OrdenesServicioPDF/${nombre}.pdf`, buffer, 'application/pdf');
-  await g.updateListItem(ctx.siteId, ctx.OrdenesServicio, osId, { pdfUrl: driveItem.webUrl });
+  await repoOrdenesServicio.actualizar(osId, { pdfUrl: driveItem.webUrl });
   return driveItem.webUrl;
 }
 
@@ -1689,7 +1698,7 @@ const servidor = http.createServer(async (req, res) => {
 
       // — Fuente OS: OrdenesServicio SQLite —
       if (inclOS) {
-        const osItems = localDb.getOrdenesServicio();
+        const osItems = await repoOrdenesServicio.listar();
         for (const os of osItems) {
           const proyecto  = String(os.proyecto          || '').trim();
           const proveedor = String(os.proveedorNombre   || os.proveedorNit || '').trim();
@@ -3654,7 +3663,6 @@ FORMATO:
       try {
         const osData = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         const ctx = await ctxSharePoint();
-        if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible — espere unos segundos y reintente');
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const now = new Date().toISOString();
 
@@ -3686,9 +3694,9 @@ FORMATO:
         if (osData.fechaInicio) fields.fechaInicio = new Date(osData.fechaInicio).toISOString();
         if (osData.fechaFin)    fields.fechaFin    = new Date(osData.fechaFin).toISOString();
 
-        const created = await g.addListItem(ctx.siteId, ctx.OrdenesServicio, fields);
-        if (created?.id) localDb.upsertDocumento('ordenes_servicio', created);
-        json({ ok: true, id: created.id, numeroOS: fields.numeroOS });
+        const createdId = await repoOrdenesServicio.crear(fields, osData.items || []);
+        // numeroOS va vacío a propósito: el consecutivo se emite al aprobar.
+        json({ ok: true, id: createdId, numeroOS: '' });
       } catch (err) { json({ error: err.message }, 500); }
     });
     return;
@@ -3697,7 +3705,7 @@ FORMATO:
   // ── OS: listar órdenes de servicio ───────────────────────────────────────────
   if (req.method === 'GET' && url === '/os/ordenes') {
     try {
-      const lista = localDb.getOrdenesServicio()
+      const lista = (await repoOrdenesServicio.listar())
         .sort((a, b) => (b.fechaCreacion || b.updated_at || '').localeCompare(a.fechaCreacion || a.updated_at || ''))
         .map(osDesdeFields);
       json(lista);
@@ -3713,7 +3721,7 @@ FORMATO:
       const filtroProyecto = String(qs.proyecto || '').trim();
       const filtroTexto    = String(qs.q        || '').trim().toLowerCase();
 
-      let rows = localDb.getOrdenesServicio()
+      let rows = (await repoOrdenesServicio.listar())
         .map(osDesdeFields)
         .sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
 
@@ -3773,8 +3781,7 @@ FORMATO:
   if (req.method === 'GET' && mOsHtml) {
     try {
       const ctx = await ctxSharePoint();
-      if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible');
-      const item = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, mOsHtml[1]);
+      const item = await obtenerOS(mOsHtml[1]);
       const os  = osDesdeFields(item);
       const cfg = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -3791,8 +3798,7 @@ FORMATO:
   if (req.method === 'GET' && mOsXlsx) {
     try {
       const ctx = await ctxSharePoint();
-      if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible');
-      const item  = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, mOsXlsx[1]);
+      const item  = await obtenerOS(mOsXlsx[1]);
       const os    = osDesdeFields(item);
       const cfg   = await cfgConFirmante(await configApp.getConfig(), req._sesion);
       const buffer = await osTemplate.generarExcelBuffer(os, cfg);
@@ -3818,19 +3824,13 @@ FORMATO:
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         const ctx = await ctxSharePoint();
-        if (!ctx.OrdenesServicio) throw new Error('Lista OrdenesServicio no disponible');
         const usuario = process.env.USUARIO_EMAIL || 'sistema';
         const now = new Date().toISOString();
         const cambios = {};
 
-        if (accion === 'aprobar') {
-          const contador = require('./contador');
-          const siguiente = await contador.siguienteNumeroOS(ctx.siteId, ctx.OrdenesServicio);
-          cambios.numeroOS       = contador.formatoOS(siguiente);
-          cambios.estado         = 'aprobada';
-          cambios.aprobadoPor    = usuario;
-          cambios.fechaAprobacion = now;
-        } else if (accion === 'anular') {
+        // El número de OS no se pone acá: lo emite
+        // repoOrdenesServicio.aprobar() dentro de la transacción que aprueba.
+        if (accion === 'anular') {
           cambios.estado          = 'anulada';
           cambios.anuladoPor      = usuario;
           cambios.fechaAnulacion  = now;
@@ -3847,8 +3847,8 @@ FORMATO:
 
         // Auto-finalizar: si tras este cambio quedan pago + cumplido completos → 'finalizada'
         if (accion === 'pagar' || accion === 'cumplir') {
-          const actual = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, osId);
-          const f = actual.fields || {};
+          const f = await repoOrdenesServicio.obtener(osId);
+          if (!f) return json({ error: 'Orden de servicio no encontrada' }, 404);
           const pagado   = accion === 'pagar'   ? true : !!f.pagado;
           const cumplido = accion === 'cumplir' ? true : !!f.cumplido;
           if (pagado && cumplido && f.estado === 'aprobada') {
@@ -3856,12 +3856,23 @@ FORMATO:
           }
         }
 
-        const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesServicio, osId, cambios);
-        if (actualizado?.id) localDb.upsertDocumento('ordenes_servicio', actualizado);
+        let actualizado;
+        if (accion === 'aprobar') {
+          const contador = require('./contador');
+          await repoOrdenesServicio.aprobar(osId, {
+            usuario,
+            formatear: contador.formatoOS,
+            cambios,
+          });
+          actualizado = await repoOrdenesServicio.obtener(osId);
+        } else {
+          actualizado = await repoOrdenesServicio.actualizar(osId, cambios);
+        }
+        if (!actualizado) return json({ error: 'Orden de servicio no encontrada' }, 404);
 
         // Al aprobar → registrar la OS como gasto en Control de Costos (async, no bloquea)
         if (accion === 'aprobar') {
-          const os = actualizado?.fields || {};
+          const os = actualizado;
           (async () => {
             try {
               await cc.registrarGasto({
@@ -3882,7 +3893,7 @@ FORMATO:
         if (accion === 'pagar' || accion === 'cumplir') {
           (async () => {
             try {
-              const numOS = (actualizado.fields || {}).numeroOS;
+              const numOS = actualizado.numeroOS;
               if (numOS) {
                 const c = {};
                 if (accion === 'pagar')   c.fechaPago    = now.slice(0, 10);
@@ -3901,7 +3912,7 @@ FORMATO:
           } catch (e) { console.warn('No se pudo generar/subir el PDF de la OS:', e.message); }
         }
 
-        json({ ok: true, numeroOS: actualizado?.fields?.numeroOS || cambios.numeroOS || '', pdfOSGenerado });
+        json({ ok: true, numeroOS: actualizado.numeroOS || '', pdfOSGenerado });
       } catch (err) { json({ error: err.message }, 500); }
     });
     return;
@@ -3964,7 +3975,7 @@ FORMATO:
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         const ctx  = await ctxSharePoint();
         const osId = mOSEditar[1];
-        const item = await g.getListItem(ctx.siteId, ctx.OrdenesServicio, osId);
+        const item = await obtenerOS(osId);
         const f    = item?.fields || {};
         if (f.estado !== 'borrador') return json({ error: 'Solo se pueden editar borradores' }, 400);
 
@@ -3989,9 +4000,9 @@ FORMATO:
           condicionesComerciales: body.condicionesComerciales != null ? String(body.condicionesComerciales) : f.condicionesComerciales,
           observaciones:          body.observaciones != null          ? String(body.observaciones)          : f.observaciones,
         };
-        const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesServicio, osId, cambios);
-        if (actualizado?.id) localDb.upsertDocumento('ordenes_servicio', actualizado);
-        json({ ok: true, os: actualizado?.fields || {} });
+        const actualizado = await repoOrdenesServicio.actualizar(osId, cambios);
+        
+        json({ ok: true, os: actualizado || {} });
       } catch (err) { json({ error: err.message }, 500); }
     });
     return;
