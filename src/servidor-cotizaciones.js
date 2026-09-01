@@ -29,6 +29,7 @@ const osTemplate       = require('./osTemplate');
 const configApp        = require('./configApp');
 const repoCatalogos    = require('./repo/catalogos');
 const repoRequerimientos = require('./repo/requerimientos');
+const repoOrdenesCompra  = require('./repo/ordenesCompra');
 const localDb          = require('./db');
 const syncService      = require('./syncService');
 const auth             = require('./authService');
@@ -66,6 +67,19 @@ async function actualizarRequerimiento(id, cambios) {
   }
   if (Object.keys(resto).length) await repoRequerimientos.actualizar(id, resto);
   return { ok: true };
+}
+
+// ── Órdenes de compra: adaptadores a la forma de SharePoint ──────────────────
+
+async function obtenerOC(id) {
+  const o = await repoOrdenesCompra.obtener(id);
+  if (!o) throw new Error(`Orden de compra ${id} no existe`);
+  return { id: o.id, fields: o };
+}
+
+async function listarOC(filtro) {
+  const os = await repoOrdenesCompra.listar(filtro || {});
+  return os.map(o => ({ id: o.id, fields: o }));
 }
 
 // Misma normalización que erp.norm_nit(): quita puntos, comas, el sufijo ".0"
@@ -116,8 +130,7 @@ async function ocDesdeSharePoint(itemId) {
     };
   }
   const ctx = await ctxSharePoint();
-  if (!ctx.OrdenesCompra) throw new Error('Lista OrdenesCompra no existe');
-  const item = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, itemId);
+  const item = await obtenerOC(itemId);
   const f = item.fields || {};
   let itemsRaw = [];
   try { itemsRaw = JSON.parse(f.itemsJson || '[]'); } catch { itemsRaw = []; }
@@ -159,7 +172,7 @@ async function guardarPdfOCEnSharePoint(ctx, itemId, sesion) {
   const buffer = await pdfGenerator.htmlAPdf(html);
   const nombre = `${oc.numeroOC || itemId}_${oc.proyecto || 'SIN-PROYECTO'}`.replace(/[\\/:*?"<>|]/g, '-');
   const driveItem = await g.uploadFileToSite(ctx.siteId, `/OrdenesCompraPDF/${nombre}.pdf`, buffer, 'application/pdf');
-  await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, itemId, { pdfUrl: driveItem.webUrl });
+  await repoOrdenesCompra.actualizar(itemId, { pdfUrl: driveItem.webUrl });
   return driveItem.webUrl;
 }
 
@@ -202,12 +215,11 @@ async function remisionDesdeRequerimiento(itemId) {
 // Los ítems se consolidan por descripción+unidad sumando cantidades.
 async function remisionDesdeOCs(ocIds, extra = {}) {
   const ctx = await ctxSharePoint();
-  if (!ctx.OrdenesCompra) throw new Error('Lista OrdenesCompra no existe');
   if (!Array.isArray(ocIds) || !ocIds.length) throw new Error('Debe indicar al menos una OC');
 
   const ocsRaw = [];
   for (const id of ocIds) {
-    const it = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, id);
+    const it = await obtenerOC(id);
     ocsRaw.push(it);
   }
   const proyectos = [...new Set(ocsRaw.map(o => (o.fields?.proyecto || '').trim()).filter(Boolean))];
@@ -316,7 +328,7 @@ async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, n
       let numerosRestantes = [];
       try {
         for (const id of quedanIds) {
-          const oc = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, id);
+          const oc = await obtenerOC(id);
           if (oc?.fields?.numeroOC) numerosRestantes.push(oc.fields.numeroOC);
           else numerosRestantes.push(`id:${id}`);
         }
@@ -339,7 +351,6 @@ async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, n
 // Útil para reparar requerimientos que quedaron 'gestionado' después de anular OCs
 // antes de que existiera la cascada de re-evaluación. Llamado desde GET /requerimientos.
 async function reconciliarRequerimientosVsOCs(ctx) {
-  if (!ctx.OrdenesCompra) return 0;
   const reqs = await listarRequerimientos();
   let cambios = 0;
   for (const r of reqs) {
@@ -361,7 +372,7 @@ async function reconciliarRequerimientosVsOCs(ctx) {
 // Útil para reparar remisiones que quedaron activas después de anular OCs antes de que
 // existiera la cascada. Llamado desde GET /remisiones para auto-corrección continua.
 async function reconciliarRemisionesVsOCs(ctx) {
-  if (!ctx.Remisiones || !ctx.OrdenesCompra) return 0;
+  if (!ctx.Remisiones) return 0;
   const remisiones = await g.getListItems(ctx.siteId, ctx.Remisiones);
   let cambios = 0;
   for (const rem of remisiones) {
@@ -374,7 +385,7 @@ async function reconciliarRemisionesVsOCs(ctx) {
     const estadosOCs = [];
     for (const id of ids) {
       try {
-        const oc = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, id);
+        const oc = await obtenerOC(id);
         estadosOCs.push({ id, numero: oc.fields?.numeroOC || `id:${id}`, estado: oc.fields?.estado || 'borrador' });
       } catch { estadosOCs.push({ id, numero: `id:${id}`, estado: 'desconocida' }); }
     }
@@ -422,9 +433,7 @@ async function calcularEstadoRequerimiento(ctx, reqItem) {
   if (!itemsReq.length) return reqF.estado || 'pendiente';
 
   // Obtener todas las OC de este requerimiento
-  const ocsAll = await g.getListItems(ctx.siteId, ctx.OrdenesCompra, {
-    filter: `fields/requerimientoId eq '${String(reqItem.id).replace(/'/g,"''")}'`,
-  });
+  const ocsAll = await listarOC({ requerimientoId: reqItem.id });
 
   // Acumular cantidades por insumo (ignorando OC anuladas)
   const cubierto = {};
@@ -1879,7 +1888,7 @@ const servidor = http.createServer(async (req, res) => {
       // Calcular cobertura desde SQLite (sin llamada a SharePoint)
       const cubiertoPorInsumo = {};
       try {
-        const todasOCs = localDb.getOrdenesCompra();
+        const todasOCs = await repoOrdenesCompra.listar();
         const ocsPrevias = todasOCs.filter(oc => oc.requerimientoId === String(f.id || mComp[1]));
         for (const ocF of ocsPrevias) {
           if (ocF.estado === 'anulada') continue;
@@ -1980,9 +1989,7 @@ const servidor = http.createServer(async (req, res) => {
         // Calcular cobertura previa para este ítem
         const cubiertoPorInsumo = {};
         try {
-          const ocsPrevias = await g.getListItems(ctx.siteId, ctx.OrdenesCompra, {
-            filter: `fields/requerimientoId eq '${String(reqItem.id).replace(/'/g,"''")}'`,
-          });
+          const ocsPrevias = await listarOC({ requerimientoId: reqItem.id });
           for (const oc of ocsPrevias) {
             const ocF = oc.fields || {};
             if (ocF.estado === 'anulada') continue;
@@ -2109,21 +2116,19 @@ const servidor = http.createServer(async (req, res) => {
           const iva      = grupo.items.reduce((s, it) => s + (Number(it.cantidad) * Number(it.precioUnitario) * (1 - Number(it.descuentoPct || 0)/100) * Number(it.ivaPct || 0)/100), 0);
           const total    = subtotal + iva;
 
-          const oc = await g.addListItem(ctx.siteId, ctx.OrdenesCompra, {
-            numeroOC:            '',                      // se asigna al aprobar
+          const ocId = await repoOrdenesCompra.crear({
+            // Sin número: el consecutivo se emite al aprobar.
             requerimientoId:     reqItem.id,
             requerimientoOrigen: `REQ-${reqF.consecutivo || reqItem.id}`,
             proveedorNit:        grupo.nit || '',
             proveedorNombre:     grupo.nombre || '',
             proyecto:            reqF.proyecto || '',
-            itemsJson:           JSON.stringify(grupo.items),
             subtotal, iva, total,
             estado:              'borrador',
             creadoPor:           process.env.USUARIO_EMAIL || 'sistema',
             fechaCreacion:       new Date().toISOString(),
-          });
-          if (oc?.id) localDb.upsertDocumento('ordenes_compra', oc);
-          creadas.push({ id: oc.id, proveedor: grupo.nombre, total });
+          }, grupo.items);
+          creadas.push({ id: ocId, proveedor: grupo.nombre, total });
         }
 
         // Registrar homologaciones en itemsReq para que el cálculo de cobertura funcione
@@ -2589,8 +2594,7 @@ const servidor = http.createServer(async (req, res) => {
   // ── GET /ordenes → lista desde SQLite ───────────────────────────────────
   if (req.method === 'GET' && url === '/ordenes') {
     try {
-      return json(localDb.getOrdenesCompra()
-        .sort((a, b) => (b.fechaCreacion || b.updated_at || '').localeCompare(a.fechaCreacion || a.updated_at || '')));
+      return json(await repoOrdenesCompra.listar());
     } catch (err) {
       console.error('GET /ordenes:', err.message);
       return json([], 200);
@@ -2606,8 +2610,7 @@ const servidor = http.createServer(async (req, res) => {
       const filtroTexto    = String(qs.q        || '').trim().toLowerCase();
 
       const ctx = await ctxSharePoint();
-      if (!ctx.OrdenesCompra) return json({ error: 'Lista OrdenesCompra no existe' }, 500);
-      const items = await g.getListItems(ctx.siteId, ctx.OrdenesCompra);
+      const items = await listarOC();
       let rows = items.map(it => ({ id: it.id, ...(it.fields || {}) }));
 
       if (filtroEstado === 'pagada')         rows = rows.filter(o => o.pagado);
@@ -2775,7 +2778,7 @@ const servidor = http.createServer(async (req, res) => {
           try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { body = {}; }
         }
 
-        const oc = localDb.getOrdenesCompra().find(o => String(o.id) === String(itemId));
+        const oc = await repoOrdenesCompra.obtener(itemId);
         if (!oc) return json({ error: 'OC no encontrada' }, 404);
 
         // El documento pide validar 'aprobada'; se acepta también 'finalizada'
@@ -2819,17 +2822,13 @@ const servidor = http.createServer(async (req, res) => {
         // Los dos registros van en try/catch separados a propósito: si
         // SharePoint no responde, la elección de proyecto igual se recuerda.
         try {
-          const ctx = await ctxSharePoint();
-          if (ctx.OrdenesCompra) {
-            const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, itemId, {
-              solicitudTesoreriaId:    resultado.egreso_id || '',
-              fechaSolicitudTesoreria: new Date().toISOString(),
-              solicitudTesoreriaPor:   req._sesion?.email || '',
-            });
-            if (actualizado?.id) localDb.upsertDocumento('ordenes_compra', actualizado);
-          }
+          await repoOrdenesCompra.actualizar(itemId, {
+            solicitudTesoreriaId:    resultado.egreso_id || '',
+            fechaSolicitudTesoreria: new Date().toISOString(),
+            solicitudTesoreriaPor:   req._sesion?.email || '',
+          });
         } catch (e) {
-          console.warn(`[OC ${numeroOC}] Solicitud ${resultado.egreso_id} creada, pero no se pudo marcar la OC en SharePoint:`, e.message);
+          console.warn(`[OC ${numeroOC}] Solicitud ${resultado.egreso_id} creada, pero no se pudo marcar la OC:`, e.message);
         }
 
         // Recordar la elección humana de proyecto para preseleccionarla luego
@@ -2871,21 +2870,15 @@ const servidor = http.createServer(async (req, res) => {
         try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { body = {}; }
       }
       const ctx = await ctxSharePoint();
-      if (!ctx.OrdenesCompra) return json({ error: 'Lista OrdenesCompra no existe' }, 500);
 
       const now = new Date().toISOString();
       const usuario = process.env.USUARIO_EMAIL || 'sistema';
       const cambios = {};
 
       if (accion === 'aprobar')  {
-        // Asignar número real solo al aprobar (el contador avanza aquí, no antes)
-        const contador = require('./contador');
-        const siguiente = await contador.siguienteNumeroSP(ctx.siteId, ctx.OrdenesCompra);
-        cambios.numeroOC = contador.formato(siguiente);
-        cambios.estado = 'aprobada';
-        cambios.aprobadoPor = usuario;
-        cambios.fechaAprobacion = now;
-        // Condiciones comerciales estructuradas (tipo + días si aplica) + observaciones separadas
+        // Condiciones comerciales estructuradas (tipo + días si aplica) + observaciones separadas.
+        // El número NO se pone acá: lo emite repoOrdenesCompra.aprobar() dentro
+        // de la misma transacción que escribe el documento.
         if (body.condicionesComerciales != null) cambios.condicionesComerciales = String(body.condicionesComerciales).trim();
         if (body.observaciones != null)          cambios.observaciones          = String(body.observaciones).trim();
         if (body.fechaEntregaPrevista)           cambios.fechaEntregaPrevista   = String(body.fechaEntregaPrevista).trim();
@@ -2896,7 +2889,7 @@ const servidor = http.createServer(async (req, res) => {
 
       // Auto-finalizar: si tras este cambio quedan pago + entrega completos → estado 'finalizada'
       if (accion === 'pagar' || accion === 'entregar') {
-        const actual = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, itemId);
+        const actual = await obtenerOC(itemId);
         const f = actual.fields || {};
         const pagado    = accion === 'pagar'    ? true : !!f.pagado;
         const entregado = accion === 'entregar' ? true : !!f.entregado;
@@ -2905,18 +2898,30 @@ const servidor = http.createServer(async (req, res) => {
         }
       }
 
-      // Leer OC de SQLite ANTES del PATCH para preservar itemsJson y requerimientoId
-      const ocLocalPre = accion === 'aprobar'
-        ? localDb.getOrdenesCompra().find(o => String(o.id) === String(itemId))
-        : null;
-
-      const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, itemId, cambios);
-      if (actualizado?.id) localDb.upsertDocumento('ordenes_compra', actualizado);
+      // Ya no hace falta leer la OC antes del PATCH para preservar itemsJson: la
+      // lectura de Postgres siempre lo trae armado desde la tabla de ítems.
+      let actualizado;
+      if (accion === 'aprobar') {
+        // El número se emite DENTRO de la transacción que aprueba. Con el
+        // MAX(numeroOC) anterior —que además excluía los estados anulados—,
+        // anular la orden más alta dejaba que la siguiente reutilizara su
+        // número: ya ocurrió 16 veces en producción.
+        const contador = require('./contador');
+        await repoOrdenesCompra.aprobar(itemId, {
+          usuario,
+          formatear: contador.formato,
+          cambios,
+        });
+        actualizado = await repoOrdenesCompra.obtener(itemId);
+      } else {
+        actualizado = await repoOrdenesCompra.actualizar(itemId, cambios);
+      }
+      if (!actualizado) return json({ error: 'Orden de compra no encontrada' }, 404);
 
       // Si se aprueba → ejecutar tareas secundarias en segundo plano (no bloquean la respuesta)
       if (accion === 'aprobar') {
-        const oc = actualizado || {};
-        const itemsJson = ocLocalPre?.itemsJson || oc.itemsJson || '[]';
+        const oc = actualizado;
+        const itemsJson = oc.itemsJson || '[]';
         (async () => {
           try {
             await cc.registrarGasto({
@@ -2978,7 +2983,7 @@ const servidor = http.createServer(async (req, res) => {
       if (accion === 'pagar' || accion === 'entregar') {
         (async () => {
           try {
-            const numOC = (actualizado.fields || {}).numeroOC;
+            const numOC = actualizado.numeroOC;
             if (numOC) {
               const c = {};
               if (accion === 'pagar')    c.fechaPago    = now.slice(0,10);
@@ -2992,9 +2997,8 @@ const servidor = http.createServer(async (req, res) => {
       // Auto-entrada/salida de inventario al marcar como Entregada
       const autoRefs = {};
       if (accion === 'entregar' && (body.autoEntrada || body.autoSalida)) {
-        // Leer datos completos de SQLite (actualizado.fields no incluye itemsJson)
-        const ocLocal    = localDb.getOrdenesCompra().find(oc => String(oc.id) === String(itemId));
-        const ocFields   = ocLocal || actualizado.fields || {};
+        // La lectura de Postgres ya trae itemsJson armado desde la tabla de ítems.
+        const ocFields   = actualizado;
         const ocProyecto = ocFields.proyecto || '';
         let itemsOC = [];
         try { itemsOC = JSON.parse(ocFields.itemsJson || '[]'); } catch {}
@@ -3113,9 +3117,8 @@ const servidor = http.createServer(async (req, res) => {
             try { ids = JSON.parse(r.ocIds || '[]'); } catch { ids = []; }
             return ids.map(String).includes(String(itemId));
           });
-          const ocLocal = localDb.getOrdenesCompra().find(oc => String(oc.id) === String(itemId));
           let itemsOC = [];
-          try { itemsOC = JSON.parse((ocLocal || {}).itemsJson || '[]'); } catch {}
+          try { itemsOC = JSON.parse(actualizado.itemsJson || '[]'); } catch {}
           if (!yaTieneRemision && itemsOC.length) {
             const { id, numero } = await crearRemisionYGuardar(ctx, [itemId], {
               fecha: now, responsableEntrega: usuario,
@@ -3137,7 +3140,7 @@ const servidor = http.createServer(async (req, res) => {
       let remisionesAfectadas = [];
       if (accion === 'anular' && ctx.Remisiones) {
         try {
-          remisionesAfectadas = await cascadaAnulacionRemisiones(ctx, itemId, actualizado.fields || {}, usuario, now);
+          remisionesAfectadas = await cascadaAnulacionRemisiones(ctx, itemId, actualizado, usuario, now);
         } catch (e) { console.warn('No se pudo propagar anulación a remisiones:', e.message); }
       }
 
@@ -3145,7 +3148,7 @@ const servidor = http.createServer(async (req, res) => {
       let requerimientoRecalculado = null;
       if (accion === 'anular') {
         try {
-          const reqId = (actualizado?.fields || actualizado || {}).requerimientoId;
+          const reqId = actualizado.requerimientoId;
           if (reqId) {
             const reqItem = await obtenerRequerimiento(reqId);
             const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqItem);
@@ -3313,7 +3316,6 @@ const servidor = http.createServer(async (req, res) => {
         if (!items?.length) return json({ error: 'No hay ítems' }, 400);
 
         const ctx = await ctxSharePoint();
-        if (!ctx.OrdenesCompra) return json({ error: 'Lista OrdenesCompra no existe' }, 500);
 
         // Si se vincula a un requerimiento, validar que existe
         let reqItem = null;
@@ -3350,21 +3352,18 @@ const servidor = http.createServer(async (req, res) => {
             s + (it.cantidad * it.precioUnitario * (1 - it.descuentoPct/100) * it.ivaPct/100), 0);
           const total = subtotal + iva;
 
-          const oc = await g.addListItem(ctx.siteId, ctx.OrdenesCompra, {
-            numeroOC:         '',
+          const ocId = await repoOrdenesCompra.crear({
             requerimientoId:  reqItem ? String(reqItem.id) : '',
             cotizacionId:     String(numCotizacion || '').trim(),
             proveedorNit:     grupo.nit || '',
             proveedorNombre:  grupo.nombre || '',
             proyecto:         proyecto || '',
-            itemsJson:        JSON.stringify(grupo.items),
             subtotal, iva, total,
             estado:           'borrador',
             creadoPor:        process.env.USUARIO_EMAIL || 'sistema',
             fechaCreacion:    new Date().toISOString(),
-          });
-          if (oc?.id) localDb.upsertDocumento('ordenes_compra', oc);
-          creadas.push({ id: oc.id, proveedor: grupo.nombre, total });
+          }, grupo.items);
+          creadas.push({ id: ocId, proveedor: grupo.nombre, total });
         }
 
         // Si se vinculó a un requerimiento, actualizar su estado y lista de OCs
@@ -3399,11 +3398,11 @@ const servidor = http.createServer(async (req, res) => {
         if (!reqId) return json({ error: 'requerimientoId requerido' }, 400);
 
         const ctx = await ctxSharePoint();
-        const ocItem  = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, mVincular[1]);
+        const ocItem  = await obtenerOC(mVincular[1]);
         const reqItem = await obtenerRequerimiento(reqId);
 
         // Actualizar OC con el requerimientoId
-        await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, ocItem.id, {
+        await repoOrdenesCompra.actualizar(ocItem.id, {
           requerimientoId: String(reqItem.id),
         });
 
@@ -3918,7 +3917,7 @@ FORMATO:
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         const ctx  = await ctxSharePoint();
         const ocId = mOCEditar[1];
-        const item = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, ocId);
+        const item = await obtenerOC(ocId);
         const f    = item?.fields || {};
         if (f.estado !== 'borrador') return json({ error: 'Solo se pueden editar borradores' }, 400);
 
@@ -3947,9 +3946,9 @@ FORMATO:
         if (obs != null) cambios.observaciones          = obs;
         if (le  != null) cambios.lugarEntrega           = le;
         if (fep)         cambios.fechaEntregaPrevista   = fep; // dateTime — no enviar string vacío
-        const actualizado = await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, ocId, cambios);
-        if (actualizado?.id) localDb.upsertDocumento('ordenes_compra', actualizado);
-        json({ ok: true, oc: actualizado?.fields || {} });
+        const actualizado = await repoOrdenesCompra.actualizar(ocId, cambios);
+        
+        json({ ok: true, oc: actualizado || {} });
       } catch (err) { json({ error: err.message }, 500); }
     });
     return;
@@ -4005,7 +4004,7 @@ FORMATO:
   // ── GET /inventario/ocs-sin-entrada → OC entregadas sin entrada registrada
   if (req.method === 'GET' && url === '/inventario/ocs-sin-entrada') {
     try {
-      const ocs = localDb.getOrdenesCompra()
+      const ocs = (await repoOrdenesCompra.listar())
         .filter(oc => oc.entregado && oc.estado !== 'anulada')
         .sort((a, b) => (b.fechaCreacion || '').localeCompare(a.fechaCreacion || ''));
       const conEntrada = localDb.getOcIdsConEntrada();
