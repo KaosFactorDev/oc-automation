@@ -35,7 +35,6 @@ const repoRemisiones     = require('./repo/remisiones');
 const repoInventario     = require('./repo/inventario');
 const repoHistorial      = require('./repo/historialPrecios');
 const localDb          = require('./db');
-const syncService      = require('./syncService');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
@@ -479,175 +478,9 @@ async function calcularEstadoRequerimiento(ctx, reqItem) {
 
 // Cache de IDs de listas SharePoint para no resolverlas en cada request
 const _listCache = {}; // { siteId, Requerimientos, OrdenesCompra, Insumos, Proveedores }
-let _columnasMigradas     = false;
-let _osListProvisioned    = false;
-let _hpListProvisioned    = false;
-let _miListProvisioned    = false;
 let _carpetaPdfReqUrl     = null; // cache del webUrl de RequerimientosPDF
 let _carpetaPdfOCUrl      = null; // cache del webUrl de OrdenesCompraPDF
 let _carpetaPdfOSUrl      = null; // cache del webUrl de OrdenesServicioPDF
-let _usrListProvisioned   = false;
-
-async function asegurarListaOS(siteId) {
-  // Intenta obtener la lista; si no existe, la crea con todas las columnas del esquema
-  const { OrdenesServicio: schema } = require('./scripts/esquemas');
-  let listId;
-  try {
-    const lst = await g.getListByName(siteId, 'OrdenesServicio');
-    listId = lst?.id;
-  } catch {}
-
-  if (!listId) {
-    try {
-      const created = await g.post(`/sites/${siteId}/lists`, {
-        displayName: schema.displayName,
-        description: schema.description || '',
-        list: schema.list,
-      });
-      listId = created?.id;
-      console.log('[asegurarListaOS] Lista OrdenesServicio creada:', listId);
-    } catch (e) {
-      if (!String(e.message).includes('409')) {
-        console.warn('[asegurarListaOS] No se pudo crear lista:', e.message);
-        return;
-      }
-      // Ya existe — reintentar GET
-      try { const lst = await g.getListByName(siteId, 'OrdenesServicio'); listId = lst?.id; } catch {}
-    }
-  }
-
-  if (!listId) return;
-  _listCache.OrdenesServicio = listId;
-
-  // Agregar columnas (ignora 409 = ya existe)
-  for (const col of schema.columns) {
-    const { name, required, ...tipo } = col;
-    const body = { name, ...tipo };
-    if (required) body.required = true;
-    try {
-      await g.post(`/sites/${siteId}/lists/${listId}/columns`, body);
-    } catch (e) {
-      if (!String(e.message).includes('409')) {
-        console.warn(`[asegurarListaOS] Col "${name}":`, e.message);
-      }
-    }
-  }
-}
-
-async function asegurarListaHP(siteId) {
-  const { HistorialPrecios: schema } = require('./scripts/esquemas');
-  let listId;
-  try { const lst = await g.getListByName(siteId, 'HistorialPrecios'); listId = lst?.id; } catch {}
-  if (!listId) {
-    try {
-      const created = await g.post(`/sites/${siteId}/lists`, {
-        displayName: schema.displayName,
-        description: schema.description || '',
-        list: schema.list,
-      });
-      listId = created?.id;
-      console.log('[asegurarListaHP] Lista HistorialPrecios creada:', listId);
-    } catch (e) {
-      if (!String(e.message).includes('409')) { console.warn('[asegurarListaHP]', e.message); return; }
-      try { const lst = await g.getListByName(siteId, 'HistorialPrecios'); listId = lst?.id; } catch {}
-    }
-  }
-  if (!listId) return;
-  _listCache.HistorialPrecios = listId;
-  for (const col of schema.columns) {
-    const { name, required, ...tipo } = col;
-    const body = { name, ...tipo };
-    if (required) body.required = true;
-    try { await g.post(`/sites/${siteId}/lists/${listId}/columns`, body); }
-    catch (e) { if (!String(e.message).includes('409')) console.warn(`[asegurarListaHP] Col "${name}":`, e.message); }
-  }
-}
-
-async function asegurarListaMI(siteId) {
-  const { MovimientosInventario: schema } = require('./scripts/esquemas');
-  let listId;
-  try { const lst = await g.getListByName(siteId, 'MovimientosInventario'); listId = lst?.id; } catch {}
-  if (!listId) {
-    try {
-      const created = await g.post(`/sites/${siteId}/lists`, {
-        displayName: schema.displayName,
-        description: schema.description || '',
-        list: schema.list,
-      });
-      listId = created?.id;
-      console.log('[asegurarListaMI] Lista MovimientosInventario creada:', listId);
-    } catch (e) {
-      if (!String(e.message).includes('409')) { console.warn('[asegurarListaMI]', e.message); return; }
-      try { const lst = await g.getListByName(siteId, 'MovimientosInventario'); listId = lst?.id; } catch {}
-    }
-  }
-  if (!listId) return;
-  _listCache.MovimientosInventario = listId;
-  for (const col of schema.columns) {
-    const { name, required, ...tipo } = col;
-    const body = { name, ...tipo };
-    if (required) body.required = true;
-    try { await g.post(`/sites/${siteId}/lists/${listId}/columns`, body); }
-    catch (e) { if (!String(e.message).includes('409')) console.warn(`[asegurarListaMI] Col "${name}":`, e.message); }
-  }
-}
-
-async function migrarColumnasOC(siteId, listId) {
-  const columnas = [
-    { name: 'requerimientoOrigen',  text: { maxLength: 50 } },
-    { name: 'fechaEntregaPrevista', dateTime: {} },
-    // Solicitud de pago en tesorería (Pagos Diarios). Se guardan acá y no solo
-    // en SQLite porque upsertDocumento() reescribe el JSON local con lo que
-    // venga de SharePoint en cada sync.
-    { name: 'solicitudTesoreriaId',    text: { maxLength: 50 } },  // egreso_id CE-YYMMNNNN
-    { name: 'fechaSolicitudTesoreria', dateTime: {} },
-    { name: 'solicitudTesoreriaPor',   text: { maxLength: 200 } },
-  ];
-  for (const col of columnas) {
-    try {
-      await g.post(`/sites/${siteId}/lists/${listId}/columns`, col);
-    } catch (e) {
-      // 409 = columna ya existe — es el estado normal en ejecuciones subsiguientes
-      if (!String(e.message).includes('409')) {
-        console.warn(`[migrarColumnasOC] No se pudo agregar columna "${col.name}":`, e.message);
-      }
-    }
-  }
-}
-
-async function asegurarListaUsuariosERP(siteId) {
-  const columns = [
-    { name: 'email',  text: { maxLength: 200 }, required: true },
-    { name: 'nombre', text: { maxLength: 200 } },
-    { name: 'cargo',  text: { maxLength: 200 } },
-    { name: 'rol',    choice: { choices: ['admin', 'operador'], displayAs: 'dropDownMenu' } },
-    { name: 'activo', boolean: {} },
-  ];
-  let listId;
-  try { const lst = await g.getListByName(siteId, 'UsuariosERP'); listId = lst?.id; } catch {}
-  if (!listId) {
-    try {
-      const created = await g.post(`/sites/${siteId}/lists`, {
-        displayName: 'UsuariosERP',
-        description: 'Usuarios habilitados para acceder al ERP',
-        list: { template: 'genericList' },
-      });
-      listId = created?.id;
-      console.log('[asegurarListaUsuariosERP] Lista creada:', listId);
-    } catch (e) {
-      if (!String(e.message).includes('409')) { console.warn('[asegurarListaUsuariosERP]', e.message); return; }
-      try { const lst = await g.getListByName(siteId, 'UsuariosERP'); listId = lst?.id; } catch {}
-    }
-  }
-  if (!listId) return;
-  _listCache.UsuariosERP = listId;
-  for (const col of columns) {
-    const { required, ...body } = col;
-    if (required) body.required = true;
-    try { await g.post(`/sites/${siteId}/lists/${listId}/columns`, body); }
-    catch (e) { if (!String(e.message).includes('409')) console.warn(`[asegurarListaUsuariosERP] Col "${col.name}":`, e.message); }
-  }
-}
 
 async function bootstrapAdmin() {
   if (await repoCatalogos.contarUsuarios() > 0) return;
@@ -697,31 +530,9 @@ async function ctxSharePoint() {
       if (lst) _listCache[nombre] = lst.id;
     } catch { /* lista no existe todavía */ }
   }
-  // Migrar columnas nuevas a la lista OrdenesCompra (solo una vez por proceso)
-  if (!_columnasMigradas && _listCache.OrdenesCompra) {
-    _columnasMigradas = true;
-    migrarColumnasOC(_listCache.siteId, _listCache.OrdenesCompra).catch(() => {});
-  }
-  // Aprovisionar lista OrdenesServicio si no existe (solo una vez por proceso)
-  if (!_osListProvisioned) {
-    _osListProvisioned = true;
-    asegurarListaOS(_listCache.siteId).catch(() => {});
-  }
-  // Aprovisionar lista HistorialPrecios si no existe (solo una vez por proceso)
-  if (!_hpListProvisioned) {
-    _hpListProvisioned = true;
-    asegurarListaHP(_listCache.siteId).catch(() => {});
-  }
-  // Aprovisionar lista MovimientosInventario si no existe (solo una vez por proceso)
-  if (!_miListProvisioned) {
-    _miListProvisioned = true;
-    asegurarListaMI(_listCache.siteId).catch(() => {});
-  }
-  // Aprovisionar lista UsuariosERP si no existe (solo una vez por proceso)
-  if (!_usrListProvisioned) {
-    _usrListProvisioned = true;
-    asegurarListaUsuariosERP(_listCache.siteId).catch(() => {});
-  }
+  // Ya no se aprovisionan listas ni columnas en SharePoint. Eso creaba y
+  // modificaba estructura en cada arranque del servidor, en el sistema del que
+  // estamos saliendo. El esquema vive en supabase/migrations.
   return _listCache;
 }
 
@@ -761,7 +572,6 @@ function leerCSV(rutaArchivo) {
 // ── HistorialPrecios — lee de SQLite (sin latencia de red) ───────────────────
 // forceRefresh dispara un sync en segundo plano pero retorna SQLite inmediatamente.
 async function getHistorialPrecios(_ctx, { forceRefresh = false } = {}) {
-  if (forceRefresh) syncService.syncAll().catch(() => {});
   return repoHistorial.listar();
 }
 
@@ -4266,7 +4076,6 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
   // ── GET /usuarios → lista de usuarios (solo admin) ──────────────────────
   if (req.method === 'GET' && url === '/usuarios') {
     if (req._sesion?.rol !== 'admin') return json({ error: 'Acceso denegado' }, 403);
-    syncService.syncAll().catch(() => {}); // actualiza en segundo plano para la próxima carga
     return json(await repoCatalogos.getUsuarios());
   }
 
@@ -4353,18 +4162,9 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
     }
   }
 
-  // ── GET /sync → fuerza resync SharePoint → SQLite ───────────────────────
-  if (req.method === 'GET' && url === '/sync') {
-    try {
-      const resultado = await syncService.syncAll();
-      return json({ ok: resultado.ok, duracion: resultado.duracion, conteos: localDb.counts(), lastSync: syncService.lastSync() });
-    } catch (err) { return json({ error: err.message }, 500); }
-  }
-
-  // ── GET /sync/estado → estado actual del caché ───────────────────────────
-  if (req.method === 'GET' && url === '/sync/estado') {
-    return json({ lastSync: syncService.lastSync(), syncing: syncService.isSyncing(), conteos: localDb.counts(), estados: localDb.getAllSyncState() });
-  }
+  // Las rutas /sync y /sync/estado se retiraron con el caché: la aplicación
+  // lee de Postgres, así que no hay nada que sincronizar. Para poner Postgres al
+  // día con lo que quede en SharePoint hasta el corte: npm run db:importar.
 
   res.writeHead(404);
   res.end('No encontrado');
@@ -4379,9 +4179,6 @@ servidor.listen(PORT, '0.0.0.0', () => {
   // vea aqui y no cuando un usuario intente extraer una cotizacion.
   geminiConfig.verificarModelo(GEMINI_KEY)
     .catch(e => console.warn('[geminiConfig] Verificación falló:', e.message));
-  // Sincronización SharePoint → SQLite en segundo plano
-  syncService.init(ctxSharePoint)
-    .catch(e => console.warn('[syncService] No se pudo inicializar:', e.message));
   // Crear admin inicial si la base de usuarios está vacía
   bootstrapAdmin()
     .catch(e => console.warn('[bootstrap]', e.message));

@@ -16,7 +16,8 @@ require('dotenv').config();
 const g          = require('../graphStorage');
 const osTemplate = require('../osTemplate');
 const configApp  = require('../configApp');
-const localDb    = require('../db');
+const repoCatalogos = require('../repo/catalogos');
+const repoOrdenesServicio = require('../repo/ordenesServicio');
 const { htmlAPdf } = require('../pdfGenerator');
 
 const CONFIRM = process.argv.includes('--confirm');
@@ -61,21 +62,16 @@ function osDesdeFields(item) {
   };
 }
 
-function cfgConFirmantePorEmail(cfg, email) {
+async function cfgConFirmantePorEmail(cfg, email) {
   if (!email) return cfg;
-  const usuario = localDb.getUsuarioByEmail(email) || {};
+  const usuario = (await repoCatalogos.getUsuarioByEmail(email)) || {};
   return { ...cfg, firmante: { nombre: usuario.nombre || email, cargo: usuario.cargo || '' } };
 }
 
 async function main() {
   const site = await g.getSite(process.env.SHAREPOINT_HOSTNAME, process.env.SHAREPOINT_SITE_PATH);
-  const lst  = await g.getListByName(site.id, 'OrdenesServicio');
-  if (!lst) throw new Error('Lista OrdenesServicio no existe');
 
-  // Por si el servidor no ha corrido asegurarListaOS() todavía en este entorno
-  await g.addListColumn(site.id, lst.id, { name: 'pdfUrl', text: { allowMultipleLines: true, textType: 'plain' } }).catch(() => {});
-
-  const todas   = localDb.getOrdenesServicio();
+  const todas   = await repoOrdenesServicio.listar();
   const pagadas = todas.filter(os => os.pagado);
   const pendientes = TODOS ? pagadas : pagadas.filter(os => !os.pdfUrl);
 
@@ -92,15 +88,16 @@ async function main() {
   let ok = 0, fallidos = 0;
   for (const osLocal of pendientes) {
     try {
-      const item = await g.getListItem(site.id, lst.id, osLocal.id);
-      const os   = osDesdeFields(item);
-      const cfg  = cfgConFirmantePorEmail(cfgBase, item.fields?.pagadoPor);
+      // Los datos salen de Postgres; el PDF sigue subiéndose al Drive de
+      // SharePoint, que es donde la gente los busca.
+      const os  = osDesdeFields(osLocal);
+      const cfg = await cfgConFirmantePorEmail(cfgBase, osLocal.pagadoPor);
 
       const html   = osTemplate.generarHTML(os, cfg);
       const buffer = await htmlAPdf(html);
       const nombre = `${os.numeroOS || osLocal.id}_${os.proyecto || 'SIN-PROYECTO'}`.replace(/[\\/:*?"<>|]/g, '-');
       const driveItem = await g.uploadFileToSite(site.id, `/OrdenesServicioPDF/${nombre}.pdf`, buffer, 'application/pdf');
-      await g.updateListItem(site.id, lst.id, osLocal.id, { pdfUrl: driveItem.webUrl });
+      await repoOrdenesServicio.actualizar(osLocal.id, { pdfUrl: driveItem.webUrl });
 
       ok++;
       console.log(`  ✓ id ${osLocal.id} (${ok + fallidos}/${pendientes.length})`);
