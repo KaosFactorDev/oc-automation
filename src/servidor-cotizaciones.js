@@ -28,12 +28,45 @@ const remisionTemplate = require('./remisionTemplate');
 const osTemplate       = require('./osTemplate');
 const configApp        = require('./configApp');
 const repoCatalogos    = require('./repo/catalogos');
+const repoRequerimientos = require('./repo/requerimientos');
 const localDb          = require('./db');
 const syncService      = require('./syncService');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
 const geminiConfig     = require('./geminiConfig');
+
+// ── Requerimientos: adaptadores a la forma de SharePoint ─────────────────────
+// El código accede a reqItem.fields.X en decenas de lugares. repo/requerimientos
+// devuelve un objeto plano con esos mismos nombres de campo, así que envolverlo
+// en { id, fields } lo hace un reemplazo directo y evita tocar cada acceso.
+
+async function obtenerRequerimiento(id) {
+  const r = await repoRequerimientos.obtener(id);
+  if (!r) throw new Error(`Requerimiento ${id} no existe`);
+  return { id: r.id, fields: r };
+}
+
+async function listarRequerimientos(filtro) {
+  const rs = await repoRequerimientos.listar(filtro || {});
+  return rs.map(r => ({ id: r.id, fields: r }));
+}
+
+/**
+ * Traduce un PATCH con nombres de SharePoint. Dos campos necesitan trato
+ * aparte: itemsJson, que ahora vive en una tabla hija, y ocsGeneradas, que se
+ * deriva de ordenes_compra.requerimiento_id y por eso se ignora.
+ */
+async function actualizarRequerimiento(id, cambios) {
+  const { itemsJson, ocsGeneradas, ...resto } = cambios || {};
+  if (itemsJson !== undefined) {
+    let items = [];
+    try { items = JSON.parse(itemsJson || '[]'); } catch {}
+    await repoRequerimientos.reemplazarItems(id, items);
+  }
+  if (Object.keys(resto).length) await repoRequerimientos.actualizar(id, resto);
+  return { ok: true };
+}
 
 // Misma normalización que erp.norm_nit(): quita puntos, comas, el sufijo ".0"
 // que deja Excel al leer un NIT como número, y el dígito de verificación —que
@@ -135,8 +168,7 @@ async function guardarPdfOCEnSharePoint(ctx, itemId, sesion) {
 // se listan los ítems del requerimiento y (si hay) las OC asociadas.
 async function remisionDesdeRequerimiento(itemId) {
   const ctx = await ctxSharePoint();
-  if (!ctx.Requerimientos) throw new Error('Lista Requerimientos no existe');
-  const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, itemId);
+  const reqItem = await obtenerRequerimiento(itemId);
   const f = reqItem.fields || {};
 
   let items = [];
@@ -307,8 +339,8 @@ async function cascadaAnulacionRemisiones(ctx, ocIdAnulada, ocFields, usuario, n
 // Útil para reparar requerimientos que quedaron 'gestionado' después de anular OCs
 // antes de que existiera la cascada de re-evaluación. Llamado desde GET /requerimientos.
 async function reconciliarRequerimientosVsOCs(ctx) {
-  if (!ctx.Requerimientos || !ctx.OrdenesCompra) return 0;
-  const reqs = await g.getListItems(ctx.siteId, ctx.Requerimientos);
+  if (!ctx.OrdenesCompra) return 0;
+  const reqs = await listarRequerimientos();
   let cambios = 0;
   for (const r of reqs) {
     const f = r.fields || {};
@@ -316,7 +348,7 @@ async function reconciliarRequerimientosVsOCs(ctx) {
     try {
       const nuevo = await calcularEstadoRequerimiento(ctx, r);
       if (nuevo && nuevo !== f.estado) {
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, r.id, { estado: nuevo });
+        await actualizarRequerimiento(r.id, { estado: nuevo });
         localDb.upsertDocumento('requerimientos', { id: r.id, fields: { ...f, estado: nuevo } });
         cambios++;
       }
@@ -1929,7 +1961,7 @@ const servidor = http.createServer(async (req, res) => {
         if (!nombreHomologado) return json({ error: 'nombreHomologado requerido' }, 400);
 
         const ctx = await ctxSharePoint();
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, mRecons[1]);
+        const reqItem = await obtenerRequerimiento(mRecons[1]);
         const f = reqItem.fields || {};
 
         const { consultarProveedor } = require('./consultaProveedor');
@@ -2007,7 +2039,7 @@ const servidor = http.createServer(async (req, res) => {
         let estadoReq = null;
         if (insumoOriginal && claveInsumo(insumoOriginal) !== claveInsumo(nombreHomologado)) {
           estadoReq = await calcularEstadoRequerimiento(ctx, reqItem);
-          await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+          await actualizarRequerimiento(reqItem.id, {
             itemsJson: JSON.stringify(itemsActualizados),
             estado: estadoReq,
           });
@@ -2056,7 +2088,7 @@ const servidor = http.createServer(async (req, res) => {
         }
 
         const ctx = await ctxSharePoint();
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, mGenReq[1]);
+        const reqItem = await obtenerRequerimiento(mGenReq[1]);
         const reqF = reqItem.fields || {};
 
         // Parsear ítems del requerimiento para registrar homologaciones
@@ -2113,7 +2145,7 @@ const servidor = http.createServer(async (req, res) => {
         const idsNuevos = creadas.map(c => c.id);
         const ocsExistentes = (reqF.ocsGeneradas || '').split(',').map(s => s.trim()).filter(Boolean);
         const ocsTodas = [...new Set([...ocsExistentes, ...idsNuevos])];
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+        await actualizarRequerimiento(reqItem.id, {
           estado: estadoReq,
           ocsGeneradas: ocsTodas.join(', '),
           ...(selHomologadas.length ? { itemsJson: JSON.stringify(itemsReq) } : {}),
@@ -2410,8 +2442,7 @@ const servidor = http.createServer(async (req, res) => {
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         const motivo = (body.motivo || '').toString().trim();
         const ctx = await ctxSharePoint();
-        if (!ctx.Requerimientos) return json({ error: 'Lista Requerimientos no existe' }, 500);
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, mAnulReq[1]);
+        const reqItem = await obtenerRequerimiento(mAnulReq[1]);
         const estadoActual = reqItem.fields?.estado;
         if (estadoActual === 'anulado')   return json({ error: 'Ya está anulado' }, 400);
         if (estadoActual === 'gestionado') return json({ error: 'No se puede anular un requerimiento ya gestionado' }, 400);
@@ -2419,7 +2450,7 @@ const servidor = http.createServer(async (req, res) => {
         const usuario   = process.env.USUARIO_EMAIL || 'sistema';
         const notasNuevas = (notasPrev ? notasPrev + ' | ' : '') +
           `ANULADO por ${usuario} el ${new Date().toLocaleDateString('es-CO')}${motivo ? ` — ${motivo}` : ''}`;
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+        await actualizarRequerimiento(reqItem.id, {
           estado: 'anulado',
           notas:  notasNuevas,
         });
@@ -2446,8 +2477,7 @@ const servidor = http.createServer(async (req, res) => {
       try {
         const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
         const ctx = await ctxSharePoint();
-        if (!ctx.Requerimientos) return json({ error: 'Lista Requerimientos no existe' }, 500);
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, mEditReq[1]);
+        const reqItem = await obtenerRequerimiento(mEditReq[1]);
         const estadoActual = reqItem.fields?.estado;
         if (estadoActual === 'gestionado') return json({ error: 'No se puede editar un requerimiento ya gestionado' }, 400);
         if (estadoActual === 'anulado')    return json({ error: 'No se puede editar un requerimiento anulado' }, 400);
@@ -2461,13 +2491,13 @@ const servidor = http.createServer(async (req, res) => {
         }
         if (!Object.keys(campos).length) return json({ error: 'Nada que actualizar' }, 400);
 
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, campos);
+        await actualizarRequerimiento(reqItem.id, campos);
 
         // Recalcular estado (los ítems descartados ya se excluyen dentro de calcularEstadoRequerimiento)
-        const reqActualizado = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqItem.id);
+        const reqActualizado = await obtenerRequerimiento(reqItem.id);
         const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqActualizado);
         if (nuevoEstado !== estadoActual) {
-          await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, { estado: nuevoEstado });
+          await actualizarRequerimiento(reqItem.id, { estado: nuevoEstado });
           reqActualizado.fields.estado = nuevoEstado;
         }
 
@@ -2928,12 +2958,12 @@ const servidor = http.createServer(async (req, res) => {
           // Recalcular estado del requerimiento de origen (la aprobación no lo hacía)
           try {
             const reqId = oc.requerimientoId || ocLocalPre?.requerimientoId;
-            if (reqId && ctx.Requerimientos) {
-              const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqId);
+            if (reqId) {
+              const reqItem = await obtenerRequerimiento(reqId);
               const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqItem);
               const estadoPrev  = (reqItem.fields || {}).estado || 'pendiente';
               if (nuevoEstado !== estadoPrev) {
-                await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqId, { estado: nuevoEstado });
+                await actualizarRequerimiento(reqId, { estado: nuevoEstado });
                 localDb.upsertDocumento('requerimientos', {
                   id: reqId,
                   fields: { ...(reqItem.fields || {}), estado: nuevoEstado },
@@ -3113,15 +3143,15 @@ const servidor = http.createServer(async (req, res) => {
 
       // Cascada de re-evaluación del requerimiento origen (liberar cantidades, volver a habilitar)
       let requerimientoRecalculado = null;
-      if (accion === 'anular' && ctx.Requerimientos) {
+      if (accion === 'anular') {
         try {
           const reqId = (actualizado?.fields || actualizado || {}).requerimientoId;
           if (reqId) {
-            const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqId);
+            const reqItem = await obtenerRequerimiento(reqId);
             const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqItem);
             const estadoPrev  = (reqItem.fields || {}).estado || 'pendiente';
             if (nuevoEstado !== estadoPrev) {
-              await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqId, { estado: nuevoEstado });
+              await actualizarRequerimiento(reqId, { estado: nuevoEstado });
               localDb.upsertDocumento('requerimientos', {
                 id: reqId,
                 fields: { ...(reqItem.fields || {}), estado: nuevoEstado },
@@ -3287,8 +3317,8 @@ const servidor = http.createServer(async (req, res) => {
 
         // Si se vincula a un requerimiento, validar que existe
         let reqItem = null;
-        if (reqId && ctx.Requerimientos) {
-          try { reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqId); } catch {}
+        if (reqId) {
+          try { reqItem = await obtenerRequerimiento(reqId); } catch {}
         }
 
         // Agrupar por NIT → una OC por proveedor
@@ -3344,7 +3374,7 @@ const servidor = http.createServer(async (req, res) => {
           const reqF = reqItem.fields || {};
           const ocsExistentes = (reqF.ocsGeneradas || '').split(',').map(s => s.trim()).filter(Boolean);
           const ocsTodas = [...new Set([...ocsExistentes, ...creadas.map(c => c.id)])];
-          await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+          await actualizarRequerimiento(reqItem.id, {
             estado: estadoRequerimiento,
             ocsGeneradas: ocsTodas.join(', '),
           });
@@ -3370,7 +3400,7 @@ const servidor = http.createServer(async (req, res) => {
 
         const ctx = await ctxSharePoint();
         const ocItem  = await g.getListItem(ctx.siteId, ctx.OrdenesCompra, mVincular[1]);
-        const reqItem = await g.getListItem(ctx.siteId, ctx.Requerimientos, reqId);
+        const reqItem = await obtenerRequerimiento(reqId);
 
         // Actualizar OC con el requerimientoId
         await g.updateListItem(ctx.siteId, ctx.OrdenesCompra, ocItem.id, {
@@ -3382,7 +3412,7 @@ const servidor = http.createServer(async (req, res) => {
         const reqF = reqItem.fields || {};
         const ocsExistentes = (reqF.ocsGeneradas || '').split(',').map(s => s.trim()).filter(Boolean);
         const ocsTodas = [...new Set([...ocsExistentes, ocItem.id])];
-        await g.updateListItem(ctx.siteId, ctx.Requerimientos, reqItem.id, {
+        await actualizarRequerimiento(reqItem.id, {
           estado: estadoRequerimiento,
           ocsGeneradas: ocsTodas.join(', '),
         });

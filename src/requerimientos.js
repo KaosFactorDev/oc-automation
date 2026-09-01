@@ -1,75 +1,37 @@
 'use strict';
 /**
  * requerimientos.js
- * CRUD de la List "Requerimientos" en SharePoint. En el nuevo flujo, los
- * correos entrantes ya no generan OC automáticamente; crean un Requerimiento
- * en estado 'pendiente' para que el usuario lo gestione desde la consola.
+ * Lógica de requerimientos. Los correos entrantes no generan OC
+ * automáticamente: crean un requerimiento en estado 'pendiente' para que
+ * alguien lo gestione desde la consola.
+ *
+ * El acceso a datos vive en repo/requerimientos.js. Acá quedan el mapeo desde
+ * lo que extrae procesarCorreo, la generación del PDF de respaldo y las
+ * operaciones de negocio (gestionar, bloquear, liberar).
  *
  * API:
- *   crearDesdeCorreo(resultado, { messageId, adjuntoUrl })  → item creado
- *   listar()                                                 → items activos
- *   actualizar(itemId, cambios, etag?)                       → PATCH
- *   marcarGestionado(itemId, ocsGeneradas)                   → estado gestionado
- *   bloquear(itemId, usuario, minutos = 15)                  → soft-lock
+ *   crearDesdeCorreo(resultado, { messageId, adjuntoUrl })  → { item, duplicado, consecutivoSistema }
+ *   listar(filtro?)                                          → requerimientos
+ *   actualizar(id, cambios)                                  → requerimiento
+ *   marcarGestionado(id, ocsGeneradas)                       → estado gestionado
+ *   bloquear(id, usuario, minutos = 15)                      → soft-lock
+ *   liberar(id)                                              → quita el lock
+ *   regenerarPdf(id)                                         → rehace el PDF
  */
 
-const g  = require('./graphStorage');
-const db = require('./db');
+const g    = require('./graphStorage');
+const repo = require('./repo/requerimientos');
 const { generarHTML } = require('./requerimientoTemplate');
 const { htmlAPdf }    = require('./pdfGenerator');
 
-const _cache = {}; // { siteId, listId, proyectosListId }
-async function ctx() {
-  if (_cache.listId) return _cache;
+// El PDF de respaldo se sigue subiendo al Drive del sitio: por decisión de
+// alcance, los archivos se quedan en SharePoint y solo los datos migran.
+let _siteId = null;
+async function siteId() {
+  if (_siteId) return _siteId;
   const site = await g.getSite(process.env.SHAREPOINT_HOSTNAME, process.env.SHAREPOINT_SITE_PATH);
-  const list = await g.getListByName(site.id, 'Requerimientos');
-  if (!list) throw new Error('List "Requerimientos" no existe. Ejecuta crear-listas.js');
-  _cache.siteId = site.id;
-  _cache.listId = list.id;
-  // Lista Proyectos — para el contador de consecutivos en SP
-  const proyList = await g.getListByName(site.id, 'Proyectos').catch(() => null);
-  _cache.proyectosListId = proyList?.id || null;
-  // Migraciones no destructivas
-  try { await g.addListColumn(site.id, list.id, { name: 'consecutivoSistema', text: {} }); } catch {}
-  if (_cache.proyectosListId) {
-    try { await g.addListColumn(site.id, _cache.proyectosListId, { name: 'ultimoConsecutivoReq', number: {} }); } catch {}
-  }
-  return _cache;
-}
-
-// Obtiene el siguiente consecutivo desde SP Proyectos (fuente de verdad) con etag.
-// Retorna null si el proyecto no existe en SP o si ocurre un error no recuperable.
-async function getNextConsecutivoDesdeProyectosSP(siteId, proyectosListId, proyecto) {
-  if (!proyectosListId || !proyecto) return null;
-  try {
-    const items = await g.getListItems(siteId, proyectosListId, {
-      filter: `fields/nombre eq '${proyecto.replace(/'/g, "''")}'`,
-      prefer: 'HonorNonIndexedQueriesWarningMayFailRandomly',
-      top: 1,
-    });
-    if (!items.length) return null;
-
-    const item      = items[0];
-    const etag      = item['@odata.etag'] || item.eTag;
-    const actual    = Number(item.fields?.ultimoConsecutivoReq || 0);
-    const siguiente = actual + 1;
-
-    await g.updateListItem(siteId, proyectosListId, item.id,
-      { ultimoConsecutivoReq: siguiente },
-      etag ? { etag } : {}
-    );
-
-    // Sync local como cache (best-effort)
-    try { db.setConsecutivoProyecto(proyecto, siguiente); } catch {}
-
-    return String(siguiente).padStart(4, '0');
-  } catch (e) {
-    if (e.status === 412) {
-      // Conflicto de concurrencia — otro usuario llegó primero, reintentar
-      return getNextConsecutivoDesdeProyectosSP(siteId, proyectosListId, proyecto);
-    }
-    return null; // Otro error → el llamador usa fallback SQLite
-  }
+  _siteId = site.id;
+  return _siteId;
 }
 
 // ── Mapeo del resultado de procesarCorreo → fields del item ──────────────────
@@ -118,91 +80,96 @@ function fechaISO(f) {
 
 // ── API pública ───────────────────────────────────────────────────────────────
 
+/**
+ * Crea el requerimiento a partir de lo que extrajo procesarCorreo.
+ *
+ * La deduplicación ya no consulta una columna sin indexar de SharePoint —lo que
+ * obligaba a mandar el header HonorNonIndexedQueriesWarningMayFailRandomly, cuyo
+ * nombre anticipaba el resultado—: es un índice único sobre origen_correo_id.
+ *
+ * El consecutivo por proyecto se emite dentro de la misma transacción que
+ * inserta el requerimiento, así que un fallo no consume un número. Antes era
+ * concurrencia optimista con ETag y reintento en 412, más un contador de
+ * respaldo en SQLite que terminó desalineado.
+ */
 async function crearDesdeCorreo(resultado, meta = {}) {
-  const { siteId, listId, proyectosListId } = await ctx();
-
-  // Deduplicar por messageId — solo para correos reales (no cargas manuales).
-  // Los messageId manuales tienen formato "manual:..." y son siempre únicos
-  // (incluyen timestamp), por lo que no requieren consulta a SharePoint.
-  // Para correos reales, origenCorreoId no está indexado en SP → necesita Prefer header.
+  // Los messageId manuales incluyen timestamp y son siempre únicos, así que no
+  // hace falta consultarlos.
   if (meta.messageId && !meta.messageId.startsWith('manual:')) {
-    const existentes = await g.getListItems(siteId, listId, {
-      filter: `fields/origenCorreoId eq '${meta.messageId.replace(/'/g, "''")}'`,
-      prefer: 'HonorNonIndexedQueriesWarningMayFailRandomly',
-    });
-    if (existentes.length > 0) return { item: existentes[0], duplicado: true };
+    const existente = await repo.porOrigenCorreo(meta.messageId);
+    if (existente) return { item: existente, duplicado: true };
   }
 
-  // Consecutivo de sistema: fuente de verdad en SP Proyectos, fallback a SQLite local
-  const proyecto = (resultado.solicitud || {}).proyecto || '';
-  const consecutivoSistema = proyecto
-    ? (await getNextConsecutivoDesdeProyectosSP(siteId, proyectosListId, proyecto)
-       || db.getNextConsecutivoProyecto(proyecto))
-    : '';
+  const fields = mapearFields(resultado, meta);
+  let items = [];
+  try { items = JSON.parse(fields.itemsJson || '[]'); } catch {}
 
-  const fields = mapearFields(resultado, { ...meta, consecutivoSistema });
+  const { id, consecutivoSistema } = await repo.crear(fields, items);
+  const item = await repo.obtener(id);
 
-  const item = await g.addListItem(siteId, listId, fields);
-  // Best-effort: un fallo generando/subiendo el PDF no debe impedir que el
+  // Best-effort: un fallo generando o subiendo el PDF no debe impedir que el
   // requerimiento quede registrado.
-  await guardarPdfEnSharePoint(siteId, listId, item, fields, resultado)
-    .catch(e => console.error('  ⚠ No se pudo generar/subir el PDF del requerimiento a SharePoint:', e.message));
+  await guardarPdf(item, resultado)
+    .catch(e => console.error('  ⚠ No se pudo generar/subir el PDF del requerimiento:', e.message));
 
   return { item, duplicado: false, consecutivoSistema };
 }
 
-// Genera el PDF del requerimiento y lo sube a SharePoint (carpeta RequerimientosPDF
-// en la raíz del sitio). Lanza si falla — el llamador decide si lo absorbe.
-async function guardarPdfEnSharePoint(siteId, listId, item, fields, resultado) {
-  const html   = generarHTML(fields, resultado.items || []);
+/** Genera el PDF y lo sube a /RequerimientosPDF/ del sitio. Lanza si falla. */
+async function guardarPdf(item, resultado) {
+  const html   = generarHTML(item, resultado.items || []);
   const buffer = await htmlAPdf(html);
 
-  const nombre = `${fields.consecutivoSistema || item.id}_${fields.proyecto || 'SIN-PROYECTO'}`
-    .replace(/[\\/:*?"<>|]/g, '-');
-  const driveItem = await g.uploadFileToSite(siteId, `/RequerimientosPDF/${nombre}.pdf`, buffer, 'application/pdf');
+  const nombre = `${item.consecutivoSistema || item.id}_${item.proyecto || 'SIN-PROYECTO'}`
+    .replace(/[\/:*?"<>|]/g, '-');
+  const driveItem = await g.uploadFileToSite(
+    await siteId(), `/RequerimientosPDF/${nombre}.pdf`, buffer, 'application/pdf');
 
-  await g.updateListItem(siteId, listId, item.id, { adjuntoUrl: driveItem.webUrl });
+  await repo.actualizar(item.id, { adjuntoUrl: driveItem.webUrl });
 }
 
-// Regenera y sube el PDF de un requerimiento ya existente (backfill / re-intento manual).
-async function regenerarPdf(itemId) {
-  const { siteId, listId } = await ctx();
-  const item   = await g.getListItem(siteId, listId, itemId);
-  const fields = item.fields || {};
-  const items  = JSON.parse(fields.itemsJson || '[]');
-  await guardarPdfEnSharePoint(siteId, listId, item, fields, { items });
+/** Rehace el PDF de un requerimiento existente (backfill o reintento manual). */
+async function regenerarPdf(id) {
+  const item = await repo.obtener(id);
+  if (!item) throw new Error(`Requerimiento ${id} no existe`);
+  let items = [];
+  try { items = JSON.parse(item.itemsJson || '[]'); } catch {}
+  await guardarPdf(item, { items });
 }
 
-async function listar(filter) {
-  const { siteId, listId } = await ctx();
-  const opts = filter ? { filter } : {};
-  const items = await g.getListItems(siteId, listId, opts);
-  return items.map(it => ({ id: it.id, ...(it.fields || {}) }));
+/**
+ * `filtro` acepta { estado, proyectoId }. Antes era una cadena de filtro OData
+ * que se pasaba tal cual a Graph; ningún llamador la usaba con valor.
+ */
+async function listar(filtro) {
+  return repo.listar(typeof filtro === 'object' && filtro ? filtro : {});
 }
 
-async function actualizar(itemId, cambios, etag) {
-  const { siteId, listId } = await ctx();
-  return g.updateListItem(siteId, listId, itemId, cambios, etag ? { etag } : {});
+async function actualizar(id, cambios) {
+  return repo.actualizar(id, cambios);
 }
 
-async function marcarGestionado(itemId, ocsGeneradas = []) {
-  return actualizar(itemId, {
-    estado: 'gestionado',
-    ocsGeneradas: Array.isArray(ocsGeneradas) ? ocsGeneradas.join(', ') : String(ocsGeneradas),
-  });
+/**
+ * ocsGeneradas ya no se guarda: se deriva de ordenes_compra.requerimiento_id.
+ * El parámetro se acepta para no romper a los llamadores, y se ignora.
+ */
+async function marcarGestionado(id, _ocsGeneradas = []) {
+  return actualizar(id, { estado: 'gestionado' });
 }
 
-async function bloquear(itemId, usuario, minutos = 15) {
+async function bloquear(id, usuario, minutos = 15) {
   const hasta = new Date(Date.now() + minutos * 60 * 1000).toISOString();
-  return actualizar(itemId, { bloqueadoPor: usuario, bloqueadoHasta: hasta });
+  return actualizar(id, { bloqueadoPor: usuario, bloqueadoHasta: hasta });
 }
 
-async function liberar(itemId) {
-  return actualizar(itemId, { bloqueadoPor: '', bloqueadoHasta: null });
+async function liberar(id) {
+  return actualizar(id, { bloqueadoPor: null, bloqueadoHasta: null });
 }
 
 module.exports = {
   crearDesdeCorreo, listar, actualizar,
   marcarGestionado, bloquear, liberar,
   mapearFields, regenerarPdf,
+  reemplazarItems: repo.reemplazarItems,
+  obtener: repo.obtener,
 };
