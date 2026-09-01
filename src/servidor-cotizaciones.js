@@ -34,6 +34,7 @@ const repoOrdenesServicio = require('./repo/ordenesServicio');
 const repoRemisiones     = require('./repo/remisiones');
 const repoInventario     = require('./repo/inventario');
 const repoHistorial      = require('./repo/historialPrecios');
+const repoGastos         = require('./repo/gastos');
 const localDb          = require('./db');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
@@ -2723,18 +2724,8 @@ const servidor = http.createServer(async (req, res) => {
         const oc = actualizado;
         const itemsJson = oc.itemsJson || '[]';
         (async () => {
-          try {
-            await cc.registrarGasto({
-              fechaOC:         (oc.fechaCreacion || now).slice(0,10),
-              numeroOC:        oc.numeroOC,        proyecto:        oc.proyecto,
-              proveedorNit:    oc.proveedorNit,    proveedorNombre: oc.proveedorNombre,
-              tipoGasto:       oc.tipoGasto || '', subtotal:        oc.subtotal,
-              iva:             oc.iva,             total:           oc.total,
-              estado:          'aprobada',         fechaAprobacion: now.slice(0,10),
-              creadoPor:       usuario,
-            });
-          } catch (e) { console.warn('No se pudo registrar en Control Costos:', e.message); }
-
+          // Ya no se registra el gasto en ninguna parte: erp.vw_gastos lo deriva
+          // de la orden aprobada.
           try {
             let itemsOC = [];
             try { itemsOC = JSON.parse(itemsJson); } catch {}
@@ -2775,20 +2766,9 @@ const servidor = http.createServer(async (req, res) => {
           } catch (e) { console.warn('No se pudo recalcular estado del requerimiento:', e.message); }
         })();
       }
-      // Si cambia estado de pago/entrega → actualizar fila en Control Costos (async)
-      if (accion === 'pagar' || accion === 'entregar') {
-        (async () => {
-          try {
-            const numOC = actualizado.numeroOC;
-            if (numOC) {
-              const c = {};
-              if (accion === 'pagar')    c.fechaPago    = now.slice(0,10);
-              if (accion === 'entregar') c.fechaEntrega = now.slice(0,10);
-              await cc.actualizarFila(numOC, c);
-            }
-          } catch (e) { console.warn('No se pudo actualizar Control Costos:', e.message); }
-        })();
-      }
+      // Las fechas de pago y entrega ya no se copian a ninguna parte: la orden
+      // las tiene y erp.vw_gastos las lee de ahí. Antes esto buscaba la fila en
+      // el libro de Excel recorriendo toda la tabla hasta encontrar el número.
 
       // Auto-entrada/salida de inventario al marcar como Entregada
       const autoRefs = {};
@@ -2831,31 +2811,19 @@ const servidor = http.createServer(async (req, res) => {
           // contra Graph, seguidas de un MAX() para el número: si algo fallaba a
           // la mitad quedaban movimientos sin documento, y dos registros
           // simultáneos podían recibir el mismo EA-####.
-          async function registrarLote(movs, tipo) {
+          // El consumo entra al control de costos solo: erp.vw_gastos agrupa las
+          // salidas aprobadas por su documento_ref.
+          async function registrarLote(movs) {
             if (!movs.length) return null;
             const { documentoRef } = await repoInventario.crearLote(movs, { emitirDocumento: true });
-
-            if (tipo === 'salida') {
-              const totalSalida = movs.reduce((s, m) => s + m.cantidad * m.precioUnitario, 0);
-              if (totalSalida > 0) {
-                cc.registrarGasto({
-                  fechaOC:   new Date().toISOString().slice(0, 10),
-                  numeroOC:  documentoRef, proyecto: ocProyecto,
-                  tipoGasto: 'Salida Almacén',
-                  subtotal:  totalSalida, iva: 0, total: totalSalida,
-                  estado:    'ejecutado',
-                  creadoPor: usuario,
-                }).catch(e => console.warn('[inventario aprobar] Control Costos:', e.message));
-              }
-            }
             return documentoRef;
           }
 
           try {
-            autoRefs.entrada = await registrarLote(movsEntrada, 'entrada');
+            autoRefs.entrada = await registrarLote(movsEntrada);
           } catch (e) { console.warn('[entregar] entrada de inventario:', e.message); }
           try {
-            autoRefs.salida = await registrarLote(movsSalida, 'salida');
+            autoRefs.salida = await registrarLote(movsSalida);
           } catch (e) { console.warn('[entregar] salida de inventario:', e.message); }
         }
       }
@@ -3608,39 +3576,8 @@ FORMATO:
         }
         if (!actualizado) return json({ error: 'Orden de servicio no encontrada' }, 404);
 
-        // Al aprobar → registrar la OS como gasto en Control de Costos (async, no bloquea)
-        if (accion === 'aprobar') {
-          const os = actualizado;
-          (async () => {
-            try {
-              await cc.registrarGasto({
-                fechaOC:         (os.fechaCreacion || now).slice(0, 10),
-                numeroOC:        os.numeroOS,          proyecto:        os.proyecto,
-                proveedorNit:    os.proveedorNit,      proveedorNombre: os.proveedorNombre,
-                tipoGasto:       os.tipoGasto || '',   subtotal:        os.valor,
-                iva:             os.iva,               total:           os.total,
-                estado:          'aprobada',           fechaAprobacion: now.slice(0, 10),
-                creadoPor:       usuario,
-              });
-              console.log(`[OS ${os.numeroOS}] gasto registrado en Control Costos`);
-            } catch (e) { console.warn('No se pudo registrar OS en Control Costos:', e.message); }
-          })();
-        }
-
-        // Al pagar/cumplir → actualizar fecha en la fila de Control de Costos (async)
-        if (accion === 'pagar' || accion === 'cumplir') {
-          (async () => {
-            try {
-              const numOS = actualizado.numeroOS;
-              if (numOS) {
-                const c = {};
-                if (accion === 'pagar')   c.fechaPago    = now.slice(0, 10);
-                if (accion === 'cumplir') c.fechaEntrega = now.slice(0, 10);
-                await cc.actualizarFila(numOS, c);
-              }
-            } catch (e) { console.warn('No se pudo actualizar Control Costos (OS):', e.message); }
-          })();
-        }
+        // El gasto de la OS y sus fechas de pago y cumplimiento no se copian a
+        // ninguna parte: erp.vw_gastos los deriva de la orden.
 
         // Generar y subir el PDF de la OS pagada a SharePoint (best-effort)
         let pdfOSGenerado = null;
@@ -3972,27 +3909,8 @@ FORMATO:
           await repoInventario.actualizar(m.id, { documentoRef: docRef, estadoDoc: 'aprobado' });
           actualizados++;
         }
-        // Registrar salida aprobada en Control Costos (en segundo plano)
-        if (tipo === 'salida' && movs.length > 0) {
-          const totalSalida = movs.reduce((s, m) => s + (Number(m.valorTotal) || 0), 0);
-          if (totalSalida > 0) {
-            (async () => {
-              try {
-                await cc.registrarGasto({
-                  fechaOC:    new Date().toISOString().slice(0, 10),
-                  numeroOC:   docRef,
-                  proyecto,
-                  tipoGasto:  'Salida Almacén',
-                  subtotal:   totalSalida,
-                  iva:        0,
-                  total:      totalSalida,
-                  estado:     'ejecutado',
-                  creadoPor:  movs[0].creadoPor || process.env.USUARIO_EMAIL || 'sistema',
-                });
-              } catch (e) { console.warn('[inventario aprobar] Control Costos:', e.message); }
-            })();
-          }
-        }
+        // La salida aprobada entra al control de costos sola: erp.vw_gastos
+        // agrupa por documento_ref las salidas con estado_doc = aprobado.
         return json({ ok: true, documentoRef: docRef, actualizados });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -4160,6 +4078,38 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
     } finally {
       _revisandoCorreo = false;
     }
+  }
+
+  // ── GET /gastos → Control de Costos, derivado de erp.vw_gastos ───────────
+  if (req.method === "GET" && url.startsWith("/gastos")) {
+    try {
+      const qs = require("url").parse(req.url, true).query;
+      if (url === "/gastos/resumen") {
+        const [porProyecto, porProveedor, porTipo, totales] = await Promise.all([
+          repoGastos.porProyecto(), repoGastos.porProveedor(),
+          repoGastos.porTipo(), repoGastos.totales(),
+        ]);
+        return json({ totales, porProyecto, porProveedor, porTipo });
+      }
+      if (url === "/gastos") {
+        return json(await repoGastos.listar({
+          proyecto: qs.proyecto || null,
+          desde:    qs.desde    || null,
+          hasta:    qs.hasta    || null,
+          origen:   qs.origen   || null,
+        }));
+      }
+    } catch (err) { return json({ error: err.message }, 500); }
+  }
+
+  // ── POST /gastos/exportar → regenera el libro y lo sube a SharePoint ──────
+  // El Excel dejó de ser base de datos y pasó a ser reporte: se rehace entero
+  // desde la vista en vez de irse editando fila por fila.
+  if (req.method === "POST" && url === "/gastos/exportar") {
+    try {
+      const webUrl = await cc.exportarXlsx();
+      return json({ ok: true, webUrl, archivo: cc.NOMBRE_ARCHIVO });
+    } catch (err) { return json({ error: err.message }, 500); }
   }
 
   // Las rutas /sync y /sync/estado se retiraron con el caché: la aplicación
