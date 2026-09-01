@@ -298,6 +298,11 @@ async function responderCorreo(messageOriginal, asunto, cuerpo, rutaAdjunto, nom
     console.log(`[leerCorreos] Adjuntando formato: ${nombreAdjunto}`);
   }
 
+  const prueba = require('./modoPrueba');
+  if (prueba.activo) {
+    console.log(`[MODO_PRUEBA] correo NO enviado desde ${buzon}`);
+    return { modoPrueba: true };
+  }
   await graphPost(`/users/${buzon}/sendMail`, {
     message:         mensaje,
     saveToSentItems: true,

@@ -4074,6 +4074,7 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
 servidor.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT}`);
   console.log('  Abre esa URL en tu navegador para cargar cotizaciones.\n');
+  require('./modoPrueba').avisar();
   // Comprueba que GEMINI_MODEL apunte a un modelo que existe. No bloquea el
   // arranque: solo deja el diagnostico en el log, para que un .env mal escrito se
   // vea aqui y no cuando un usuario intente extraer una cotizacion.

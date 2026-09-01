@@ -151,22 +151,47 @@ Dos detalles que evitan falsos positivos:
 
 ### Lo que el verificador NO prueba
 
-Que las escrituras funcionen. Las lecturas están cubiertas; para las escrituras
-hay que usar la consola, y ahí conviene saber qué toca producción:
+Que las escrituras funcionen. Las lecturas están cubiertas; las escrituras hay
+que probarlas en la consola, y ahí aparece un problema: **la base es local, pero
+SharePoint, el buzón y tesorería son los de producción.**
 
-| Acción en local | Efecto |
-|---|---|
-| Crear o editar un requerimiento, una OC, una OS | Solo Postgres local. Seguro |
-| **Aprobar** una OC u OS | Solo Postgres local: emite el consecutivo, registra el precio en el historial y recalcula el estado del requerimiento |
-| Registrar movimientos de inventario | Solo Postgres local. Seguro |
-| **Generar el PDF** | Lo **sube al Drive real** de SharePoint |
-| **Exportar Control de Costos** | **Sobrescribe el libro real** en SharePoint |
-| **Enviar a tesorería** | Escribe en el Supabase de **producción** |
-| El botón de revisar el buzón | Lee el buzón real y **responde correos** |
+```bash
+# En .env
+MODO_PRUEBA=1
+npm run dev
+```
 
-Las cuatro últimas no son parte de la migración —ya funcionaban así—, pero
-conviene no dispararlas por accidente mientras se prueba. El mailer es un proceso
-aparte (`npm run correos`), así que `npm run dev` no toca correos.
+Con eso, las escrituras que salen del equipo se cortan:
+
+| Acción en la consola | Sin MODO_PRUEBA | Con MODO_PRUEBA |
+|---|---|---|
+| Crear o editar requerimiento, OC, OS | solo Postgres local | igual |
+| **Aprobar** una OC u OS | solo Postgres local: emite el consecutivo, registra el precio, recalcula el requerimiento | igual |
+| Registrar movimientos de inventario | solo Postgres local | igual |
+| **Generar el PDF** | lo sube al **Drive real** | queda en `./temp/prueba/` |
+| **Exportar Control de Costos** | **sobrescribe el libro real** | queda en `./temp/prueba/` |
+| **Enviar a tesorería** | escribe en el Supabase de **producción** | se rechaza |
+| Botón de revisar el buzón | lee el buzón real y **responde correos** | no envía |
+
+Las lecturas siguen saliendo, a propósito: leer el catálogo de SharePoint o un
+correo no cambia nada de nadie. Solo se corta lo que deja rastro.
+
+Que los PDF queden en disco es mejor que suprimirlos: se pueden abrir y revisar,
+que es justo lo que se quiere al probar. La fila queda con
+`pdf_url = prueba-local://…`, así que una OC probada se reconoce de inmediato.
+
+**En el VPS se deja sin definir.** Un despliegue que no envía correos en silencio
+sería peor que el problema. Para que el olvido no cueste, el arranque avisa
+cuando la combinación es la peligrosa —base local con escrituras vivas—:
+
+```
+  ⚠  Base de datos LOCAL con escrituras externas VIVAS.
+     Generar un PDF lo sube al Drive real. [...]
+     Para probar sin tocar producción:  MODO_PRUEBA=1 en .env
+```
+
+El mailer es un proceso aparte (`npm run correos`), así que `npm run dev` no
+toca correos ni con el modo apagado.
 
 ### El ciclo cuando el verificador marca diferencias
 
