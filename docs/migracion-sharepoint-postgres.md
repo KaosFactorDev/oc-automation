@@ -95,9 +95,15 @@ Los tres `backfill-pdf-*` **no eran de esa categoría** y se migraron en vez de
 borrarse: generan el PDF de respaldo de documentos que quedaron sin uno, y los
 PDF se quedan en SharePoint por la decisión de alcance. Ahora leen de Postgres.
 
-Quedan dos pendientes de decisión: `crear-control-costos.js`, que se va con la
-etapa 1 de abajo, y `wipe-datos-prueba.js`, que aún apunta a SharePoint y habría
-que repuntar si se quiere conservar como herramienta.
+Los dos que quedaban pendientes ya se retiraron. `crear-control-costos.js`
+armaba el libro de Excel a mano; hoy lo hace `controlCostos.generarXlsx()` desde
+`erp.vw_gastos`, así que era una segunda definición del mismo informe.
+
+`wipe-datos-prueba.js` borraba todos los items de Requerimientos, OrdenesCompra
+y Remisiones «para dejar la app en ceros antes del uso productivo». Ese momento
+pasó hace tiempo —hay 286 órdenes reales— y después del corte habría sido
+peligroso: borraba de las listas, que ya nadie lee, dejando Postgres intacto. Un
+script destructivo que apunta a la base equivocada es peor que no tenerlo.
 
 ### Sin doble escritura: corte directo
 

@@ -659,16 +659,26 @@ producción ya no se usan: todo corre en el VPS.
 
 Son utilidades de una sola ejecución, no parte del ciclo normal. Se corren a mano con `node`.
 
-| Script | Para qué |
-|--------|----------|
-| `crear-listas.js` · `esquemas.js` | Crea las listas en SharePoint según su esquema (setup inicial) |
-| `init-sqlite.js` | Poblado inicial SharePoint → SQLite |
-| `migrarOC.js` | Retroalimenta `HistorialPrecios` con las OC ya aprobadas |
-| `migrar-proveedores.js` · `cargar-insumos.js` · `provisionar-proyectos.js` | Siembra de catálogos |
-| `crear-control-costos.js` | Genera el libro `Control Costos.xlsx` |
-| `backfill-pdf-requerimientos.js` · `backfill-pdf-ordenes-compra.js` · `backfill-pdf-ordenes-servicio.js` | Genera y sube los PDF de documentos anteriores a la función de PDF automático |
-| `verificar-tesoreria.js` | Diagnostica la integración con tesorería (variables, login, rol) |
-| `limpiar-ocs-prueba.js` · `wipe-datos-prueba.js` | Limpieza de datos de prueba — **destructivos** |
+| Script | Para qué | Comando |
+|--------|----------|---------|
+| `db-admin.js` | Levanta, baja y abre `psql` contra la base local | `npm run db:up` · `db:down` · `db:psql` |
+| `db-migrar.js` | Aplica las migraciones de `supabase/migrations/` | `npm run db:push` |
+| `db-clave-app.js` | Asigna la contraseña del rol `erp_app` | `npm run db:clave` |
+| `db-esperar.js` | Espera a que la base acepte conexiones | `npm run db:esperar` |
+| `revisar-listas.js` | Chequeo previo: qué rechazaría el esquema | `npm run revisar-listas` |
+| `corregir-listas.js` | Corrige en SharePoint lo que se puede corregir solo | `npm run corregir-listas` |
+| `importar-listas.js` | Carga las 11 listas de SharePoint en Postgres | `npm run db:importar` |
+| `verificar-migracion.js` | Compara SharePoint contra Postgres: ¿están todos los datos? | `npm run db:verificar` |
+| `backfill-pdf-*.js` (3) | Genera y sube los PDF de documentos anteriores al PDF automático | a mano |
+| `verificar-tesoreria.js` | Diagnostica la integración con tesorería | a mano |
+
+Los scripts de la era SharePoint se retiraron con la migración: los que creaban
+las listas y sembraban catálogos (`crear-listas.js`, `esquemas.js`,
+`migrar-proveedores.js`, `provisionar-proyectos.js`, `cargar-insumos.js`,
+`init-sqlite.js`, `migrarOC.js`), el que armaba el libro de Control de Costos
+—ahora lo hace `controlCostos.generarXlsx()` desde `erp.vw_gastos`— y los de
+limpieza de datos de prueba, que borraban de las listas y habrían dejado
+Postgres intacto.
 
 ---
 
