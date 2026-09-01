@@ -97,8 +97,10 @@ services:
       - ./deploy/crontab:/app/deploy/crontab:ro
     networks:
       # "edge" acá NO es para que el proxy lo enrute — mailer no expone nada.
-      # Es por la salida a internet: la red "datos" es internal y sin esto
-      # index.js no podría alcanzar Microsoft Graph ni la API de Gemini.
+      # Se conserva porque index.js sale a Microsoft Graph y a la API de Gemini.
+      # Cuando "datos" era internal esto era obligatorio; ya no lo es, pero
+      # quitarlo dejaría al mailer dependiendo de que "datos" nunca vuelva a
+      # serlo.
       - edge
       - datos
     depends_on:
