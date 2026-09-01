@@ -1,86 +1,161 @@
 'use strict';
 /**
- * controlCostos.js
- * Módulo para registrar gastos en el libro "Control Costos.xlsx" de SharePoint.
- * Se llama cada vez que una OC pasa a estado "aprobada" (o cuando cambia su
- * estado de pago/entrega).
+ * controlCostos.js — Reporte de Control de Costos.
  *
- * Uso:
- *   const cc = require('./controlCostos');
- *   await cc.registrarGasto({ ... });
- *   await cc.actualizarEstado(numeroOC, 'pagada', new Date());
+ * ── Qué cambió ─────────────────────────────────────────────────────────────
+ * Este módulo escribía filas en la tabla tblGastos de "Control Costos.xlsx", en
+ * el Drive de SharePoint, mediante la Workbook API. Exponía dos funciones:
+ *
+ *   registrarGasto()  llamada al aprobar una OC, una OS o una salida de almacén
+ *   actualizarFila()  llamada al marcar pago, entrega o cumplimiento
+ *
+ * Las dos desaparecieron. El gasto ya no se registra: **se deriva**. La vista
+ * erp.vw_gastos lo calcula desde las órdenes aprobadas y las salidas de almacén,
+ * así que no hay una copia que pueda quedar desincronizada.
+ *
+ * Eso resuelve tres cosas que el libro tenía:
+ *
+ *  · Si la escritura fallaba —y se llamaba con .catch() que solo dejaba una
+ *    advertencia en el log— el gasto no quedaba registrado y nadie se enteraba.
+ *  · Anular una OC ya aprobada no borraba su fila, porque actualizarFila() solo
+ *    se llamaba para pago y entrega. El libro sumaba gastos de órdenes que ya no
+ *    existían.
+ *  · actualizarFila() buscaba la fila leyendo toda la tabla del libro y
+ *    recorriéndola hasta encontrar el número. Con cada OC esa búsqueda crecía.
+ *
+ * ── Qué se conserva ────────────────────────────────────────────────────────
+ * El archivo. La gente lo consulta en SharePoint y ahí sigue: exportarXlsx()
+ * genera el libro completo —las 14 columnas de siempre más las tres hojas de
+ * resumen— y lo sube al mismo sitio. La diferencia es que el Excel pasó de ser
+ * base de datos a ser reporte, y se regenera entero en vez de irse editando.
  */
 
-const g = require('./graphStorage');
+const ExcelJS = require('exceljs');
+const g          = require('./graphStorage');
+const repoGastos = require('./repo/gastos');
 
-const NOMBRE_TABLA    = 'tblGastos';
-const CARPETA_REMOTA  = 'Control Costos';
-const NOMBRE_ARCHIVO  = 'Control Costos.xlsx';
+const CARPETA_REMOTA = 'Control Costos';
+const NOMBRE_ARCHIVO = 'Control Costos.xlsx';
 
-async function resolverArchivo() {
-  const site = await g.getSite(process.env.SHAREPOINT_HOSTNAME, process.env.SHAREPOINT_SITE_PATH);
-  const item = await g.getDriveItemByPath(site.id, `${CARPETA_REMOTA}/${NOMBRE_ARCHIVO}`);
-  return { siteId: site.id, itemId: item.id };
+const COLUMNAS = [
+  { header: 'Fecha OC',         key: 'fechaOC',         width: 12 },
+  { header: 'Número',           key: 'numero',          width: 14 },
+  { header: 'Proyecto',         key: 'proyecto',        width: 38 },
+  { header: 'NIT Proveedor',    key: 'proveedorNit',    width: 16 },
+  { header: 'Proveedor',        key: 'proveedorNombre', width: 34 },
+  { header: 'Tipo de gasto',    key: 'tipoGasto',       width: 18 },
+  { header: 'Subtotal',         key: 'subtotal',        width: 16 },
+  { header: 'IVA',              key: 'iva',             width: 14 },
+  { header: 'Total',            key: 'total',           width: 16 },
+  { header: 'Estado',           key: 'estado',          width: 13 },
+  { header: 'Fecha aprobación', key: 'fechaAprobacion', width: 15 },
+  { header: 'Fecha pago',       key: 'fechaPago',       width: 13 },
+  { header: 'Fecha entrega',    key: 'fechaEntrega',    width: 13 },
+  { header: 'Creado por',       key: 'creadoPor',       width: 28 },
+];
+
+const MONEDA = '#,##0.00';
+
+function encabezado(hoja) {
+  const fila = hoja.getRow(1);
+  fila.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  fila.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0C6B76' } };
+  fila.alignment = { vertical: 'middle' };
+  fila.height = 20;
+  hoja.views = [{ state: 'frozen', ySplit: 1 }];
 }
 
-/**
- * Añade una fila a tblGastos.
- * @param {object} oc - OC aprobada con campos mapeados a las columnas del libro.
- *   { fechaOC, numeroOC, proyecto, proveedorNit, proveedorNombre, tipoGasto,
- *     subtotal, iva, total, estado, fechaAprobacion, fechaPago, fechaEntrega, creadoPor }
- */
-async function registrarGasto(oc) {
-  const { siteId, itemId } = await resolverArchivo();
+/** Construye el libro completo desde las vistas. Devuelve un Buffer. */
+async function generarXlsx() {
+  const [gastos, porProyecto, porProveedor, porTipo, tot] = await Promise.all([
+    repoGastos.listar(),
+    repoGastos.porProyecto(),
+    repoGastos.porProveedor(),
+    repoGastos.porTipo(),
+    repoGastos.totales(),
+  ]);
 
-  const fila = [
-    oc.fechaOC         || new Date().toISOString().slice(0, 10),
-    oc.numeroOC        || '',
-    oc.proyecto        || '',
-    oc.proveedorNit    || '',
-    oc.proveedorNombre || '',
-    oc.tipoGasto       || '',
-    Number(oc.subtotal || 0),
-    Number(oc.iva      || 0),
-    Number(oc.total    || 0),
-    oc.estado          || 'aprobada',
-    oc.fechaAprobacion || new Date().toISOString().slice(0, 10),
-    oc.fechaPago       || null,
-    oc.fechaEntrega    || null,
-    oc.creadoPor       || '',
-  ];
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'oc-automation';
+  wb.created = new Date();
 
-  return g.appendRowToTable(siteId, itemId, NOMBRE_TABLA, fila);
-}
-
-/**
- * Actualiza el estado (y fechas) de una OC ya registrada en tblGastos.
- * Busca por numeroOC.
- */
-async function actualizarFila(numeroOC, cambios) {
-  const { siteId, itemId } = await resolverArchivo();
-
-  // Leer la tabla para encontrar la fila
-  const resp = await g.get(`/sites/${siteId}/drive/items/${itemId}/workbook/tables/${NOMBRE_TABLA}/rows`);
-  const filas = resp.value || [];
-  const idx = filas.findIndex(r => r.values && r.values[0] && r.values[0][1] === numeroOC);
-  if (idx < 0) throw new Error(`OC "${numeroOC}" no encontrada en tblGastos`);
-
-  const fila = filas[idx].values[0];
-  // Mapeo columnas (0-index): 0=FechaOC 1=NumeroOC 2=Proyecto 3=ProvNit 4=ProvNombre
-  // 5=TipoGasto 6=Subtotal 7=IVA 8=Total 9=Estado 10=FechaAprobacion 11=FechaPago
-  // 12=FechaEntrega 13=CreadoPor
-  const MAPA = {
-    fechaOC: 0, numeroOC: 1, proyecto: 2, proveedorNit: 3, proveedorNombre: 4,
-    tipoGasto: 5, subtotal: 6, iva: 7, total: 8, estado: 9,
-    fechaAprobacion: 10, fechaPago: 11, fechaEntrega: 12, creadoPor: 13,
-  };
-  for (const [k, v] of Object.entries(cambios)) {
-    if (k in MAPA) fila[MAPA[k]] = v;
+  // ── Gastos ────────────────────────────────────────────────────────────────
+  const hg = wb.addWorksheet('Gastos');
+  hg.columns = COLUMNAS;
+  for (const row of gastos) hg.addRow(row);
+  encabezado(hg);
+  for (const key of ['subtotal', 'iva', 'total']) {
+    hg.getColumn(key).numFmt = MONEDA;
   }
+  hg.autoFilter = { from: 'A1', to: { row: 1, column: COLUMNAS.length } };
 
-  return g.patch(`/sites/${siteId}/drive/items/${itemId}/workbook/tables/${NOMBRE_TABLA}/rows/itemAt(index=${idx})`, {
-    values: [fila],
-  });
+  // ── Resúmenes ─────────────────────────────────────────────────────────────
+  // Se escriben como valores y no como fórmulas: los calculó Postgres y no
+  // pueden quedar viejos respecto de la hoja de Gastos.
+  const hp = wb.addWorksheet('Por Proyecto');
+  hp.columns = [
+    { header: 'Proyecto',   key: 'proyecto',   width: 42 },
+    { header: 'Documentos', key: 'documentos', width: 12 },
+    { header: 'Subtotal',   key: 'subtotal',   width: 16 },
+    { header: 'IVA',        key: 'iva',        width: 14 },
+    { header: 'Total',      key: 'total',      width: 16 },
+  ];
+  for (const row of porProyecto) hp.addRow(row);
+  encabezado(hp);
+  for (const key of ['subtotal', 'iva', 'total']) hp.getColumn(key).numFmt = MONEDA;
+
+  const hpr = wb.addWorksheet('Por Proveedor');
+  hpr.columns = [
+    { header: 'Proveedor',  key: 'proveedor',    width: 40 },
+    { header: 'NIT',        key: 'proveedorNit', width: 16 },
+    { header: 'Documentos', key: 'documentos',   width: 12 },
+    { header: 'Total',      key: 'total',        width: 16 },
+  ];
+  for (const row of porProveedor) hpr.addRow(row);
+  encabezado(hpr);
+  hpr.getColumn('total').numFmt = MONEDA;
+
+  const ht = wb.addWorksheet('Por Tipo de Gasto');
+  ht.columns = [
+    { header: 'Tipo de gasto', key: 'tipoGasto',  width: 24 },
+    { header: 'Documentos',    key: 'documentos', width: 12 },
+    { header: 'Total',         key: 'total',      width: 16 },
+  ];
+  for (const row of porTipo) ht.addRow(row);
+  encabezado(ht);
+  ht.getColumn('total').numFmt = MONEDA;
+
+  // ── Resumen ───────────────────────────────────────────────────────────────
+  const hr = wb.addWorksheet('Resumen');
+  hr.columns = [
+    { header: 'Concepto', key: 'concepto', width: 30 },
+    { header: 'Valor',    key: 'valor',    width: 20 },
+  ];
+  hr.addRow({ concepto: 'Documentos de gasto', valor: tot.documentos });
+  hr.addRow({ concepto: 'Subtotal',            valor: tot.subtotal });
+  hr.addRow({ concepto: 'IVA',                 valor: tot.iva });
+  hr.addRow({ concepto: 'Total',               valor: tot.total });
+  hr.addRow({ concepto: 'Generado',            valor: new Date().toLocaleString('es-CO') });
+  encabezado(hr);
+  hr.getColumn('valor').numFmt = MONEDA;
+
+  return wb.xlsx.writeBuffer();
 }
 
-module.exports = { registrarGasto, actualizarFila };
+/**
+ * Genera el libro y lo sube al mismo sitio de SharePoint donde estaba, para que
+ * quien lo consulta hoy no tenga que cambiar de lugar. Devuelve el webUrl.
+ */
+async function exportarXlsx() {
+  const buffer = await generarXlsx();
+  const site   = await g.getSite(process.env.SHAREPOINT_HOSTNAME, process.env.SHAREPOINT_SITE_PATH);
+  const item   = await g.uploadFileToSite(
+    site.id,
+    `/${CARPETA_REMOTA}/${NOMBRE_ARCHIVO}`,
+    buffer,
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  );
+  return item.webUrl;
+}
+
+module.exports = { generarXlsx, exportarXlsx, NOMBRE_ARCHIVO };

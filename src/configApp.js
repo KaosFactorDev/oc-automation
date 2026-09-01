@@ -1,18 +1,21 @@
 'use strict';
 /**
  * configApp.js
- * Lectura/escritura de configuración persistente en la List "ConfiguracionApp".
+ * Lectura/escritura de configuración persistente en erp.configuracion (Postgres).
  * Claves soportadas:
  *   - logo        : data-URL (image/png;base64,...) del logo de la OC
  *   - emisor      : JSON con { razonSocial, nit, direccion, ciudad, telefono, correo, web }
  *   - firmante    : JSON con { nombre, cargo }
  *   - observacionesDefault : texto con observaciones por defecto (antes condicionesDefault)
  *
- * Esquema del item: fields = { clave, valorJson, descripcion }
- *   - valorJson guarda string plano (ej. data-url) o JSON.stringify(obj)
+ * Esquema de la fila: { clave, valor, descripcion }
+ *   - valor guarda string plano (ej. el data-url del logo) o JSON.stringify(obj)
+ *
+ * El acceso a la base vive en repo/configuracion.js; acá solo quedan los
+ * valores por defecto, el ensamblado y el caché.
  */
 
-const g = require('./graphStorage');
+const repoConfig = require('./repo/configuracion');
 
 const EMISOR_DEFAULT = {
   razonSocial: 'CIVILTECH INGENIERÍA Y CONSTRUCCIÓN S.A.S.',
@@ -31,63 +34,60 @@ const CONDICIONES_DEFAULT = 'Documento No: CT-ADMIN-FO-006. ' +
   'Al recibir esta orden el proveedor acepta los términos comerciales aquí descritos.';
 const IVA_DEFAULT = 19;
 
-const _cache = {}; // { siteId, listId }
 let _cfgCache = null;
 let _cfgCacheAt = 0;
 const CFG_TTL_MS = 5 * 60 * 1000;
 
-async function ctx() {
-  if (_cache.siteId && _cache.listId) return _cache;
-  const site = await g.getSite(process.env.SHAREPOINT_HOSTNAME, process.env.SHAREPOINT_SITE_PATH);
-  const list = await g.getListByName(site.id, 'ConfiguracionApp');
-  if (!list) throw new Error('List "ConfiguracionApp" no existe. Ejecuta crear-listas.js');
-  _cache.siteId = site.id;
-  _cache.listId = list.id;
-  return _cache;
-}
-
-async function obtenerItem(clave) {
-  const { siteId, listId } = await ctx();
-  const items = await g.getListItems(siteId, listId, { filter: `fields/clave eq '${clave}'` });
-  return items[0] || null;
+/**
+ * El valor puede ser JSON serializado (emisor, firmante) o texto plano (el
+ * logo es un data-URL). Se intenta parsear y, si no es JSON, se devuelve
+ * crudo — el mismo contrato que había con la columna valorJson de SharePoint.
+ */
+function interpretar(raw, fallback) {
+  if (raw == null || raw === '') return fallback;
+  try { return JSON.parse(raw); }
+  catch { return raw; }
 }
 
 async function get(clave, fallback = null) {
   try {
-    const item = await obtenerItem(clave);
-    if (!item) return fallback;
-    const raw = item.fields?.valorJson || '';
-    try { return JSON.parse(raw); }
-    catch { return raw; }
+    return interpretar(await repoConfig.obtener(clave), fallback);
   } catch {
+    // Igual que antes: si la lectura falla, la aplicación sigue con el valor
+    // por defecto en vez de romper la pantalla.
     return fallback;
   }
 }
 
 async function set(clave, valor, descripcion = '') {
   _cfgCache = null; // invalidar cache al guardar
-  const { siteId, listId } = await ctx();
   const str = typeof valor === 'string' ? valor : JSON.stringify(valor);
-  const existente = await obtenerItem(clave);
-  const fields = { clave, valorJson: str };
-  if (descripcion) fields.descripcion = descripcion;
-  if (existente) {
-    return g.updateListItem(siteId, listId, existente.id, fields);
-  } else {
-    return g.addListItem(siteId, listId, fields);
-  }
+  return repoConfig.guardar(clave, str, descripcion);
 }
 
 async function getConfig() {
   if (_cfgCache && Date.now() - _cfgCacheAt < CFG_TTL_MS) return _cfgCache;
-  const [logo, emisor, firmante, observaciones, observacionesLegacy, ivaDef] = await Promise.all([
-    get('logo',        null),
-    get('emisor',      EMISOR_DEFAULT),
-    get('firmante',    FIRMANTE_DEFAULT),
-    get('observacionesDefault', null),
-    get('condicionesDefault',   null),   // clave legacy — fallback si aún no se guardó con la nueva
-    get('ivaDefault',  IVA_DEFAULT),
-  ]);
+
+  // Una sola consulta para las seis claves. Contra SharePoint esto eran seis
+  // viajes de red, uno por clave, porque no había forma de pedirlas juntas.
+  let valores = new Map();
+  try {
+    valores = await repoConfig.obtenerVarias([
+      'logo', 'emisor', 'firmante', 'observacionesDefault', 'condicionesDefault', 'ivaDefault',
+    ]);
+  } catch (e) {
+    console.warn('[configApp] No se pudo leer la configuración, se usan los valores por defecto:', e.message);
+  }
+
+  const logo          = interpretar(valores.get('logo'), null);
+  const emisor        = interpretar(valores.get('emisor'), EMISOR_DEFAULT);
+  const firmante      = interpretar(valores.get('firmante'), FIRMANTE_DEFAULT);
+  const observaciones = interpretar(valores.get('observacionesDefault'), null);
+  // Clave legacy: sirve de respaldo mientras haya instalaciones que aún no
+  // guardaron con el nombre nuevo.
+  const observacionesLegacy = interpretar(valores.get('condicionesDefault'), null);
+  const ivaDef        = interpretar(valores.get('ivaDefault'), IVA_DEFAULT);
+
   const iva = Number(ivaDef);
   _cfgCache = {
     logo: logo || null,

@@ -173,6 +173,15 @@ async function listarProyectos() {
  * @throws {Error} con .status y, en 422, .detalles
  */
 async function crearSolicitud(payload) {
+  // Tesorería es producción incluso desde desarrollo: una solicitud de pago
+  // creada al probar es una solicitud de pago real.
+  const prueba = require('./modoPrueba');
+  if (prueba.activo) {
+    console.log(`[MODO_PRUEBA] solicitud de tesorería NO enviada (${payload?.orden_compra || 'sin OC'})`);
+    const err = new Error('MODO_PRUEBA activo: no se envían solicitudes de pago.');
+    err.status = 503;
+    throw err;
+  }
   const res  = await pedir('/functions/v1/solicitudes-externas', { method: 'POST', body: payload });
   const data = await res.json().catch(() => ({}));
 

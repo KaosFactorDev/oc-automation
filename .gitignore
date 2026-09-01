@@ -14,6 +14,9 @@ logs/
 temp/
 *.log
 
+# Respaldos de Postgres (los genera deploy/respaldo-db.sh en el VPS)
+respaldos/
+
 # Carpeta interna de Claude Code
 .claude/
 
