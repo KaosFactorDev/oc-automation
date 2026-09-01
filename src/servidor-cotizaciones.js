@@ -488,21 +488,8 @@ async function bootstrapAdmin() {
   const email = (process.env.USUARIO_EMAIL || '').trim().toLowerCase();
   if (!email) return;
 
-  const ctx = await ctxSharePoint();
-  let listId = ctx.UsuariosERP;
-
-  if (!listId) {
-    // Esperar hasta 15s a que la lista sea aprovisionada en segundo plano
-    for (let i = 0; i < 5; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        const lst = await g.getListByName(ctx.siteId, 'UsuariosERP');
-        if (lst?.id) { listId = lst.id; _listCache.UsuariosERP = listId; break; }
-      } catch {}
-    }
-  }
-  if (!listId) { console.warn('[bootstrap] Lista UsuariosERP no disponible'); return; }
-
+  // Antes había que esperar hasta 15 s a que se aprovisionara la lista
+  // UsuariosERP en SharePoint. La tabla ya existe por migración.
   const adminData = {
     email,
     nombre: email,

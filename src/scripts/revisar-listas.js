@@ -3,7 +3,6 @@
  * revisar-listas.js — Chequeo previo al import de las 11 listas de SharePoint.
  *
  *   npm run revisar-listas              lee de SharePoint (la fuente de verdad)
- *   npm run revisar-listas -- --cache   lee del SQLite local (rápido, puede estar viejo)
  *   npm run revisar-listas -- --detalle muestra todas las filas de cada hallazgo
  *
  * SharePoint no valida nada: no tiene unicidad, ni llaves foráneas, ni tipos
@@ -19,18 +18,14 @@
  * SharePoint ya tenía 282, así que 6 nunca se revisaban. Un chequeo que valida
  * una fuente distinta a la que se va a importar no sirve de compuerta.
  *
- * --cache sigue disponible para una mirada rápida sin gastar llamadas a Graph,
- * pero no reemplaza la corrida real.
+ * El flag --cache se retiró junto con el caché: sus tablas siguen en local.db
+ * pero ya nadie las escribe, así que habría reportado sobre datos congelados.
  *
  * Salida: código 0 si no hay bloqueadores, 1 si hay algo que rompería el import.
  */
 
 require('dotenv').config();
 
-const path     = require('path');
-const Database = require('better-sqlite3');
-
-const CACHE   = process.argv.includes('--cache');
 const DETALLE = process.argv.includes('--detalle');
 const TOPE    = DETALLE ? Infinity : 8;
 
@@ -61,7 +56,7 @@ function items(doc, campo = 'itemsJson') {
   } catch { return []; }
 }
 
-// ── Lectura: SharePoint (por defecto) o caché SQLite (--cache) ──────────────
+// ── Lectura de SharePoint ──────────────────────────────────────────
 
 /** Campos que SharePoint agrega a cada item y que no son datos del negocio. */
 const RUIDO_SP = /^(@odata|ContentType|Modified|Created|AuthorLookupId|EditorLookupId|_UIVersionString|Attachments|Edit|ItemChildCount|FolderChildCount|_Compliance|AppAuthorLookupId|AppEditorLookupId|Title|LinkTitle|ID)/;
@@ -109,33 +104,6 @@ async function cargarDeSharePoint() {
   };
 }
 
-function cargarDeCache() {
-  const ruta = process.env.SQLITE_PATH || path.join(__dirname, '../../data/local.db');
-  const db = new Database(ruta, { readonly: true });
-
-  const docs = (tabla) => db.prepare(`SELECT sp_id, data FROM ${tabla}`).all().map(r => {
-    let o = {};
-    try { o = JSON.parse(r.data); } catch {}
-    return { sp_id: r.sp_id, ...limpiar(o) };
-  });
-
-  return {
-    origen: `caché SQLite · ${ruta}`,
-    catalogo: {
-      proyectos:   db.prepare('SELECT sp_id, nombre, zona, activo FROM proyectos').all(),
-      proveedores: db.prepare('SELECT sp_id, nit, nombre FROM proveedores').all(),
-      insumos:     db.prepare('SELECT sp_id, nombre FROM insumos').all(),
-      usuarios:    db.prepare('SELECT sp_id, email, rol FROM usuarios').all(),
-    },
-    req: docs('requerimientos'),
-    oc:  docs('ordenes_compra'),
-    os:  docs('ordenes_servicio'),
-    rem: docs('remisiones'),
-    mov: docs('movimientos_inventario'),
-    hp:  db.prepare('SELECT * FROM historial_precios').all(),
-  };
-}
-
 // ── Acumulador de hallazgos ─────────────────────────────────────────────────
 
 const hallazgos = [];
@@ -146,7 +114,7 @@ function reportar(nivel, titulo, filas, comoArreglar) {
 }
 
 async function main() {
-  const datos = CACHE ? cargarDeCache() : await cargarDeSharePoint();
+  const datos = await cargarDeSharePoint();
   const { catalogo, req, oc, os, rem, mov, hp, origen } = datos;
   const DB_PATH = origen;
 

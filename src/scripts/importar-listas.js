@@ -4,7 +4,6 @@
  *
  *   npm run db:importar                   importa desde SharePoint
  *   npm run db:importar -- --dry-run      hace todo y revierte al final
- *   npm run db:importar -- --cache        lee del SQLite local (ensayo rápido)
  *   npm run db:importar -- --truncate     vacía las tablas erp antes de cargar
  *
  * ── Qué hace, en orden ─────────────────────────────────────────────────────
@@ -58,7 +57,6 @@ const { Client } = require('pg');
 const { configAdmin } = require('./db-admin');
 
 const DRY_RUN  = process.argv.includes('--dry-run');
-const CACHE    = process.argv.includes('--cache');
 const TRUNCATE = process.argv.includes('--truncate');
 const RENUMERAR = process.argv.includes('--renumerar-duplicados');
 
@@ -159,57 +157,6 @@ async function leerDeSharePoint() {
     datos[nombre] = items.map(it => ({ sp_id: String(it.id), ...limpiar(it.fields) }));
     console.log(`  ✓ ${nombre.padEnd(22)} ${String(datos[nombre].length).padStart(6)} filas`);
   }
-  return datos;
-}
-
-/**
- * Lectura desde el caché SQLite. Sirve para ensayar sin gastar llamadas a
- * Graph, pero NO es equivalente: ConfiguracionApp no se cachea y a los insumos
- * les falta la columna sinonimos. Para el import definitivo, SharePoint.
- */
-function leerDeCache() {
-  const Database = require('better-sqlite3');
-  const ruta = process.env.SQLITE_PATH || path.join(__dirname, '../../data/local.db');
-  const d = new Database(ruta, { readonly: true });
-
-  const docs = (tabla) => d.prepare(`SELECT sp_id, data FROM ${tabla}`).all().map(r => {
-    let o = {};
-    try { o = JSON.parse(r.data); } catch {}
-    return { sp_id: String(r.sp_id), ...limpiar(o) };
-  });
-
-  const datos = {
-    Proyectos: d.prepare('SELECT sp_id, nombre AS codigo, nombre, zona, activo FROM proyectos').all()
-      .map(r => ({ ...r, sp_id: String(r.sp_id) })),
-    Proveedores: d.prepare('SELECT sp_id, nit, nombre AS razonSocial, zona, activo, data FROM proveedores').all()
-      .map(r => {
-        let extra = {};
-        try { extra = JSON.parse(r.data || '{}'); } catch {}
-        return { ...extra, sp_id: String(r.sp_id), nit: r.nit, razonSocial: r.razonSocial, zona: r.zona, activo: r.activo };
-      }),
-    Insumos: d.prepare('SELECT sp_id, nombre, categoria, subcategoria, unidad AS unidadEstandar, activo FROM insumos').all()
-      .map(r => ({ ...r, sp_id: String(r.sp_id) })),
-    UsuariosERP: d.prepare('SELECT sp_id, email, nombre, cargo, rol, activo FROM usuarios').all()
-      .map(r => ({ ...r, sp_id: String(r.sp_id) })),
-    ConfiguracionApp: [],
-    Requerimientos:        docs('requerimientos'),
-    OrdenesCompra:         docs('ordenes_compra'),
-    OrdenesServicio:       docs('ordenes_servicio'),
-    Remisiones:            docs('remisiones'),
-    MovimientosInventario: docs('movimientos_inventario'),
-    HistorialPrecios: d.prepare('SELECT * FROM historial_precios').all()
-      .map(r => ({
-        sp_id: String(r.sp_id), insumo: r.insumo, nombreProveedor: r.proveedor,
-        nitProveedor: r.nit, precioUnitario: r.precio, fecha: r.fecha, zona: r.zona,
-        proyecto: r.proyecto, numeroCompra: r.documento, cantidad: r.cantidad, unidad: r.unidad,
-      })),
-  };
-
-  for (const nombre of LISTAS) {
-    console.log(`  ✓ ${nombre.padEnd(22)} ${String(datos[nombre].length).padStart(6)} filas`);
-  }
-  console.log('\n  ⚠ Lectura desde caché: ConfiguracionApp viene vacía y los insumos');
-  console.log('    llegan sin sinónimos. Es un ensayo, no el import definitivo.');
   return datos;
 }
 
@@ -379,7 +326,7 @@ async function main() {
   if (DRY_RUN) console.log('  MODO ENSAYO: al final se revierte todo.\n');
 
   console.log('Leyendo listas...');
-  const datos = CACHE ? leerDeCache() : await leerDeSharePoint();
+  const datos = await leerDeSharePoint();
 
   if (RENUMERAR) {
     console.log('\nResolviendo números de documento repetidos...');
@@ -626,7 +573,6 @@ async function main() {
       ['clave','valor','descripcion','sp_id'], configFilas,
       { conflicto: 'clave', devolver: 'clave, sp_id' });
     anotar('configuracion', configFilas.length);
-    if (CACHE) avisar('ConfiguracionApp quedó vacía porque se leyó del caché (no se cachea en SQLite).');
 
     console.log('\nCargando documentos...');
 
