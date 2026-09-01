@@ -79,44 +79,57 @@ openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40
 
 ## Respaldos
 
-Con SharePoint, respaldaba Microsoft. Autoalojando es responsabilidad del VPS, y
-no es opcional: sin esto, un disco perdido se lleva las órdenes de compra de la
-empresa.
-
-`deploy/respaldo-db.sh` corre en el **host**, no dentro de un contenedor, para
-poder usar `docker exec` y escribir en un directorio que sobreviva a un
-`compose down`.
+Con SharePoint la copia la hacía Microsoft. Autoalojando, el respaldo es del
+VPS: sin esto, un disco perdido se lleva las órdenes de compra de la empresa.
 
 ```bash
-chmod +x deploy/respaldo-db.sh
-crontab -e
-# 15 3 * * * cd /ruta/al/proyecto && ./deploy/respaldo-db.sh >> logs/respaldo-db.log 2>&1
+./deploy/respaldo-db.sh          # a mano
+crontab -l                       # ver lo programado
 ```
 
-Escribe a `.parcial` y solo renombra al final, verifica el gzip y descarta un
-dump sospechosamente pequeño: creer que hay copia y que no sirva es la peor
-forma de perder datos. Retiene 30 días (`RETENCION_DIAS`).
+Cada corrida deja `respaldos/erp-AAAA-MM-DD.sql.gz`, conserva 30 días y borra lo
+anterior. El script se protege de dos formas de tener una copia inservible sin
+saberlo: escribe a `.parcial` y solo renombra al terminar —así un dump cortado a
+la mitad no queda con nombre de respaldo válido—, y verifica el gzip con
+`gzip -t` antes de darlo por bueno. Si pesa menos de 2 KB, lo descarta.
 
-`respaldos/` está en `.gitignore` y excluido del rsync del despliegue — la
-primera llamada corre con `--delete` y sin esa exclusión cada deploy habría
-borrado los respaldos.
+### La hora: el cron de Ubuntu ignora CRON_TZ
 
-### Restaurar
+**El host está en Europe/Berlin, no en hora de Colombia** — van 7 horas. Lo
+natural sería poner `CRON_TZ=America/Bogota` al principio del crontab, y no
+funciona: se comprobó programando un job con esa variable para dos minutos más
+tarde en hora de Bogotá, y nunca disparó.
+
+Así que la hora del crontab es la **del host**:
+
+```cron
+15 8 * * * cd /home/deploy/oc-automation && ./deploy/respaldo-db.sh >> logs/respaldo-db.log 2>&1
+```
+
+08:15 en Berlín son la 01:15 en Colombia en verano y las 02:15 en invierno —
+madrugada en los dos casos, que es lo que se quería. Si algún día se mueve la
+hora, hay que hacer la cuenta a mano.
+
+### Restaurar, y por qué hay que probarlo
+
+Un respaldo que nunca se restauró es una esperanza, no una copia. La prueba:
 
 ```bash
-gunzip -c respaldos/erp-2026-08-28.sql.gz | \
-  docker exec -i oc-automation-db psql -U postgres -d erp
+docker exec oc-automation-db psql -U postgres -d postgres   -c "CREATE DATABASE erp_prueba_restauracion;"
+gunzip -c respaldos/erp-2026-09-02.sql.gz |   docker exec -i oc-automation-db psql -U postgres -d erp_prueba_restauracion
+# comparar conteos contra erp, y después:
+docker exec oc-automation-db psql -U postgres -d postgres   -c "DROP DATABASE erp_prueba_restauracion;"
 ```
 
-Sobre una base que ya tiene datos, primero:
+Hecho el 2026-09-02: las siete tablas principales devolvieron el mismo conteo que
+el original.
+
+Para restaurar de verdad sobre una base con datos, primero hay que vaciarla:
 
 ```bash
 docker exec -i oc-automation-db psql -U postgres -d erp -c 'DROP SCHEMA erp CASCADE'
+gunzip -c respaldos/erp-AAAA-MM-DD.sql.gz |   docker exec -i oc-automation-db psql -U postgres -d erp
 ```
-
-Probado: restaurar en una base nueva da un resultado idéntico —18 tablas, 9
-funciones, 78 índices, las 6 migraciones registradas— con las funciones
-operando.
 
 ## Probar antes de desplegar
 
