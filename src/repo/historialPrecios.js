@@ -23,6 +23,7 @@
  */
 
 const pg = require('../pg');
+const { fk } = require('./_valores');
 
 const CAMPOS = `
   h.id, h.insumo, h.cantidad, h.precio_unitario, h.valor_total,
@@ -119,7 +120,7 @@ async function agregar(filas) {
           nit, f.nombreProveedor ?? f.proveedor ?? null,
           f.estadoCompra ?? null, f.formaPago ?? null,
           Number(f.anticipo) || 0,
-          f.zona ?? null,
+          fk(f.zona),
         ]);
       guardadas++;
     }
