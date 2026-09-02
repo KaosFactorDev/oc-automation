@@ -84,7 +84,7 @@ async function guardarProveedor(datos) {
     `INSERT INTO erp.proveedores
        (nit, nit_original, razon_social, nombre_comercial, regimen, municipio,
         direccion, telefono, correo, zona, banco, tipo_cuenta, cuenta_bancaria, activo)
-     VALUES (erp.norm_nit($1), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     VALUES (erp.norm_nit($1), $1, $2, $3, $4, $5, $6, $7, $8, erp.zona_canonica($9), $10, $11, $12, $13)
      ON CONFLICT (nit) DO UPDATE SET
        razon_social     = COALESCE(EXCLUDED.razon_social, erp.proveedores.razon_social),
        nombre_comercial = COALESCE(EXCLUDED.nombre_comercial, erp.proveedores.nombre_comercial),
@@ -125,9 +125,12 @@ async function actualizarProveedor(nit, cambios) {
   for (const [clave, valor] of Object.entries(cambios)) {
     const col = MAPA[clave];
     if (!col || sets.some(s => s.startsWith(col + ' '))) continue;
-    // zona tiene llave foránea: la cadena vacía del formulario va como NULL.
+    // zona tiene llave foránea. fk() convierte el blanco en NULL y
+    // erp.zona_canonica() resuelve la caja: "CENTRO" y "Centro" son la misma.
     vals.push(col === 'zona' ? fk(valor) : valor);
-    sets.push(`${col} = $${vals.length}`);
+    sets.push(col === 'zona'
+      ? `zona = erp.zona_canonica($${vals.length})`
+      : `${col} = $${vals.length}`);
   }
   if (!sets.length) return getProveedorPorNit(nit);
 
@@ -188,7 +191,7 @@ async function getProyectoPorCodigo(codigo) {
 async function crearProyecto(datos) {
   const r = await pg.one(
     `INSERT INTO erp.proyectos (codigo, nombre, tipo, ciudad, departamento, zona, activo, notas)
-     VALUES ($1, COALESCE($2, $1), $3, $4, $5, $6, $7, $8)
+     VALUES ($1, COALESCE($2, $1), $3, $4, $5, erp.zona_canonica($6), $7, $8)
      RETURNING ${PROYECTO_COLS}`,
     [
       datos.codigo ?? datos.nombre, datos.descripcion ?? null, datos.tipo ?? null,

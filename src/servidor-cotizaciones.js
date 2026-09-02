@@ -1297,7 +1297,11 @@ const servidor = http.createServer(async (req, res) => {
         const campos = {
           nit,
           razonSocial: nombre,   // nombre del campo en SharePoint
-          zona:        normalize(body.zona),
+          // La zona NO va por normalize(): ese pone en MAYÚSCULAS, y erp.zonas
+          // guarda "Centro", "Caribe"… Con "CENTRO" la llave foránea rechazaba
+          // el alta. La base resuelve la caja de todos modos, pero mandar el
+          // valor tal cual evita depender de eso.
+          zona:        String(body.zona || '').trim(),
           municipio:   normalize(body.municipio),
           telefono:    String(body.telefono || '').trim(),
           correo:      String(body.correo || '').trim().toLowerCase(),
@@ -1324,7 +1328,7 @@ const servidor = http.createServer(async (req, res) => {
         const cambios = {};
         if (body.nit      != null) cambios.nit         = String(body.nit).trim().replace(/[^0-9\-]/g, '');
         if (body.nombre   != null) cambios.razonSocial  = normalize(body.nombre);
-        if (body.zona     != null) cambios.zona         = normalize(body.zona);
+        if (body.zona     != null) cambios.zona         = String(body.zona).trim();
         if (body.municipio!= null) cambios.municipio    = normalize(body.municipio);
         if (body.telefono != null) cambios.telefono     = String(body.telefono).trim();
         if (body.correo   != null) cambios.correo       = String(body.correo).trim().toLowerCase();
