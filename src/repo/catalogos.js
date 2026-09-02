@@ -26,6 +26,7 @@
  */
 
 const pg = require('../pg');
+const { fk } = require('./_valores');
 
 // ── Proveedores ─────────────────────────────────────────────────────────────
 
@@ -103,7 +104,7 @@ async function guardarProveedor(datos) {
     [
       datos.nit, datos.razonSocial ?? datos.nombre ?? null, datos.nombreComercial ?? null,
       datos.regimen ?? null, datos.municipio ?? null, datos.direccion ?? null,
-      datos.telefono ?? null, datos.correo ?? null, datos.zona ?? null,
+      datos.telefono ?? null, datos.correo ?? null, fk(datos.zona),
       datos.banco ?? null, datos.tipoCuenta ?? null, datos.cuentaBancaria ?? null,
       datos.activo === undefined ? true : !!datos.activo,
     ]);
@@ -124,7 +125,8 @@ async function actualizarProveedor(nit, cambios) {
   for (const [clave, valor] of Object.entries(cambios)) {
     const col = MAPA[clave];
     if (!col || sets.some(s => s.startsWith(col + ' '))) continue;
-    vals.push(valor);
+    // zona tiene llave foránea: la cadena vacía del formulario va como NULL.
+    vals.push(col === 'zona' ? fk(valor) : valor);
     sets.push(`${col} = $${vals.length}`);
   }
   if (!sets.length) return getProveedorPorNit(nit);
@@ -190,7 +192,7 @@ async function crearProyecto(datos) {
      RETURNING ${PROYECTO_COLS}`,
     [
       datos.codigo ?? datos.nombre, datos.descripcion ?? null, datos.tipo ?? null,
-      datos.ciudad ?? null, datos.departamento ?? null, datos.zona ?? null,
+      datos.ciudad ?? null, datos.departamento ?? null, fk(datos.zona),
       datos.activo === undefined ? true : !!datos.activo, datos.notas ?? null,
     ]);
   return mapProyecto(r);
@@ -207,7 +209,8 @@ async function actualizarProyecto(id, cambios) {
   for (const [clave, valor] of Object.entries(cambios)) {
     const col = MAPA[clave];
     if (!col || sets.some(s => s.startsWith(col + ' '))) continue;
-    vals.push(valor);
+    // zona tiene llave foránea: la cadena vacía del formulario va como NULL.
+    vals.push(col === 'zona' ? fk(valor) : valor);
     sets.push(`${col} = $${vals.length}`);
   }
   if (!sets.length) return getProyecto(id);
