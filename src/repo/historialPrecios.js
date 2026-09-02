@@ -120,7 +120,7 @@ async function agregar(filas) {
           nit, f.nombreProveedor ?? f.proveedor ?? null,
           f.estadoCompra ?? null, f.formaPago ?? null,
           Number(f.anticipo) || 0,
-          fk(f.zona),
+          fk(f.zona),   // la caja la resuelve erp.zona_canonica() en el SQL
         ]);
       guardadas++;
     }
