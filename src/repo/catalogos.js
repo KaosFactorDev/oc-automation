@@ -113,7 +113,20 @@ async function guardarProveedor(datos) {
 
 /** Actualización parcial: solo toca las columnas presentes en `cambios`. */
 async function actualizarProveedor(nit, cambios) {
+  // `nit` está en el MAPA porque corregir un NIT mal escrito es tarea de quien
+  // lo registró, no de una migración: el sistema tiene que dejarlo hacer.
+  //
+  // Es seguro por el esquema, no por suerte: las tres llaves foráneas que
+  // apuntan a proveedores(nit) —órdenes de compra, de servicio e historial de
+  // precios— están declaradas ON UPDATE CASCADE, así que el cambio repunta
+  // todas sus filas en la misma sentencia. Y si el NIT nuevo ya existe, el
+  // índice único lo rechaza en vez de fusionar dos proveedores en silencio.
+  //
+  // Antes esta clave NO estaba en el MAPA: la ruta PATCH aceptaba body.nit, el
+  // bucle de abajo lo descartaba por no encontrar columna, y la respuesta era
+  // un 200 sin haber cambiado nada.
   const MAPA = {
+    nit: 'nit',
     razonSocial: 'razon_social', nombre: 'razon_social',
     nombreComercial: 'nombre_comercial', regimen: 'regimen', municipio: 'municipio',
     direccion: 'direccion', telefono: 'telefono', correo: 'correo', zona: 'zona',
@@ -128,9 +141,15 @@ async function actualizarProveedor(nit, cambios) {
     // zona tiene llave foránea. fk() convierte el blanco en NULL y
     // erp.zona_canonica() resuelve la caja: "CENTRO" y "Centro" son la misma.
     vals.push(col === 'zona' ? fk(valor) : valor);
-    sets.push(col === 'zona'
-      ? `zona = erp.zona_canonica($${vals.length})`
-      : `${col} = $${vals.length}`);
+    if (col === 'zona') {
+      sets.push(`zona = erp.zona_canonica($${vals.length})`);
+    } else if (col === 'nit') {
+      // El NIT se guarda normalizado y se conserva tal como se escribió, igual
+      // que en el alta: nit es la llave y nit_original el rastro de auditoría.
+      sets.push(`nit = erp.norm_nit($${vals.length}), nit_original = $${vals.length}`);
+    } else {
+      sets.push(`${col} = $${vals.length}`);
+    }
   }
   if (!sets.length) return getProveedorPorNit(nit);
 
