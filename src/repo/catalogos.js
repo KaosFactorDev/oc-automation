@@ -26,6 +26,7 @@
  */
 
 const pg = require('../pg');
+const { fk } = require('./_valores');
 
 // ── Proveedores ─────────────────────────────────────────────────────────────
 
@@ -83,7 +84,7 @@ async function guardarProveedor(datos) {
     `INSERT INTO erp.proveedores
        (nit, nit_original, razon_social, nombre_comercial, regimen, municipio,
         direccion, telefono, correo, zona, banco, tipo_cuenta, cuenta_bancaria, activo)
-     VALUES (erp.norm_nit($1), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     VALUES (erp.norm_nit($1), $1, $2, $3, $4, $5, $6, $7, $8, erp.zona_canonica($9), $10, $11, $12, $13)
      ON CONFLICT (nit) DO UPDATE SET
        razon_social     = COALESCE(EXCLUDED.razon_social, erp.proveedores.razon_social),
        nombre_comercial = COALESCE(EXCLUDED.nombre_comercial, erp.proveedores.nombre_comercial),
@@ -103,7 +104,7 @@ async function guardarProveedor(datos) {
     [
       datos.nit, datos.razonSocial ?? datos.nombre ?? null, datos.nombreComercial ?? null,
       datos.regimen ?? null, datos.municipio ?? null, datos.direccion ?? null,
-      datos.telefono ?? null, datos.correo ?? null, datos.zona ?? null,
+      datos.telefono ?? null, datos.correo ?? null, fk(datos.zona),
       datos.banco ?? null, datos.tipoCuenta ?? null, datos.cuentaBancaria ?? null,
       datos.activo === undefined ? true : !!datos.activo,
     ]);
@@ -112,7 +113,20 @@ async function guardarProveedor(datos) {
 
 /** Actualización parcial: solo toca las columnas presentes en `cambios`. */
 async function actualizarProveedor(nit, cambios) {
+  // `nit` está en el MAPA porque corregir un NIT mal escrito es tarea de quien
+  // lo registró, no de una migración: el sistema tiene que dejarlo hacer.
+  //
+  // Es seguro por el esquema, no por suerte: las tres llaves foráneas que
+  // apuntan a proveedores(nit) —órdenes de compra, de servicio e historial de
+  // precios— están declaradas ON UPDATE CASCADE, así que el cambio repunta
+  // todas sus filas en la misma sentencia. Y si el NIT nuevo ya existe, el
+  // índice único lo rechaza en vez de fusionar dos proveedores en silencio.
+  //
+  // Antes esta clave NO estaba en el MAPA: la ruta PATCH aceptaba body.nit, el
+  // bucle de abajo lo descartaba por no encontrar columna, y la respuesta era
+  // un 200 sin haber cambiado nada.
   const MAPA = {
+    nit: 'nit',
     razonSocial: 'razon_social', nombre: 'razon_social',
     nombreComercial: 'nombre_comercial', regimen: 'regimen', municipio: 'municipio',
     direccion: 'direccion', telefono: 'telefono', correo: 'correo', zona: 'zona',
@@ -124,8 +138,18 @@ async function actualizarProveedor(nit, cambios) {
   for (const [clave, valor] of Object.entries(cambios)) {
     const col = MAPA[clave];
     if (!col || sets.some(s => s.startsWith(col + ' '))) continue;
-    vals.push(valor);
-    sets.push(`${col} = $${vals.length}`);
+    // zona tiene llave foránea. fk() convierte el blanco en NULL y
+    // erp.zona_canonica() resuelve la caja: "CENTRO" y "Centro" son la misma.
+    vals.push(col === 'zona' ? fk(valor) : valor);
+    if (col === 'zona') {
+      sets.push(`zona = erp.zona_canonica($${vals.length})`);
+    } else if (col === 'nit') {
+      // El NIT se guarda normalizado y se conserva tal como se escribió, igual
+      // que en el alta: nit es la llave y nit_original el rastro de auditoría.
+      sets.push(`nit = erp.norm_nit($${vals.length}), nit_original = $${vals.length}`);
+    } else {
+      sets.push(`${col} = $${vals.length}`);
+    }
   }
   if (!sets.length) return getProveedorPorNit(nit);
 
@@ -186,11 +210,11 @@ async function getProyectoPorCodigo(codigo) {
 async function crearProyecto(datos) {
   const r = await pg.one(
     `INSERT INTO erp.proyectos (codigo, nombre, tipo, ciudad, departamento, zona, activo, notas)
-     VALUES ($1, COALESCE($2, $1), $3, $4, $5, $6, $7, $8)
+     VALUES ($1, COALESCE($2, $1), $3, $4, $5, erp.zona_canonica($6), $7, $8)
      RETURNING ${PROYECTO_COLS}`,
     [
       datos.codigo ?? datos.nombre, datos.descripcion ?? null, datos.tipo ?? null,
-      datos.ciudad ?? null, datos.departamento ?? null, datos.zona ?? null,
+      datos.ciudad ?? null, datos.departamento ?? null, fk(datos.zona),
       datos.activo === undefined ? true : !!datos.activo, datos.notas ?? null,
     ]);
   return mapProyecto(r);
@@ -207,7 +231,8 @@ async function actualizarProyecto(id, cambios) {
   for (const [clave, valor] of Object.entries(cambios)) {
     const col = MAPA[clave];
     if (!col || sets.some(s => s.startsWith(col + ' '))) continue;
-    vals.push(valor);
+    // zona tiene llave foránea: la cadena vacía del formulario va como NULL.
+    vals.push(col === 'zona' ? fk(valor) : valor);
     sets.push(`${col} = $${vals.length}`);
   }
   if (!sets.length) return getProyecto(id);

@@ -21,7 +21,8 @@
     "corregir-listas": "node src/scripts/corregir-listas.js",
     "db:verificar": "node src/scripts/verificar-migracion.js",
     "revisar-proyectos": "node src/scripts/revisar-proyectos.js",
-    "plan-proyectos": "node src/scripts/plan-proyectos.js"
+    "plan-proyectos": "node src/scripts/plan-proyectos.js",
+    "db:clonar": "node src/scripts/db-clonar.js"
   },
   "keywords": [],
   "author": "",

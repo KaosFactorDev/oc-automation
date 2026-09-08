@@ -2,7 +2,13 @@
 node_modules/
 
 # Variables de entorno con secretos
+# .env y CUALQUIER variante: respaldos, .env.local, .env.produccion.
+# El patrón ".env" a secas solo cubre el nombre exacto, así que un
+# ".env.respaldo-20260903" quedaba fuera y se podía commitear con los
+# secretos dentro.
 .env
+.env.*
+!.env.example
 
 # Base de datos SQLite (runtime)
 data/local.db
