@@ -32,9 +32,9 @@ async function onSolicitud(asunto, rutaAdjunto) {
 }
 
 async function onOCGenerada(resultado, meta = {}) {
-  // NUEVO FLUJO: ya no se genera OC automáticamente desde correo.
-  // El resultado se registra como Requerimiento en SharePoint (estado 'pendiente')
-  // para que el usuario lo gestione desde la consola.
+  // Los correos no generan OC automáticamente: el resultado se registra como
+  // Requerimiento en Postgres (estado 'pendiente') para que el usuario lo
+  // gestione desde la consola. El PDF de respaldo sí va al Drive de SharePoint.
   try {
     const { item, duplicado, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, meta);
     if (duplicado) {

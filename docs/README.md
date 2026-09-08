@@ -14,13 +14,18 @@ Postgres autoalojada. Empieza por acá.
 | Caché SQLite retirado | **Hecho** — `db.js` de 737 a 124 líneas |
 | Control de Costos: de libro Excel a vista SQL | **Hecho** — `erp.vw_gastos` + 3 resúmenes |
 | Retirar los CSV | **Hecho** — archivados en `data/_archivo-csv-2026/` |
-| Postgres en el VPS y corte | **Pendiente** — la única que falta |
+| Postgres en el VPS y corte | **Hecho** — principios de septiembre de 2026 |
+
+La migración está terminada: producción corre contra el Postgres del VPS, que es
+la fuente de verdad, y las once listas de SharePoint quedaron congeladas como
+respaldo del corte. Lo que sigue de este documento es el registro de qué se
+migró y con qué criterio.
 
 Las cinco fuentes de datos originales están resueltas:
 
 | Fuente original | Hoy |
 |---|---|
-| 11 listas de SharePoint | Migradas. La aplicación no las lee |
+| 11 listas de SharePoint | Migradas y congeladas. La aplicación no las lee |
 | `Control Costos.xlsx` | Vista SQL; el libro es un reporte que se regenera |
 | `compras.csv` | Archivado |
 | `proveedores_depurados_final.csv`, `tabla_proyectos.csv` | Archivados |
@@ -79,11 +84,15 @@ Para levantar la base en un equipo nuevo, con Docker Desktop corriendo:
 
 ```bash
 # En .env: POSTGRES_PASSWORD, ERP_DB_PASSWORD (solo letras y dígitos),
-#          PGHOST/PGPORT/PGUSER, ERP_DB_*
-npm run db:reset      # levanta, migra y asigna la contraseña del rol de la app
-npm run db:importar   # carga las 11 listas desde SharePoint
-npm run dev           # la consola, leyendo de Postgres
+#          PGHOST/PGPORT/PGUSER, ERP_DB_*, VPS_SSH
+npm run db:reset          # levanta, migra y asigna la contraseña del rol de la app
+npm run db:clonar -- --si # trae los datos del VPS (sin --si solo dice qué haría)
+npm run dev               # la consola, leyendo de Postgres
 ```
+
+`db:importar` sigue existiendo y lee las listas de SharePoint, pero ya no es el
+camino: esas listas están congeladas en la foto del corte. Los datos de verdad
+están en el VPS, y son datos reales de la empresa —tratarlos con esa cabeza.
 
 El detalle de cada variable está en `.env.example`, y el de cada comando en
 [operacion-base-de-datos.md](operacion-base-de-datos.md).
