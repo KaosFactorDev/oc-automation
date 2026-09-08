@@ -6,15 +6,14 @@ Desde julio 2026 el sistema está **centralizado en un VPS Linux con Docker**: u
 
 > **¿Vas a trabajar en el código?** Lee primero [CONTRIBUTING.md](CONTRIBUTING.md) — flujo de ramas, convención de commits y entorno local. Ten presente que **un merge a `main` despliega a producción de inmediato**.
 
-> **Migración a Postgres: hecha en código, pendiente el corte.** Las cinco
-> fuentes de datos —once listas de SharePoint, el libro `Control Costos.xlsx`,
-> tres CSV y el caché SQLite— están en Postgres, y la aplicación lee y escribe
-> ahí. Comprobado sustituyendo las funciones de listas por funciones que lanzan:
-> las 12 rutas de datos respondieron completas y ninguna se llamó.
+> **Migración a Postgres: hecha.** El corte se hizo a principios de septiembre
+> de 2026. Las cinco fuentes de datos —once listas de SharePoint, el libro
+> `Control Costos.xlsx`, tres CSV y el caché SQLite— están en Postgres, la base
+> corre en el VPS y la aplicación lee y escribe ahí. Las listas de SharePoint
+> quedaron congeladas: son el respaldo del corte y ya nadie las lee.
 >
-> Lo que falta es **levantar la base en el VPS y hacer el corte**. Hasta
-> entonces, producción sigue corriendo la versión anterior contra SharePoint. El
-> procedimiento, los comandos y el esquema están en [docs/](docs/README.md).
+> El esquema, los comandos de operación y el detalle de qué se migró están en
+> [docs/](docs/README.md).
 >
 > Para trabajar en local sin ensuciar producción: `MODO_PRUEBA=1` en el `.env`.
 
@@ -48,7 +47,7 @@ Correos (Outlook / abastecimiento@civiltechic.com)
          │    ├─ leerRequerimiento.js    ← Extracción desde Excel adjunto
          │    ├─ leerRequerimientoPDF.js ← Extracción desde PDF/imagen (Gemini AI)
          │    └─ consultaProveedor.js    ← Proveedor y precio sugerido por ítem
-         └─ requerimientos.js       ← Crea el Requerimiento 'pendiente' en SharePoint
+         └─ requerimientos.js       ← Crea el Requerimiento 'pendiente' en Postgres
 
 Consola web (http://localhost:3001)
          │
@@ -64,7 +63,7 @@ Consola web (http://localhost:3001)
          ├─ contador.js             ← Numeración consecutiva OC / OS
          ├─ configApp.js            ← Configuración de la aplicación
          ├─ consultaProveedor.js    ← Comparativa de proveedores
-         ├─ controlCostos.js        ← Registro de gastos en "Control Costos.xlsx"
+         ├─ controlCostos.js        ← Genera el reporte "Control Costos.xlsx" desde vw_gastos
          ├─ tesoreriaClient.js      ← Solicitudes de pago hacia Cash_Flow
          ├─ ocTemplate.js           ← Documentos OC (HTML + Excel)
          ├─ osTemplate.js           ← Documentos OS (HTML + Excel)
@@ -108,23 +107,25 @@ gana).
 | `Remisiones` | `remisiones` | Remisiones generadas |
 | `MovimientosInventario` | `movimientos_inventario` | Entradas, salidas y devoluciones de almacén |
 | `UsuariosERP` | `usuarios` | Usuarios con acceso al ERP y sus roles |
-| `ConfiguracionApp` | *(sin caché)* | Logo, emisor, firmante, IVA y observaciones por defecto |
-| *(local)* | `consecutivos_proyecto` | Contador atómico de consecutivos por proyecto |
-| *(local)* | `mapeo_proyectos_tesoreria` | Última equivalencia proyecto ERP ↔ proyecto de tesorería |
-| *(local)* | `sesiones` | Sesiones activas (solo local, nunca va a SharePoint) |
-| *(local)* | `sync_state` | Última sincronización y conteo por lista |
+| `ConfiguracionApp` | `configuracion` | Logo, emisor, firmante, IVA y observaciones por defecto |
+| *(sin lista)* | `contadores` | Último número emitido de OC y OS; nunca decrece |
+| *(local, SQLite)* | `sesiones` | Sesiones activas (solo de esa instalación) |
+| *(local, SQLite)* | `mapeo_proyectos_tesoreria` | Última equivalencia proyecto ERP ↔ proyecto de tesorería |
 
-Las listas `OrdenesServicio`, `HistorialPrecios`, `MovimientosInventario` y `UsuariosERP` se
-**autoaprovisionan**: si no existen en el sitio, el servidor las crea al arrancar (ver
-`asegurarLista*()` en `servidor-cotizaciones.js`). Las demás se crean con
-`src/scripts/crear-listas.js`.
+El esquema ya no se crea al arrancar: vive en `supabase/migrations` y se aplica con
+`npm run db:push`. El servidor no crea ni modifica estructura —ni en Postgres ni en
+SharePoint—, que es lo que antes hacían `asegurarLista*()` y `crear-listas.js` en cada
+arranque.
 
-Los catálogos (`historial_precios`, `proveedores`, `insumos`, `proyectos`, `usuarios`) usan
-columnas tipadas; los documentos (`requerimientos`, `ordenes_compra`, `ordenes_servicio`,
-`remisiones`, `movimientos_inventario`) guardan un JSON en la columna `data` con índices
-`json_extract`, para no atarse a un esquema rígido que cambia seguido.
+Todo va en columnas tipadas, catálogos y documentos por igual. Los ítems de cada documento
+son tablas aparte (`orden_compra_items`, `orden_servicio_items`, `remision_items`,
+`requerimiento_items`) en vez del JSON que se guardaba en un solo campo, así que una
+cantidad o un precio se puede consultar y sumar en SQL.
 
-> **Campo NIT en SharePoint:** la lista `Proveedores` usa el campo `razonSocial` para el nombre legal. La columna `nombre` es la representación local en SQLite.
+> **Campo NIT:** `proveedores.nit` guarda el NIT normalizado por `erp.norm_nit()` y es la
+> llave; `nit_original` conserva lo que se escribió. Las tres tablas que lo referencian
+> —órdenes de compra, de servicio e historial de precios— lo hacen con `ON UPDATE CASCADE`,
+> así que corregir un NIT mal digitado repunta sus documentos en la misma sentencia.
 
 ---
 
@@ -136,9 +137,8 @@ A partir de mayo 2026, el ERP implementa **autenticación centralizada con Micro
 
 - **Flujo OAuth 2.0**: Los usuarios inician sesión con su cuenta corporativa Microsoft (correo de Civiltech).
 - **Aprobación de usuarios**: Solo usuarios registrados y aprobados por un administrador pueden acceder.
-- **Almacenamiento dual**: Registro en SharePoint (fuente de verdad) + SQLite (caché local para velocidad).
-- **Sesiones seguras**: Cookies HttpOnly, SameSite=Lax, TTL de 8 horas con renovación automática.
-- **Auditoría**: Registro de login, logout y cambios de permisos en SharePoint.
+- **Quién autoriza**: Microsoft autentica, pero el permiso lo da la tabla `usuarios` de Postgres (`activo = true`). Un correo válido de Civiltech que no esté aprobado ahí no entra.
+- **Sesiones seguras**: Cookies HttpOnly, SameSite=Lax, TTL de 8 horas con renovación automática. Viven en el SQLite local, no en memoria, así que un reinicio no saca a nadie.
 
 **Usuario administrador por defecto**: El correo configurado en `.env` como `USUARIO_EMAIL` se registra automáticamente como admin la primera vez que el servidor arranca.
 
@@ -155,7 +155,7 @@ Acceder a **Configuración ERP → Usuarios** (solo para administradores):
 ## Características destacadas
 
 ### Consecutivo automático por proyecto
-Cada requerimiento recibe un consecutivo oficial asignado atómicamente por el sistema (`consecutivoSistema`), diferente al número que el usuario escribe en el formulario de solicitud. El contador vive en SQLite (`consecutivos_proyecto`) y es independiente por proyecto, garantizando unicidad incluso con múltiples usuarios simultáneos.
+Cada requerimiento recibe un consecutivo oficial asignado atómicamente por el sistema (`consecutivoSistema`), diferente al número que el usuario escribe en el formulario de solicitud. El contador vive en Postgres (`proyectos.ultimo_consecutivo_req`, emitido por `erp.siguiente_consecutivo_req()`) y es independiente por proyecto: el número se reserva dentro de la misma transacción que escribe el requerimiento, así que dos usuarios simultáneos no pueden recibir el mismo.
 
 ### Marca de agua en borradores
 Los documentos OC y OS en estado *borrador* muestran una marca de agua diagonal "NO APROBADO" al imprimir o exportar a PDF, eliminada automáticamente al aprobar el documento.
@@ -194,7 +194,7 @@ En **1.6 Inventarios → Análisis IA** se puede pegar la tabla de rendimientos 
 
 ## Ciclo de vida de los documentos
 
-Conocer estos estados es lo más importante antes de tocar el backend: cada transición dispara efectos secundarios en SharePoint, en Control Costos y —opcionalmente— en inventario.
+Conocer estos estados es lo más importante antes de tocar el backend: cada transición dispara efectos secundarios en Postgres, en el Drive de SharePoint y —opcionalmente— en inventario.
 
 ### Orden de compra
 
@@ -204,10 +204,12 @@ borrador ──aprobar──> aprobada ──pagar+entregar──> finalizada
     └──────anular────────┴──> anulada
 ```
 
-- **aprobar** — es la transición pesada. Asigna el número consecutivo real (`contador.js`; **el borrador no tiene número**), y en segundo plano: registra el gasto en `Control Costos.xlsx`, alimenta `HistorialPrecios` con los precios de cada ítem (base + IVA), y recalcula el estado del requerimiento de origen.
-- **pagar** / **entregar** — son banderas independientes, no estados. Cuando ambas quedan en verdadero sobre una OC `aprobada`, el estado pasa solo a `finalizada`. Ambas actualizan la fila en Control Costos.
-- **entregar** — además genera la remisión, sube el PDF a SharePoint y, si el usuario lo marca en la UI (`autoEntrada` / `autoSalida`), crea y aprueba de una vez los movimientos de inventario de la OC.
+- **aprobar** — es la transición pesada. El número consecutivo lo emite Postgres (`erp.siguiente_numero_oc()`) en la misma transacción que escribe la orden, y `contador.js` solo le da formato (**el borrador no tiene número**). Además alimenta `historial_precios` con los precios de cada ítem (base + IVA) y recalcula el estado del requerimiento de origen.
+- **pagar** / **entregar** — son banderas independientes, no estados. Cuando ambas quedan en verdadero sobre una OC `aprobada`, el estado pasa solo a `finalizada`.
+- **entregar** — además genera la remisión, sube el PDF al Drive de SharePoint y, si el usuario lo marca en la UI (`autoEntrada` / `autoSalida`), crea y aprueba de una vez los movimientos de inventario de la OC.
 - **anular** — propaga la anulación a las remisiones asociadas.
+
+El gasto ya no se registra en ninguna transición: se **deriva** de la vista `erp.vw_gastos`, que lo calcula desde las órdenes aprobadas y las salidas de almacén. Así una OC anulada desaparece del reporte sola, que es lo que el libro Excel no hacía.
 
 ### Orden de servicio
 
@@ -217,7 +219,7 @@ borrador ──aprobar──> aprobada ──pagar / cumplir──> finalizada
     └──────anular────────┴──> anulada
 ```
 
-Mismo patrón: el número se asigna al aprobar, el gasto va a Control Costos y el PDF se sube al marcarse pagada.
+Mismo patrón: el número lo emite `erp.siguiente_numero_os()` al aprobar y el PDF se sube al marcarse pagada.
 
 ### Requerimiento
 
@@ -225,7 +227,7 @@ Mismo patrón: el número se asigna al aprobar, el gasto va a Control Costos y e
 
 ### Movimiento de inventario
 
-Las entradas, salidas y devoluciones se crean agrupadas en un lote (`batchId` con prefijo `BORR-EA-`, `BORR-SA-` o `BORR-DEV-`) y nacen como **borrador**: no afectan el stock. Al aprobar el documento recibe su referencia definitiva (`docRef`) y `estadoDoc: 'aprobado'`, y solo entonces cuenta. Las salidas aprobadas además registran su valor en Control Costos como "Salida Almacén". Una devolución se guarda como salida con la nota `DEVOLUCION:<ref>`.
+Las entradas, salidas y devoluciones se crean agrupadas en un lote (`batchId` con prefijo `BORR-EA-`, `BORR-SA-` o `BORR-DEV-`) y nacen como **borrador**: no afectan el stock. Al aprobar el documento recibe su referencia definitiva (`docRef`) y `estadoDoc: 'aprobado'`, y solo entonces cuenta. Las salidas aprobadas entran al reporte de gastos como "Salida Almacén", que `erp.vw_gastos` deriva sin escribir nada. Una devolución se guarda como salida con la nota `DEVOLUCION:<ref>`.
 
 ---
 
@@ -285,8 +287,6 @@ Copiar `.env.example` a `.env` y completar los valores. Las credenciales corpora
 solo es necesario actualizar los campos personales:
 
 ```env
-# ── Rutas a las bases de datos (fallback CSV — usar solo si SQLite está vacío) ──
-
 # ── Microsoft Graph API ───────────────────────────────────────────────────────
 TENANT_ID=<azure-tenant-id>
 CLIENT_ID=<azure-client-id>
@@ -449,10 +449,12 @@ En el VPS esto no aplica: ver [Actualizaciones — despliegue automático](#actu
 
 A partir de julio 2026 el ERP se centraliza en un VPS Linux: una sola consola web accesible por navegador para todos los usuarios (ya no se ejecuta localmente en cada equipo), y el procesamiento automático de correos corre dentro de un contenedor con cron en vez de la Tarea Programada de Windows.
 
-`docker-compose.yml` define dos servicios que comparten la misma imagen (`Dockerfile`):
+`docker-compose.yml` define tres servicios; `app` y `mailer` comparten la misma imagen
+(`Dockerfile`):
 
 | Servicio | Rol |
 |----------|-----|
+| `db` | Postgres 17, la fuente de verdad. **No publica puertos**: vive en la red interna `datos` y solo lo alcanzan `app` y `mailer`. Los datos van al volumen `pgdata`, que Docker gestiona aparte del `rsync` del despliegue. |
 | `app` | Consola web (`src/servidor-cotizaciones.js`), una sola instancia. Las sesiones viven en SQLite, no en memoria, así que soporta múltiples usuarios concurrentes sin cambios. |
 | `mailer` | Ejecuta `node index.js` con **supercronic** según `deploy/crontab` — mismo horario que la Tarea Programada de Windows (L-V, cada 5 min, 6:00am–6:55pm hora de Colombia). |
 
@@ -669,7 +671,7 @@ oc-automation/
 │   ├── consultaProveedor.js          ← Búsqueda de proveedor óptimo (historial + zona)
 │   ├── contador.js                   ← Numeración consecutiva OC / OS
 │   ├── configApp.js                  ← Configuración persistente de la app
-│   ├── controlCostos.js              ← Registro de gastos en "Control Costos.xlsx"
+│   ├── controlCostos.js              ← Genera el reporte "Control Costos.xlsx" desde vw_gastos
 │   ├── tesoreriaClient.js            ← Cliente de tesorería (Cash_Flow / Pagos Diarios)
 │   ├── ocTemplate.js                 ← Plantilla de documento OC (HTML + Excel)
 │   ├── osTemplate.js                 ← Plantilla de documento OS (HTML + Excel)
@@ -686,7 +688,7 @@ oc-automation/
 │   └── categorizar-insumos.html      ← Herramienta suelta, sin ruta que la sirva
 │
 └── data/                             ← Bind mount en el VPS; persiste entre despliegues
-    ├── local.db                      ← SQLite caché (generado automáticamente)
+    ├── local.db                      ← SQLite: sesiones y mapeo de tesorería (se genera solo)
     ├── plantilla_oc.xlsx             ← Plantilla Excel para OCs
     └── CT-ADMIN-FO-002_...xlsx       ← Formato de solicitud de requerimiento
 ```
@@ -733,14 +735,11 @@ Postgres intacto.
 | "Pantalla de login infinita" | Usuario no aprobado aún | Administrador debe aprobar usuario en Configuración |
 | "Sesión expirada" | Cookie expiró después de 8h | Hacer logout y login de nuevo |
 | La página no carga | Consola CMD cerrada | Volver a ejecutar `iniciar-erp.bat` |
-| Los datos no aparecen | Sin conexión a internet | Verificar conectividad — datos en SharePoint |
-| Buscador de Precios vacío | Lista `HistorialPrecios` vacía en SQLite | Esperar sync (2 min) o forzar con `GET /sync` |
-| Precios sugeridos desactualizados | Cache activo (60 seg) | Esperar 1 min y recargar, o reiniciar consola |
-| Proyectos no aparecen en desplegable | SQLite desincronizado | Forzar sincronización con `GET /sync` |
+| Los datos no aparecen | La base no está arriba o la app no la alcanza | `docker compose ps` y `docker compose logs app`; ver [operación](docs/operacion-base-de-datos.md) |
+| "permission denied for table" | El rol `erp_app` perdió los permisos del esquema | Reaplicar los `GRANT` de la migración `20260828120500` (pasa al recrear el esquema: se van con él) |
 | Tailscale Funnel no funciona | Tailscale servicio no activo | Instalar Tailscale o reiniciar el servicio |
 | URL de Tailscale cambia | Hostname cambió | Actualizar Azure AD y .env con nueva URL |
 | No aparece la columna "Tesorería" en 1.3 | Falta alguna variable `TESORERIA_*` | Completar el `.env` y verificar con `node src/scripts/verificar-tesoreria.js` |
-| Se creó un usuario/admin duplicado en SharePoint | El servidor arrancó con `data/` vacío | Restaurar el `data/local.db` real antes de levantar (ver Primer despliegue) |
 | Falla la extracción con IA | Modelo de Gemini retirado por Google | Dejar `GEMINI_MODEL=gemini-flash-latest` o fijar una versión vigente |
 | Una salida de almacén no descuenta stock | El documento sigue en borrador | Aprobar el documento en 1.6 Inventarios |
 
@@ -750,15 +749,15 @@ Postgres intacto.
 
 - **El procesamiento de correos corre en un solo lugar** (el contenedor `mailer` del VPS). Levantarlo en paralelo en otra máquina duplicaría requerimientos.
 - **Scripts de `src/scripts/`**: son de una sola ejecución y varios son destructivos. No correrlos contra producción sin entender qué borran.
-- **Archivos CSV en `data/`**: son fallback de último recurso. En operación normal, todos los datos vienen de SQLite (sincronizado desde SharePoint). Mantenerlos como respaldo pero no como fuente principal.
-- **SharePoint es la fuente de verdad**; SQLite es caché. Toda escritura nueva debe ir primero a SharePoint y después reflejarse en SQLite (`localDb.upsertDocumento(...)`), porque no hay una capa que lo garantice sola.
+- **Los tres CSV se retiraron.** Quedan archivados en `data/_archivo-csv-2026/` como referencia histórica de la carga inicial; ningún módulo los lee y el deploy ni siquiera los sube al VPS.
+- **Postgres es la fuente de verdad**, y todo el SQL vive en `src/repo/`. Una escritura nueva se hace ahí, no repartida por el servidor, y no hay que reflejarla en ningún otro lado: no queda una segunda copia que pueda mentir.
 - **No hay pruebas automatizadas.** `npm test` no está implementado y `src/test.js` es un script suelto de exploración. Los cambios se validan a mano contra la consola.
 
 ---
 
 ## Gestión de proveedores
 
-La lista `Proveedores` en SharePoint es el catálogo oficial. Para mantenerla actualizada:
+La tabla `proveedores` de Postgres es el catálogo oficial. Para mantenerla actualizada:
 
 - **Inscribir proveedor**: Configuración ERP → formulario con NIT, nombre, zona, municipio, teléfono, correo.
 - **Detectar sin registrar**: botón "Detectar sin registrar" en la sección de proveedores. Cruza el historial de OCs y OSs contra el catálogo y muestra los que aún no están inscritos.

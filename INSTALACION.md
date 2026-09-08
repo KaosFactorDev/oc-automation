@@ -74,8 +74,9 @@ de alta paso a paso.
 - Un VPS Linux (Debian/Ubuntu) con acceso SSH.
 - El `.env` real con las credenciales corporativas (Azure, SharePoint, Gemini) — el mismo que ya
   usa el equipo central, no se crea uno nuevo.
-- El archivo `data/local.db` del equipo central (caché SQLite con usuarios y consecutivos). Es
-  importante llevarlo también, no solo el `.env` — más abajo se explica por qué.
+- Un respaldo de la base Postgres si se está reponiendo un servidor existente
+  (`respaldos/erp-AAAA-MM-DD.sql.gz`). En un servidor nuevo, `data/local.db` se genera solo:
+  guarda las sesiones y el mapeo de tesorería, nada que haya que trasladar.
 
 ### Paso 1 — Instalar Docker en el VPS
 
@@ -153,34 +154,58 @@ no como root):
 sudo chown -R 10001:10001 data
 ```
 
-> **Por qué copiar también `data/local.db` y ajustar permisos:** el código decide si un usuario ya
-> existe (para no crear un admin duplicado al primer arranque) consultando el **caché SQLite
-> local**, no la lista `UsuariosERP` de SharePoint directamente. La carpeta `data/` se monta
-> directo desde el proyecto (`./data:/app/data`) — no es un volumen aparte — así que si arranca sin
-> `local.db`, o el contenedor no puede escribir ahí por permisos, el primer arranque del servidor
-> —o el primer login— puede crear un usuario/admin **duplicado** en SharePoint. Llevar el
-> `local.db` ya poblado y darle el `chown` correcto evita ese arranque en frío.
+> **Por qué ajustar los permisos:** la carpeta `data/` se monta directo desde el proyecto
+> (`./data:/app/data`), no es un volumen aparte. Si el contenedor no puede escribir ahí, no puede
+> crear ni abrir `local.db` y **nadie logra iniciar sesión**: la sesión se guarda en ese archivo.
+>
+> El admin inicial ya no depende de esto. `bootstrapAdmin()` pregunta a Postgres
+> (`repoCatalogos.contarUsuarios()`) si la tabla `usuarios` está vacía, así que un `data/` en
+> blanco no puede provocar un admin duplicado como pasaba cuando la decisión salía del caché.
 
-### Paso 4 — Levantar los servicios
+### Paso 4 — Preparar la base de datos
+
+Los datos del ERP viven en Postgres, en el servicio `db` del mismo `docker-compose.yml`. El
+`.env` tiene que traer `POSTGRES_PASSWORD` y las cinco `ERP_DB_*`: sin la primera, `docker
+compose` se niega a arrancar (está declarada obligatoria a propósito, para que la base no quede
+sin contraseña por olvido).
+
+```bash
+docker compose up -d db          # solo la base
+npm run db:esperar               # aguarda a que acepte conexiones
+npm run db:push                  # aplica supabase/migrations
+npm run db:clave                 # asigna la contraseña del rol erp_app
+```
+
+Si se está reponiendo un servidor, en vez de migrar sobre vacío hay que restaurar el respaldo.
+El procedimiento —y el detalle de por qué los permisos del rol se van con el esquema— está en
+[docs/operacion-base-de-datos.md](docs/operacion-base-de-datos.md).
+
+### Paso 5 — Levantar los servicios
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-Esto levanta dos servicios (ver detalle en `README.md`):
+Esto levanta tres servicios (ver detalle en `README.md`):
+- `db` — Postgres 17, la fuente de verdad. No publica puertos: solo lo alcanzan `app` y `mailer`
+  por la red interna `datos`.
 - `app` — la consola web (equivalente a `iniciar-erp.bat`, pero centralizada para todos). Se une
   a la red `edge` creada en el Paso 2 para que el reverse proxy compartido la pueda alcanzar.
 - `mailer` — el procesamiento automático de correos (equivalente a la Tarea Programada de
   Windows / `instalar-tarea.ps1`), mismo horario laboral (L-V, 6:00am–6:55pm).
 
-### Paso 5 — Verificar
+### Paso 6 — Verificar
 
 ```bash
-docker compose ps                # los 2 servicios deben verse "Up"
-docker compose logs -f app       # confirma que conectó con SharePoint sin errores
+docker compose ps                # los 3 servicios deben verse "Up" (db, healthy)
+docker compose logs -f app       # confirma a qué base se conectó, sin errores
 docker compose logs -f mailer    # confirma que el cron quedó programado
 ```
+
+Y antes de darlo por bueno: dejar el respaldo nocturno en el cron del host (sección
+"Respaldos" de [docs/operacion-base-de-datos.md](docs/operacion-base-de-datos.md)). Autoalojando
+la base, un disco perdido sin respaldo se lleva las órdenes de compra de la empresa.
 
 Abrir `http://<IP-del-VPS>/` en el navegador — debe cargar la consola.
 
