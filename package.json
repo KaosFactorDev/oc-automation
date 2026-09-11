@@ -22,7 +22,9 @@
     "db:verificar": "node src/scripts/verificar-migracion.js",
     "revisar-proyectos": "node src/scripts/revisar-proyectos.js",
     "plan-proyectos": "node src/scripts/plan-proyectos.js",
-    "db:clonar": "node src/scripts/db-clonar.js"
+    "db:clonar": "node src/scripts/db-clonar.js",
+    "kaos:sync": "node src/scripts/kaos-sync.js",
+    "kaos:diff": "node src/scripts/kaos-sync.js --solo-informe"
   },
   "keywords": [],
   "author": "",
