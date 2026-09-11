@@ -1215,9 +1215,10 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
             La ruta POST /proyectos responde 405 con este mismo motivo.
           -->
           <div style="font-size:11px;color:var(--txt-3);background:var(--bg-2,#f6f6f6);border:1px solid var(--border);border-radius:4px;padding:10px 12px;margin-top:10px;line-height:1.5">
-            Los proyectos se crean en <strong>KAOS</strong>, no acá. Este panel es de consulta:
-            desde el ERP se puede activar o inactivar un proyecto para los selectores, pero no
-            crear ni renombrar.
+            Los proyectos se crean y se administran en <strong>KAOS</strong>, no acá. Este panel
+            es de consulta: su estado llega por la sincronización. Lo único que sigue siendo del
+            ERP son los <strong>centros de costo</strong> —BODEGA CIVILTECH, SST, EQUIPOS GT—,
+            que no existen en KAOS y por eso conservan su botón de activar o inactivar.
           </div>
           <div id="msg-proy" style="font-size:11px;margin-top:6px;min-height:16px"></div>
 
@@ -5276,7 +5277,11 @@ async function cargarProyectosAdmin(){
             <div style="font-size:11px;color:var(--txt-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.nombre || '')}${p.zona ? ' · ' + esc(p.zona) : ''}</div>
           </div>
           <span class="tag ${activo ? 'tag-aprobada' : 'tag-anulada'}" style="font-size:10px">${activo ? 'Activo' : 'Inactivo'}</span>
-          <button class="btn btn-ghost btn-sm" onclick="toggleProyecto('${esc(p.id)}', ${!activo})">${activo ? 'Inactivar' : 'Activar'}</button>
+          ${p.origen === 'kaos'
+            // Su estado lo manda KAOS: el botón acá haría un cambio que la
+            // siguiente sincronización deshace sin avisar.
+            ? `<span style="font-size:10px;color:var(--txt-3)" title="${esc(p.kaosCode || '')}">Se administra en KAOS</span>`
+            : `<button class="btn btn-ghost btn-sm" onclick="toggleProyecto('${esc(p.id)}', ${!activo})">${activo ? 'Inactivar' : 'Activar'}</button>`}
         </div>`;
     }).join('');
   }catch(e){

@@ -165,7 +165,7 @@ async function actualizarProveedor(nit, cambios) {
 
 const PROYECTO_COLS = `
   id, codigo, nombre, tipo, ciudad, departamento, zona, activo,
-  notas, requiere_revision, sp_id`;
+  notas, requiere_revision, origen, kaos_code, sp_id`;
 
 function mapProyecto(r) {
   return {
@@ -183,6 +183,11 @@ function mapProyecto(r) {
     activo:           r.activo,
     notas:            r.notas,
     requiereRevision: r.requiere_revision,
+    // Quién manda sobre esta fila. 'kaos' = la administra KAOS y el ERP solo la
+    // consume; 'local' = de la empresa y no existe allá (centros de costo);
+    // 'huerfano' = la creó un documento antes de que se cerrara esa puerta.
+    origen:           r.origen,
+    kaosCode:         r.kaos_code,
     sp_id:            r.sp_id,
   };
 }

@@ -1614,6 +1614,20 @@ const servidor = http.createServer(async (req, res) => {
         const activo = body.activo === undefined ? null : !!body.activo;
         const item = await repoCatalogos.getProyecto(mToggle[1]);
         if (!item) return json({ error: 'Proyecto no encontrado' }, 404);
+
+        // Un proyecto de KAOS no se activa ni se inactiva desde acá: su estado
+        // lo manda KAOS, y la próxima sincronización pisaría el cambio sin
+        // avisar. Peor que no dejar hacerlo sería dejarlo y que se deshaga solo.
+        //
+        // Los de origen local —centros de costo como BODEGA CIVILTECH, que no
+        // existen en KAOS— sí se administran acá: es el único sitio donde se
+        // puede.
+        if (item.origen === 'kaos') {
+          return json({
+            error: `"${item.codigo}" se administra en KAOS. Su estado se cambia allá y llega por la sincronización.`,
+          }, 405);
+        }
+
         // Sin body.activo, alterna el estado actual.
         const nuevo = activo === null ? !item.activo : activo;
         await repoCatalogos.actualizarProyecto(mToggle[1], { activo: nuevo });
