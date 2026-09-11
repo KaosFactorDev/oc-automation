@@ -25,7 +25,8 @@
     "db:clonar": "node src/scripts/db-clonar.js",
     "kaos:sync": "node src/scripts/kaos-sync.js",
     "kaos:diff": "node src/scripts/kaos-sync.js --solo-informe",
-    "kaos:ligar": "node src/scripts/kaos-ligar.js"
+    "kaos:ligar": "node src/scripts/kaos-ligar.js",
+    "kaos:aplicar": "node src/scripts/kaos-aplicar.js"
   },
   "keywords": [],
   "author": "",

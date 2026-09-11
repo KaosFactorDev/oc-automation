@@ -116,4 +116,87 @@ async function discrepancias() {
   return { ligados, porNombre, soloKaos, soloErp, sinZona };
 }
 
-module.exports = { volcar, marcaGuardada, guardarMarca, discrepancias };
+// ─────────────────────────────────────────────────────────────────────────────
+// El espejo alimenta el catálogo
+// ─────────────────────────────────────────────────────────────────────────────
+// Tres reglas, y las tres importan:
+//
+//  1. `codigo` NUNCA se toca en una fila que ya existía. Es lo que imprimen los
+//     PDF y lo que `erp.vw_gastos` muestra por JOIN — o sea que pisarlo
+//     reescribiría cómo se ve todo el pasado de esa obra en el control de
+//     costos. Los proyectos viejos conservan su código de siempre.
+//
+//  2. La zona se valida contra `erp.zonas`. `erp.zona_canonica()` no valida
+//     —devuelve tal cual lo que le den— así que una zona que KAOS tuviera y el
+//     ERP no rompería la llave foránea. Lo que no calce queda en NULL.
+//
+//  3. `activo` sale del `estado` de KAOS. Es el dueño del catálogo: si allá la
+//     obra se cerró, acá deja de ofrecerse para documentos nuevos.
+
+const CAMPOS_DESDE_KAOS = `
+  nombre       = k.nombre,
+  ciudad       = k.ciudad,
+  departamento = k.departamento,
+  zona         = (SELECT z.zona FROM erp.zonas z
+                   WHERE erp.norm(z.zona) = erp.norm(k.zona)),
+  activo       = (k.estado = 'Activo'),
+  updated_at   = now()`;
+
+/**
+ * Vuelca el espejo sobre el catálogo.
+ *
+ * @param {boolean} opts.aplicar  false (por defecto) solo cuenta qué haría.
+ */
+async function aplicar({ aplicar: hacerlo = false } = {}) {
+  return pg.tx(async (c) => {
+    // Los ya ligados: se actualizan. `codigo` queda intacto.
+    const upd = await c.query(
+      `UPDATE erp.proyectos p SET ${CAMPOS_DESDE_KAOS}
+         FROM erp.proyectos_kaos k
+        WHERE p.kaos_id = k.kaos_id AND p.origen = 'kaos'
+       RETURNING p.codigo`);
+
+    // Los de KAOS que todavía no están: entran como proyectos nuevos.
+    //
+    // `codigo` toma el NOMBRE de KAOS y no su project_code. El código corto
+    // (KP-XXXXXX) es una llave, no una etiqueta: ponerlo en `codigo` haría que
+    // el desplegable del comprador y el PDF que recibe el proveedor dijeran
+    // "KP-4T7Q2X" en vez del nombre de la obra. El KP queda en `kaos_code`,
+    // que es donde sirve.
+    const ins = await c.query(
+      `INSERT INTO erp.proyectos
+         (codigo, nombre, ciudad, departamento, zona, activo, origen, kaos_id, kaos_code)
+       SELECT k.nombre, k.nombre, k.ciudad, k.departamento,
+              (SELECT z.zona FROM erp.zonas z WHERE erp.norm(z.zona) = erp.norm(k.zona)),
+              (k.estado = 'Activo'), 'kaos', k.kaos_id, k.project_code
+         FROM erp.proyectos_kaos k
+        WHERE NOT EXISTS (SELECT 1 FROM erp.proyectos p WHERE p.kaos_id = k.kaos_id)
+          AND NOT EXISTS (SELECT 1 FROM erp.proyectos p
+                           WHERE erp.norm(p.codigo) = erp.norm(k.nombre))
+       RETURNING codigo, kaos_code`);
+
+    // Los que chocan: el nombre de KAOS ya existe en el catálogo, en una fila
+    // que no está ligada —típicamente una obra vieja e inactiva—. No se inserta
+    // (el índice único lo rechazaría) ni se liga por la fuerza: que dos filas
+    // compartan nombre es justo lo que una persona tiene que resolver.
+    const choques = await c.query(
+      `SELECT k.project_code, k.nombre, p.codigo AS fila_erp, p.activo
+         FROM erp.proyectos_kaos k
+         JOIN erp.proyectos p ON erp.norm(p.codigo) = erp.norm(k.nombre)
+        WHERE p.kaos_id IS NULL
+        ORDER BY k.nombre`);
+
+    if (!hacerlo) throw new SimulacionTerminada({
+      actualizados: upd.rowCount, insertados: ins.rows, choques: choques.rows,
+    });
+
+    return { actualizados: upd.rowCount, insertados: ins.rows, choques: choques.rows };
+  });
+}
+
+/** Aborta la transacción del ensayo llevándose el resultado. */
+class SimulacionTerminada extends Error {
+  constructor(resumen) { super('simulacion'); this.resumen = resumen; }
+}
+
+module.exports = { volcar, marcaGuardada, guardarMarca, discrepancias, aplicar, SimulacionTerminada };
