@@ -1621,18 +1621,18 @@ const servidor = http.createServer(async (req, res) => {
         const item = await repoCatalogos.getProyecto(mToggle[1]);
         if (!item) return json({ error: 'Proyecto no encontrado' }, 404);
 
-        // Un proyecto de KAOS no se activa ni se inactiva desde acá: su estado
-        // lo manda KAOS, y la próxima sincronización pisaría el cambio sin
-        // avisar. Peor que no dejar hacerlo sería dejarlo y que se deshaga solo.
+        // El ERP no cambia el estado de ningún proyecto.
         //
-        // Los de origen local —centros de costo como BODEGA CIVILTECH, que no
-        // existen en KAOS— sí se administran acá: es el único sitio donde se
-        // puede.
-        if (item.origen === 'kaos') {
-          return json({
-            error: `"${item.codigo}" se administra en KAOS. Su estado se cambia allá y llega por la sincronización.`,
-          }, 405);
-        }
+        // Los de KAOS porque su estado lo manda KAOS: un cambio acá lo desharía
+        // la siguiente sincronización, sin avisar. Y los anteriores a la
+        // conexión porque son histórico — se conservan por sus documentos, y
+        // nada nuevo debe colgarse de ellos. Lo que siga en uso se da de alta
+        // en KAOS, que es el punto de tener un solo administrador.
+        return json({
+          error: item.origen === 'kaos'
+            ? `"${item.codigo}" se administra en KAOS. Su estado se cambia allá y llega por la sincronización.`
+            : `"${item.codigo}" es un proyecto anterior a la conexión con KAOS: se conserva por su histórico y no se reactiva. Si la obra sigue en uso, dala de alta en KAOS.`,
+        }, 405);
 
         // Sin body.activo, alterna el estado actual.
         const nuevo = activo === null ? !item.activo : activo;
