@@ -1118,7 +1118,13 @@ async function obtenerProyectosSP({ soloActivos = true } = {}) {
   const rows = await repoCatalogos.getProyectos({ soloActivos });
   // El id ya no es el de SharePoint: los 23 proyectos que el import creó para
   // no perder referencias huérfanas no tienen sp_id y quedarían sin id.
-  return rows.map(r => ({ id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo }));
+  // `origen` y `kaosCode` viajan porque la pantalla de configuración decide con
+  // ellos si muestra el botón de activar/inactivar: un proyecto que administra
+  // KAOS no se toca desde acá.
+  return rows.map(r => ({
+    id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo,
+    origen: r.origen, kaosCode: r.kaosCode,
+  }));
 }
 
 // ── Servidor HTTP ─────────────────────────────────────────────────────────────
