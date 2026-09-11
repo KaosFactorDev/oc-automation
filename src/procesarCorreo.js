@@ -195,13 +195,13 @@ async function construirResultado(infoAsunto, requerimiento, opts = {}) {
   // primero, así que un acierto dudoso —que es peor, porque parece resuelto—
   // pasaba sin decir nada.
   if (!proyectoFinal) {
-    alertasGlobales.push(`⚠️ Proyecto "${codigoFinal}" no está en el catálogo. Se creará como proyecto nuevo: si es una obra que ya existe, corrige el nombre.`);
+    alertasGlobales.push(`⚠️ Proyecto "${codigoFinal}" no está en el catálogo. El requerimiento queda registrado SIN PROYECTO: hay que asignárselo a mano desde la bandeja de pendientes.`);
   } else if (!esConfiable(proyectoFinal)) {
     const cands = (proyectoFinal.candidatos || []).join(' · ');
     alertasGlobales.push(
       `⚠️ Proyecto "${codigoFinal}" no se pudo identificar con certeza` +
       (cands ? `. Se parece a: ${cands}` : '') +
-      `. Se registra con el nombre tal cual y sin zona, así que la sugerencia de proveedor usó historial nacional.`);
+      `. Queda SIN PROYECTO asignado y sin zona, así que la sugerencia de proveedor usó historial nacional. Asígnalo desde la bandeja de pendientes.`);
   } else if (!proyectoFinal.zona) {
     alertasGlobales.push(
       `ℹ️ El proyecto "${proyectoFinal.codigo}" no tiene zona asignada, así que la sugerencia de proveedor usó historial nacional. Se asigna en el panel de proyectos.`);

@@ -207,17 +207,22 @@ async function getProyectoPorCodigo(codigo) {
   return r ? mapProyecto(r) : null;
 }
 
-async function crearProyecto(datos) {
-  const r = await pg.one(
-    `INSERT INTO erp.proyectos (codigo, nombre, tipo, ciudad, departamento, zona, activo, notas)
-     VALUES ($1, COALESCE($2, $1), $3, $4, $5, erp.zona_canonica($6), $7, $8)
-     RETURNING ${PROYECTO_COLS}`,
-    [
-      datos.codigo ?? datos.nombre, datos.descripcion ?? null, datos.tipo ?? null,
-      datos.ciudad ?? null, datos.departamento ?? null, fk(datos.zona),
-      datos.activo === undefined ? true : !!datos.activo, datos.notas ?? null,
-    ]);
-  return mapProyecto(r);
+/**
+ * Retirada: el ERP no crea proyectos.
+ *
+ * El catálogo se administra en KAOS y acá solo se consume. Era el último
+ * camino de escritura que quedaba —los seis módulos de documentos dejaron de
+ * crear al vuelo, ver src/repo/_proyecto.js— y dejarla viva habría bastado
+ * para que el catálogo volviera a divergir del de KAOS.
+ *
+ * Se conserva la función, lanzando, en vez de borrarla: si alguien vuelve a
+ * llamarla, el error dice qué hacer. Una función ausente solo da
+ * "crearProyecto is not a function", que no explica nada.
+ */
+async function crearProyecto() {
+  throw new Error(
+    'El ERP no crea proyectos: el catálogo se administra en KAOS y acá solo se consume.',
+  );
 }
 
 async function actualizarProyecto(id, cambios) {

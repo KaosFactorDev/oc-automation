@@ -21,6 +21,7 @@
  */
 
 const pg = require('../pg');
+const repoProyecto = require('./_proyecto');
 
 // ── Lectura ─────────────────────────────────────────────────────────────────
 
@@ -154,22 +155,11 @@ async function porOrigenCorreo(messageId) {
  */
 async function crear(datos, items = []) {
   return pg.tx(async (c) => {
-    // El proyecto llega como texto; se resuelve al catálogo y, si no existe, se
-    // crea marcado para revisión — igual que hace el import.
-    let proyectoId = null;
-    const proyectoTxt = String(datos.proyecto || '').trim();
-    if (proyectoTxt) {
-      const hallado = await c.query(
-        'SELECT id FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)', [proyectoTxt]);
-      if (hallado.rowCount) {
-        proyectoId = hallado.rows[0].id;
-      } else {
-        const creado = await c.query(
-          `INSERT INTO erp.proyectos (codigo, nombre, activo, requiere_revision)
-           VALUES ($1, $1, false, true) RETURNING id`, [proyectoTxt]);
-        proyectoId = creado.rows[0].id;
-      }
-    }
+    // El proyecto llega como texto y se resuelve al catálogo. Si no existe, ya
+    // NO se crea: el requerimiento se guarda sin proyecto y con el texto que
+    // llegó, para que alguien se lo asigne desde la bandeja de pendientes.
+    // Ver src/repo/_proyecto.js.
+    const { proyectoId, proyectoTexto } = await repoProyecto.resolver(c, datos.proyecto);
 
     // Si el llamador ya trae un consecutivo, se respeta; si no, se emite.
     const consecutivoSistema = String(datos.consecutivoSistema || '').trim()
@@ -178,8 +168,8 @@ async function crear(datos, items = []) {
     const cab = await c.query(
       `INSERT INTO erp.requerimientos
          (consecutivo, consecutivo_sistema, proyecto_id, fecha_solicitud, solicitante,
-          estado, origen_correo_id, adjunto_url, notas)
-       VALUES ($1, $2, $3, $4, $5, COALESCE($6,'pendiente'), $7, $8, $9)
+          estado, origen_correo_id, adjunto_url, notas, proyecto_texto)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6,'pendiente'), $7, $8, $9, $10)
        RETURNING id`,
       [
         String(datos.consecutivo || ''), consecutivoSistema, proyectoId,
@@ -187,6 +177,7 @@ async function crear(datos, items = []) {
         datos.estado || null,
         String(datos.origenCorreoId || '').trim() || null,
         datos.adjuntoUrl || null, datos.notas || null,
+        proyectoTexto,
       ]);
     const id = cab.rows[0].id;
 
@@ -224,6 +215,21 @@ async function insertarItems(c, id, items) {
 }
 
 /** Actualización parcial de la cabecera, con los nombres de SharePoint. */
+/**
+ * `proyecto` va aparte del MAPA porque no es una columna: llega como texto y
+ * hay que resolverlo a la llave foránea.
+ *
+ * Estaba faltando, y no fallaba: caía en el `continue` de abajo y se
+ * descartaba en silencio, así que asignarle el proyecto a un requerimiento
+ * desde la consola no hacía nada. Pasó desapercibido mientras el proyecto se
+ * creaba solo al guardar; ahora que un requerimiento puede quedar sin asignar,
+ * este es el único camino para repararlo.
+ *
+ * Acá la resolución sí es exigente: quien asigna elige de una lista de
+ * proyectos reales, así que un valor que no resuelve es un error de quien
+ * llama, no un texto suelto que haya que tolerar. Y al asignarlo se limpia
+ * `proyecto_texto`: ya cumplió su función de pista.
+ */
 async function actualizar(id, cambios) {
   const MAPA = {
     consecutivo: 'consecutivo', consecutivoSistema: 'consecutivo_sistema',
@@ -235,15 +241,55 @@ async function actualizar(id, cambios) {
   const vals = [];
   for (const [clave, valor] of Object.entries(cambios || {})) {
     const col = MAPA[clave];
-    if (!col) continue;   // ocsGeneradas y itemsJson se manejan aparte
+    if (!col) continue;   // proyecto, ocsGeneradas e itemsJson se manejan aparte
     vals.push(valor === '' && (col === 'bloqueado_por') ? null : valor);
     sets.push(`${col} = $${vals.length}`);
   }
-  if (!sets.length) return obtener(id);
 
-  vals.push(id);
-  await pg.query(
-    `UPDATE erp.requerimientos SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+  const asignaProyecto = Object.prototype.hasOwnProperty.call(cambios || {}, 'proyecto');
+  if (!sets.length && !asignaProyecto) return obtener(id);
+
+  await pg.tx(async (c) => {
+    if (asignaProyecto) {
+      const texto = String(cambios.proyecto || '').trim();
+      if (!texto) {
+        // Desasignar es legítimo: alguien se dio cuenta de que eligió mal.
+        sets.push(`proyecto_id = NULL`);
+      } else {
+        const { proyectoId } = await repoProyecto.resolver(c, texto);
+        if (!proyectoId) throw new Error(`El proyecto "${texto}" no está en el catálogo`);
+        vals.push(proyectoId);
+        sets.push(`proyecto_id = $${vals.length}`);
+        sets.push(`proyecto_texto = NULL`);
+
+        // El consecutivo es por proyecto, así que un requerimiento que entró sin
+        // proyecto se guardó sin número: `siguiente_consecutivo_req(NULL)`
+        // devuelve cadena vacía a propósito. Al asignarle el proyecto hay que
+        // emitirlo, o se queda sin número para siempre — y no hay forma de
+        // repararlo desde la interfaz.
+        //
+        // Solo si está vacío: reasignar el proyecto de un requerimiento que ya
+        // tiene número no debe darle otro ni saltar el contador del proyecto.
+        const actual = await c.query(
+          `SELECT consecutivo_sistema FROM erp.requerimientos WHERE id = $1`, [id]);
+        const sinNumero = !String(actual.rows[0]?.consecutivo_sistema || '').trim();
+        const loPideElLlamador = Object.prototype.hasOwnProperty.call(
+          cambios || {}, 'consecutivoSistema');
+
+        if (sinNumero && !loPideElLlamador) {
+          const n = await c.query(
+            'SELECT erp.siguiente_consecutivo_req($1) AS n', [proyectoId]);
+          vals.push(n.rows[0].n);
+          sets.push(`consecutivo_sistema = $${vals.length}`);
+        }
+      }
+    }
+
+    vals.push(id);
+    await c.query(
+      `UPDATE erp.requerimientos SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+  });
+
   return obtener(id);
 }
 

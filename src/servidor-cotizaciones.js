@@ -35,6 +35,7 @@ const repoRemisiones     = require('./repo/remisiones');
 const repoInventario     = require('./repo/inventario');
 const repoHistorial      = require('./repo/historialPrecios');
 const repoGastos         = require('./repo/gastos');
+const repoProyecto       = require('./repo/_proyecto');
 const localDb          = require('./db');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
@@ -1525,6 +1526,24 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GET /documentos/sin-proyecto → la bandeja de pendientes ─────────────
+  // Documentos que entraron con un proyecto que no está en el catálogo. Se
+  // guardan igual y quedan acá hasta que alguien les asigne el proyecto: el
+  // ERP ya no lo inventa.
+  //
+  // `?solo=conteo` devuelve únicamente el número, para el indicador del menú
+  // sin traerse la lista entera.
+  if (req.method === 'GET' && url.startsWith('/documentos/sin-proyecto')) {
+    try {
+      const q = new URL(url, 'http://localhost').searchParams;
+      if (q.get('solo') === 'conteo') {
+        return json({ total: await repoProyecto.contarPendientes() });
+      }
+      const items = await repoProyecto.pendientes({ limite: Number(q.get('limite')) || 200 });
+      return json({ total: items.length, items });
+    } catch (err) { return json({ error: err.message }, 500); }
+  }
+
   // ── GET /proyectos → lista de códigos activos (usado por selectores) ────
   if (req.method === 'GET' && url === '/proyectos') {
     try {
@@ -1575,34 +1594,13 @@ const servidor = http.createServer(async (req, res) => {
   }
 
   // ── POST /proyectos → crear nuevo proyecto ──────────────────────────────
+  // El ERP ya no da de alta proyectos. El catálogo se administra en KAOS y acá
+  // solo se consume, así que la ruta responde 405 en vez de desaparecer: un 404
+  // parecería que la escribieron mal, y esto es una decisión, no un error.
   if (req.method === 'POST' && url === '/proyectos') {
-    const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', async () => {
-      try {
-        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const codigo = String(body.codigo || '').trim();
-        if (!codigo) return json({ error: 'codigo requerido' }, 400);
-        // El duplicado lo detecta el índice único sobre erp.norm(codigo), que
-        // además compara sin tildes ni mayúsculas. Antes había que bajar la
-        // lista completa de SharePoint y compararla en memoria.
-        const yaExiste = await repoCatalogos.getProyectoPorCodigo(codigo);
-        if (yaExiste) return json({ error: `Proyecto "${codigo}" ya existe` }, 400);
-
-        const creado = await repoCatalogos.crearProyecto({
-          codigo,
-          descripcion:  String(body.nombre || codigo).trim(),
-          tipo:         String(body.tipo || '').trim(),
-          ciudad:       String(body.ciudad || '').trim(),
-          departamento: String(body.departamento || '').trim(),
-          zona:         String(body.zona || 'Centro').trim(),
-          activo:       true,
-          notas:        String(body.notas || '').trim(),
-        });
-        return json({ ok: true, id: creado.id });
-      } catch (err) { return json({ error: err.message }, 500); }
-    });
-    return;
+    return json({
+      error: 'El catálogo de proyectos se administra en KAOS. El ERP no crea proyectos.',
+    }, 405);
   }
 
   // ── POST /proyectos/:id/toggle → activar/inactivar ──────────────────────

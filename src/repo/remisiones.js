@@ -20,6 +20,7 @@
 
 const pg = require('../pg');
 
+const repoProyecto = require('./_proyecto');
 const CAMPOS = `
   r.id, r.numero, r.fecha, r.proyecto_id, r.observaciones,
   r.responsable_entrega, r.responsable_recepcion, r.lugar_entrega,
@@ -144,20 +145,22 @@ async function crear(datos, items = [], ocIds = []) {
     const numero = datos.numero
       || (await c.query('SELECT erp.siguiente_numero_remision() AS n')).rows[0].n;
 
-    const proyectoId = await resolverProyecto(c, datos.proyecto);
+    const { proyectoId, proyectoTexto } = await resolverProyecto(c, datos.proyecto);
 
     const cab = await c.query(
       `INSERT INTO erp.remisiones
          (numero, fecha, proyecto_id, observaciones, responsable_entrega,
-          responsable_recepcion, lugar_entrega, estado, alertas, creado_por, fecha_creacion)
+          responsable_recepcion, lugar_entrega, estado, alertas, creado_por, fecha_creacion,
+          proyecto_texto)
        VALUES ($1, COALESCE($2, now()), $3, $4, $5, $6, $7, COALESCE($8,'activa'),
-               $9, $10, COALESCE($11, now()))
+               $9, $10, COALESCE($11, now()), $12)
        RETURNING id`,
       [
         numero, datos.fecha || null, proyectoId, datos.observaciones || null,
         datos.responsableEntrega || null, datos.responsableRecepcion || null,
         datos.lugarEntrega || null, datos.estado || null, datos.alertas || null,
         datos.creadoPor || null, datos.fechaCreacion || null,
+        proyectoTexto,
       ]);
     const id = cab.rows[0].id;
 
@@ -200,16 +203,9 @@ async function actualizar(id, cambios) {
   return obtener(id);
 }
 
-async function resolverProyecto(c, texto) {
-  const s = String(texto || '').trim();
-  if (!s) return null;
-  const hallado = await c.query(
-    'SELECT id FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)', [s]);
-  if (hallado.rowCount) return hallado.rows[0].id;
-  const creado = await c.query(
-    `INSERT INTO erp.proyectos (codigo, nombre, activo, requiere_revision)
-     VALUES ($1, $1, false, true) RETURNING id`, [s]);
-  return creado.rows[0].id;
-}
+// Resolver ya no crea el proyecto que falta: devuelve `proyectoId` en null y
+// el texto que llegó, para que el documento se guarde sin asignar y una
+// persona lo resuelva desde la bandeja. Ver src/repo/_proyecto.js.
+const resolverProyecto = repoProyecto.resolver;
 
 module.exports = { listar, obtener, porOrdenCompra, crear, actualizar };

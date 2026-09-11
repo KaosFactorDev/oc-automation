@@ -22,6 +22,7 @@
 
 const pg = require('../pg');
 
+const repoProyecto = require('./_proyecto');
 const CAMPOS = `
   m.id, m.tipo, m.fecha, m.proyecto_id, m.orden_compra_id, m.insumo, m.unidad,
   m.cantidad, m.precio_unitario, m.valor_total, m.responsable, m.notas,
@@ -212,15 +213,15 @@ async function crearLote(movimientos, { emitirDocumento = false } = {}) {
 
     const ids = [];
     for (const m of movimientos) {
-      const proyectoId = await resolverProyecto(c, m.proyecto);
+      const { proyectoId, proyectoTexto } = await resolverProyecto(c, m.proyecto);
       const r = await c.query(
         `INSERT INTO erp.movimientos_inventario
            (tipo, fecha, proyecto_id, orden_compra_id, insumo, unidad, cantidad,
             precio_unitario, responsable, notas, estado, documento_ref,
-            estado_doc, batch_id, creado_por, fecha_creacion)
+            estado_doc, batch_id, creado_por, fecha_creacion, proyecto_texto)
          VALUES ($1, COALESCE($2, now()), $3, $4, $5, COALESCE($6,'UND'), $7, $8,
                  $9, $10, COALESCE($11,'activo'), $12, COALESCE($13,'borrador'),
-                 $14, $15, COALESCE($16, now()))
+                 $14, $15, COALESCE($16, now()), $17)
          RETURNING id`,
         [
           m.tipo, m.fecha || null, proyectoId,
@@ -233,6 +234,7 @@ async function crearLote(movimientos, { emitirDocumento = false } = {}) {
           documentoRef || m.documentoRef || null,
           documentoRef ? 'aprobado' : (m.estadoDoc || null),
           m.batchId || null, m.creadoPor || null, m.fechaCreacion || null,
+          proyectoTexto,
         ]);
       ids.push(String(r.rows[0].id));
     }
@@ -281,17 +283,10 @@ async function anular(ids) {
   return r.rowCount;
 }
 
-async function resolverProyecto(c, texto) {
-  const s = String(texto || '').trim();
-  if (!s) return null;
-  const hallado = await c.query(
-    'SELECT id FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)', [s]);
-  if (hallado.rowCount) return hallado.rows[0].id;
-  const creado = await c.query(
-    `INSERT INTO erp.proyectos (codigo, nombre, activo, requiere_revision)
-     VALUES ($1, $1, false, true) RETURNING id`, [s]);
-  return creado.rows[0].id;
-}
+// Resolver ya no crea el proyecto que falta: devuelve `proyectoId` en null y
+// el texto que llegó, para que el documento se guarde sin asignar y una
+// persona lo resuelva desde la bandeja. Ver src/repo/_proyecto.js.
+const resolverProyecto = repoProyecto.resolver;
 
 /**
  * Agrupa los movimientos en documentos, para la vista de registros de almacén.

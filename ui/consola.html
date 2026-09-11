@@ -1183,6 +1183,23 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         </div>
       </details>
 
+      <details id="cfg-sin-proyecto" style="border-top:1px solid var(--border);padding-top:18px" ontoggle="if(this.open)cargarSinProyecto()">
+        <summary style="cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:600;list-style:none;display:flex;align-items:center;gap:6px">
+          <span>&#9654;</span> Documentos sin proyecto
+          <span id="sp-contador" style="display:none;background:#c33;color:#fff;border-radius:9px;padding:1px 7px;font-size:10px;letter-spacing:0">0</span>
+        </summary>
+        <div style="margin-top:16px">
+          <div style="font-size:11px;color:var(--txt-3);margin-bottom:10px;line-height:1.5">
+            Entraron con un proyecto que no está en el catálogo, casi siempre porque el asunto del
+            correo traía el nombre abreviado o mal escrito. El documento se guardó completo; solo
+            le falta el proyecto. <strong>Mientras no se asigne, no entra al control de costos ni
+            a los filtros por obra.</strong>
+          </div>
+          <div id="sp-lista" style="margin-top:12px;max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:4px"></div>
+          <div id="msg-sp" style="font-size:11px;margin-top:6px;min-height:16px"></div>
+        </div>
+      </details>
+
       <details id="cfg-proyectos" style="border-top:1px solid var(--border);padding-top:18px">
         <summary style="cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:600;list-style:none;display:flex;align-items:center;gap:6px">
           <span>&#9654;</span> Proyectos activos
@@ -1190,20 +1207,16 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         <div style="margin-top:16px">
           <div style="font-size:11px;color:var(--txt-3);margin-bottom:10px;line-height:1.5">Al inactivar un proyecto, deja de aparecer en los selectores. La información histórica de compras, proveedores e insumos no se ve afectada.</div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-top:10px">
-            <input class="td-input" id="proy-codigo" placeholder="Código (ej. CT25-040)" style="border:1px solid var(--border);padding:7px 10px">
-            <input class="td-input" id="proy-nombre" placeholder="Nombre" style="border:1px solid var(--border);padding:7px 10px">
-            <button id="btn-agregar-proy" class="btn btn-primary btn-sm" onclick="crearProyecto()">Agregar</button>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:6px">
-            <input class="td-input" id="proy-tipo" placeholder="Tipo" style="border:1px solid var(--border);padding:7px 10px">
-            <input class="td-input" id="proy-ciudad" placeholder="Ciudad" style="border:1px solid var(--border);padding:7px 10px">
-            <select id="proy-zona" class="td-input" style="border:1px solid var(--border);padding:7px 10px">
-              <option value="Centro">Centro</option><option value="Caribe">Caribe</option>
-              <option value="Occidente">Occidente</option><option value="Nororiente">Nororiente</option>
-              <option value="Sur">Sur</option><option value="Llanos">Llanos</option>
-              <option value="Internacional">Internacional</option>
-            </select>
+          <!--
+            El alta de proyectos salió de acá: el catálogo se administra en KAOS
+            y el ERP solo lo consume. Dejar el formulario habría significado dos
+            catálogos divergiendo, que es justo lo que se está desarmando.
+            La ruta POST /proyectos responde 405 con este mismo motivo.
+          -->
+          <div style="font-size:11px;color:var(--txt-3);background:var(--bg-2,#f6f6f6);border:1px solid var(--border);border-radius:4px;padding:10px 12px;margin-top:10px;line-height:1.5">
+            Los proyectos se crean en <strong>KAOS</strong>, no acá. Este panel es de consulta:
+            desde el ERP se puede activar o inactivar un proyecto para los selectores, pero no
+            crear ni renombrar.
           </div>
           <div id="msg-proy" style="font-size:11px;margin-top:6px;min-height:16px"></div>
 
@@ -5140,6 +5153,9 @@ function reiniciarOC(){
 let _logoDataUrl = null;
 async function abrirConfig(){
   $('#modal-config').style.display = 'flex';
+  // El contador va antes que la lista: es lo que hace que alguien note que hay
+  // documentos esperando proyecto sin tener que abrir el panel.
+  refrescarContadorSinProyecto();
   cargarProyectosAdmin();
   cargarProveedoresAdmin();
   // Mostrar sección de usuarios solo a admins
@@ -5242,7 +5258,6 @@ async function cargarProyectosAdmin(){
             <div style="font-size:11px;color:var(--txt-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.nombre || '')}${p.zona ? ' · ' + esc(p.zona) : ''}</div>
           </div>
           <span class="tag ${activo ? 'tag-aprobada' : 'tag-anulada'}" style="font-size:10px">${activo ? 'Activo' : 'Inactivo'}</span>
-          <button class="btn btn-ghost btn-sm" onclick="editarProyecto('${esc(p.id)}')">Editar</button>
           <button class="btn btn-ghost btn-sm" onclick="toggleProyecto('${esc(p.id)}', ${!activo})">${activo ? 'Inactivar' : 'Activar'}</button>
         </div>`;
     }).join('');
@@ -5292,70 +5307,115 @@ async function buscarPrecios() {
   document.getElementById('bp-resultado').style.display = 'block';
 }
 
-async function crearProyecto(){
-  const codigo = $('#proy-codigo').value.trim();
-  const nombre = $('#proy-nombre').value.trim() || codigo;
-  const tipo   = $('#proy-tipo').value.trim();
-  const ciudad = $('#proy-ciudad').value.trim();
-  const zona   = $('#proy-zona').value;
-  const msg    = $('#msg-proy');
-  if (!codigo) { msg.textContent = 'Código requerido'; msg.style.color = '#c33'; return; }
 
-  if (_editandoProyectoId) {
-    msg.textContent = 'Guardando…'; msg.style.color = 'var(--txt-2)';
-    try {
-      const r = await fetch(`/proyectos/${encodeURIComponent(_editandoProyectoId)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ codigo, nombre, tipo, ciudad, zona }),
-      });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || 'Error');
-      msg.textContent = '✓ Proyecto actualizado'; msg.style.color = '#2a8';
-      _editandoProyectoId = null;
-      $('#btn-agregar-proy').textContent = 'Agregar';
-      $('#btn-agregar-proy').classList.replace('btn-secondary', 'btn-primary');
-      ['proy-codigo','proy-nombre','proy-tipo','proy-ciudad'].forEach(id => $('#'+id).value = '');
-      cargarProyectosAdmin();
-      cargarAutocompletes();
-    } catch(e) { msg.textContent = 'Error: ' + e.message; msg.style.color = '#c33'; }
-    return;
+// ── Bandeja de documentos sin proyecto ──────────────────────────────────────
+// Un documento entra sin proyecto cuando el texto que traía el correo no está
+// en el catálogo. El ERP ya no inventa el proyecto, así que alguien tiene que
+// asignarlo acá. `proyectoTexto` es lo que llegó: sin eso, no hay con qué
+// decidir cuál corresponde.
+
+const SP_ETIQUETAS = {
+  requerimiento:         'Requerimiento',
+  orden_compra:          'Orden de compra',
+  orden_servicio:        'Orden de servicio',
+  remision:              'Remisión',
+  movimiento_inventario: 'Movimiento de inventario',
+  historial_precio:      'Historial de precios',
+};
+
+async function refrescarContadorSinProyecto(){
+  try {
+    const r = await fetch('/documentos/sin-proyecto?solo=conteo');
+    const j = await r.json();
+    const b = $('#sp-contador');
+    if (!b) return;
+    if (j.total > 0) { b.textContent = j.total; b.style.display = 'inline-block'; }
+    else { b.style.display = 'none'; }
+  } catch {}
+}
+
+async function cargarSinProyecto(){
+  const cont = $('#sp-lista');
+  if (!cont) return;
+  cont.innerHTML = '<div style="padding:10px;font-size:11px;color:var(--txt-3)">Cargando…</div>';
+
+  try {
+    const [docs, proyectos] = await Promise.all([
+      fetch('/documentos/sin-proyecto').then(r => r.json()),
+      fetch('/proyectos').then(r => r.json()),
+    ]);
+
+    const items = docs.items || [];
+    refrescarContadorSinProyecto();
+
+    if (!items.length) {
+      cont.innerHTML = '<div style="padding:12px;font-size:11px;color:var(--txt-3)">No hay documentos sin proyecto.</div>';
+      return;
+    }
+
+    const opciones = ['<option value="">Elegir proyecto…</option>']
+      .concat((Array.isArray(proyectos) ? proyectos : []).map(c => `<option value="${esc(c)}">${esc(c)}</option>`))
+      .join('');
+
+    cont.innerHTML = items.map((d, i) => {
+      // Solo los requerimientos tienen ruta de asignación. Los demás hoy nacen
+      // con proyecto desde la consola, así que el caso es teórico — pero si
+      // aparece, hay que decirlo en vez de mostrar un control que no hace nada.
+      const asignable = d.tipo === 'requerimiento';
+      const control = asignable
+        ? `<select id="sp-sel-${i}" class="td-input" style="border:1px solid var(--border);padding:5px 8px;font-size:11px;min-width:190px">${opciones}</select>
+           <button class="btn btn-primary btn-sm" onclick="asignarProyectoDoc('${esc(d.id)}', ${i})">Asignar</button>`
+        : `<span style="font-size:10px;color:var(--txt-3)">Asignar desde su ficha</span>`;
+
+      return `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:500">${esc(SP_ETIQUETAS[d.tipo] || d.tipo)} ${esc(d.numero || '')}</div>
+            <div style="font-size:11px;color:var(--txt-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              El correo decía: <strong>${esc(d.proyectoTexto || '(vacío)')}</strong>
+            </div>
+          </div>
+          ${control}
+        </div>`;
+    }).join('');
+  } catch (e) {
+    cont.innerHTML = `<div style="padding:10px;color:#c33;font-size:11px">Error: ${esc(e.message)}</div>`;
   }
+}
 
-  msg.textContent = 'Creando…'; msg.style.color = 'var(--txt-2)';
-  try{
-    const r = await fetch('/proyectos', {
-      method: 'POST',
+async function asignarProyectoDoc(id, i){
+  const sel = $('#sp-sel-' + i);
+  const msg = $('#msg-sp');
+  const codigo = sel ? sel.value : '';
+  if (!codigo) { msg.textContent = 'Elegí un proyecto primero.'; msg.style.color = '#c33'; return; }
+
+  msg.textContent = 'Asignando…'; msg.style.color = 'var(--txt-2)';
+  try {
+    const r = await fetch(`/requerimientos/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ codigo, nombre, tipo, ciudad, zona }),
+      body: JSON.stringify({ proyecto: codigo }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Error');
-    msg.textContent = '✓ Proyecto creado'; msg.style.color = '#2a8';
-    ['proy-codigo','proy-nombre','proy-tipo','proy-ciudad'].forEach(id => $('#'+id).value = '');
-    cargarProyectosAdmin();
-    cargarAutocompletes();
-  }catch(e){ msg.textContent = 'Error: ' + e.message; msg.style.color = '#c33'; }
+    msg.textContent = '✓ Proyecto asignado'; msg.style.color = '#2a8';
+    cargarSinProyecto();
+  } catch (e) {
+    msg.textContent = 'Error: ' + e.message; msg.style.color = '#c33';
+  }
 }
 
-async function editarProyecto(id) {
+// El alta y la edición de proyectos salieron del ERP: el catálogo se administra
+// en KAOS. Se conservan como funciones que avisan, porque puede quedar algún
+// onclick viejo en caché del navegador y un "crearProyecto is not defined" no
+// le dice nada a quien lo ve.
+function crearProyecto(){
   const msg = $('#msg-proy');
-  msg.textContent = 'Cargando…'; msg.style.color = 'var(--txt-2)';
-  try {
-    const f = await fetch(`/proyectos/${encodeURIComponent(id)}`).then(r => r.json());
-    if (f.error) throw new Error(f.error);
-    $('#proy-codigo').value = f.codigo || '';
-    $('#proy-nombre').value = f.nombre || '';
-    $('#proy-tipo').value   = f.tipo   || '';
-    $('#proy-ciudad').value = f.ciudad || '';
-    $('#proy-zona').value   = f.zona   || 'Centro';
-    _editandoProyectoId = id;
-    $('#btn-agregar-proy').textContent = 'Guardar cambios';
-    $('#btn-agregar-proy').classList.replace('btn-primary', 'btn-secondary');
-    msg.textContent = 'Editando proyecto — modifica los campos y haz clic en Guardar cambios';
-    msg.style.color = 'var(--txt-2)';
-    $('#proy-codigo').focus();
-  } catch(e) { msg.textContent = 'Error: ' + e.message; msg.style.color = '#c33'; }
+  if (msg) { msg.textContent = 'Los proyectos se crean en KAOS, no en el ERP.'; msg.style.color = '#c33'; }
+}
+function editarProyecto(){
+  const msg = $('#msg-proy');
+  if (msg) { msg.textContent = 'Los proyectos se editan en KAOS, no en el ERP.'; msg.style.color = '#c33'; }
 }
 
 async function toggleProyecto(id, activar){

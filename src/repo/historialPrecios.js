@@ -25,6 +25,7 @@
 const pg = require('../pg');
 const { fk } = require('./_valores');
 
+const repoProyecto = require('./_proyecto');
 const CAMPOS = `
   h.id, h.insumo, h.cantidad, h.precio_unitario, h.valor_total,
   h.fecha, h.fecha_texto, h.numero_compra, h.tipo_compra,
@@ -94,7 +95,7 @@ async function agregar(filas) {
       const insumo = String(f.insumo || '').trim();
       if (!insumo) continue;
 
-      const proyectoId = await resolverProyecto(c, f.proyecto);
+      const { proyectoId, proyectoTexto } = await resolverProyecto(c, f.proyecto);
       const nit        = await resolverProveedor(c, f.nitProveedor ?? f.nit, f.nombreProveedor ?? f.proveedor);
 
       const precio = Number(f.precioUnitario ?? f.precio) || 0;
@@ -105,8 +106,9 @@ async function agregar(filas) {
         `INSERT INTO erp.historial_precios
            (proyecto_id, numero_compra, tipo_compra, insumo, cantidad,
             precio_unitario, valor_total, fecha, fecha_texto,
-            proveedor_nit, proveedor_nombre, estado_compra, forma_pago, anticipo, zona)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+            proveedor_nit, proveedor_nombre, estado_compra, forma_pago, anticipo, zona,
+            proyecto_texto)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
         [
           proyectoId,
           f.numeroCompra ?? f.documento ?? null,
@@ -121,6 +123,7 @@ async function agregar(filas) {
           f.estadoCompra ?? null, f.formaPago ?? null,
           Number(f.anticipo) || 0,
           fk(f.zona),   // la caja la resuelve erp.zona_canonica() en el SQL
+          proyectoTexto,
         ]);
       guardadas++;
     }
@@ -128,17 +131,10 @@ async function agregar(filas) {
   });
 }
 
-async function resolverProyecto(c, texto) {
-  const s = String(texto || '').trim();
-  if (!s) return null;
-  const hallado = await c.query(
-    'SELECT id FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)', [s]);
-  if (hallado.rowCount) return hallado.rows[0].id;
-  const creado = await c.query(
-    `INSERT INTO erp.proyectos (codigo, nombre, activo, requiere_revision)
-     VALUES ($1, $1, false, true) RETURNING id`, [s]);
-  return creado.rows[0].id;
-}
+// Resolver ya no crea el proyecto que falta: devuelve `proyectoId` en null y
+// el texto que llegó, para que el documento se guarde sin asignar y una
+// persona lo resuelva desde la bandeja. Ver src/repo/_proyecto.js.
+const resolverProyecto = repoProyecto.resolver;
 
 async function resolverProveedor(c, nit, nombre) {
   const s = String(nit || '').trim();
