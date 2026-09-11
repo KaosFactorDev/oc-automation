@@ -1861,6 +1861,21 @@ const servidor = http.createServer(async (req, res) => {
         const reqItem = await obtenerRequerimiento(mGenReq[1]);
         const reqF = reqItem.fields || {};
 
+        // La OC hereda el proyecto del requerimiento. Si el requerimiento entró
+        // sin proyecto —porque el asunto del correo traía un código que no está
+        // en el catálogo— la orden nacería sin él y el hueco avanzaría hasta un
+        // documento que sale hacia el proveedor y se imputa a una obra.
+        //
+        // Acá sí se bloquea, a diferencia del requerimiento, que se guarda igual.
+        // La diferencia es qué se pierde: un requerimiento rechazado pierde el
+        // trabajo de quien lo radicó; una OC sin obra es un gasto que después
+        // nadie puede atribuir, y corregirlo exige tocar un documento ya emitido.
+        if (!String(reqF.proyecto || '').trim()) {
+          return json({
+            error: 'Este requerimiento no tiene proyecto asignado. Asígnaselo antes de generar la orden de compra: Configuración → Documentos sin proyecto.',
+          }, 400);
+        }
+
         // Parsear ítems del requerimiento para registrar homologaciones
         let itemsReq = [];
         try { itemsReq = JSON.parse(reqF.itemsJson || '[]'); } catch {}
@@ -2981,6 +2996,12 @@ const servidor = http.createServer(async (req, res) => {
       try {
         const { proyecto, fecha, numCotizacion, proveedor, nit, items, requerimientoId: reqId } = JSON.parse(Buffer.concat(chunks).toString());
         if (!items?.length) return json({ error: 'No hay ítems' }, 400);
+        // Ninguna orden de compra sale sin obra a la cual imputarse. El selector
+        // de la consola ya lo exige, pero esta ruta se alcanza por HTTP: la
+        // validación del formulario no es una validación.
+        if (!String(proyecto || '').trim()) {
+          return json({ error: 'La orden de compra necesita un proyecto.' }, 400);
+        }
 
         const ctx = await ctxSharePoint();
 
