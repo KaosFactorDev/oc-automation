@@ -1870,9 +1870,21 @@ const servidor = http.createServer(async (req, res) => {
         // La diferencia es qué se pierde: un requerimiento rechazado pierde el
         // trabajo de quien lo radicó; una OC sin obra es un gasto que después
         // nadie puede atribuir, y corregirlo exige tocar un documento ya emitido.
-        if (!String(reqF.proyecto || '').trim()) {
+        const codigoProy = String(reqF.proyecto || '').trim();
+        if (!codigoProy) {
           return json({
             error: 'Este requerimiento no tiene proyecto asignado. Asígnaselo antes de generar la orden de compra: Configuración → Documentos sin proyecto.',
+          }, 400);
+        }
+
+        // Y el proyecto tiene que estar ABIERTO. Un requerimiento sí puede
+        // quedar atado a una obra cerrada —el correo la nombró y el dato es
+        // correcto, además así conserva su zona— pero no se le compra a una obra
+        // que ya terminó. Acá es donde se detiene.
+        const proyDelReq = await repoCatalogos.getProyectoPorCodigo(codigoProy);
+        if (proyDelReq && proyDelReq.activo === false) {
+          return json({
+            error: `El proyecto "${codigoProy}" está inactivo. Reasigná el requerimiento a un proyecto activo, o reactivá esa obra en KAOS antes de generar la orden de compra.`,
           }, 400);
         }
 
@@ -2005,6 +2017,8 @@ const servidor = http.createServer(async (req, res) => {
             `SOLICITUD REQUERIMIENTO ${consecutivoManual || '0000'} ${fechaAsunto} ${proyectoParaAsunto}`;
 
           const { procesarCorreo } = require('./procesarCorreo');
+          // Todos: un requerimiento puede nombrar una obra cerrada y se ata a
+          // ella, conservando su zona. El bloqueo está en la OC, no acá.
           const proyectosSP = await obtenerProyectosSP({ soloActivos: false }).catch(() => []);
           const resultado = await procesarCorreo(asuntoSintetico, tmpPath, { proyectosExternos: proyectosSP });
 
@@ -2070,6 +2084,7 @@ const servidor = http.createServer(async (req, res) => {
 
         // Misma resolución de proyecto y consulta de precios que el flujo de correo
         const { procesarRequerimientoManual } = require('./procesarCorreo');
+        // Todos: ver la nota en /requerimientos/cargar-manual.
         const proyectosSP = await obtenerProyectosSP({ soloActivos: false }).catch(() => []);
         let resultado;
         try {
@@ -2996,11 +3011,15 @@ const servidor = http.createServer(async (req, res) => {
       try {
         const { proyecto, fecha, numCotizacion, proveedor, nit, items, requerimientoId: reqId } = JSON.parse(Buffer.concat(chunks).toString());
         if (!items?.length) return json({ error: 'No hay ítems' }, 400);
-        // Ninguna orden de compra sale sin obra a la cual imputarse. El selector
-        // de la consola ya lo exige, pero esta ruta se alcanza por HTTP: la
-        // validación del formulario no es una validación.
+        // Ninguna orden de compra sale sin obra abierta a la cual imputarse. El
+        // selector de la consola ya ofrece solo activos, pero esta ruta se
+        // alcanza por HTTP: la validación del formulario no es una validación.
         if (!String(proyecto || '').trim()) {
           return json({ error: 'La orden de compra necesita un proyecto.' }, 400);
+        }
+        const proyOC = await repoCatalogos.getProyectoPorCodigo(String(proyecto).trim());
+        if (proyOC && proyOC.activo === false) {
+          return json({ error: `El proyecto "${proyecto}" está inactivo. No se le pueden generar órdenes de compra.` }, 400);
         }
 
         const ctx = await ctxSharePoint();

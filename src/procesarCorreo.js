@@ -142,11 +142,21 @@ async function construirResultado(infoAsunto, requerimiento, opts = {}) {
   // leía proyectoFinal.codigo_proyecto —un campo que nunca existió— así que el
   // primer término del || era siempre undefined y ganaba el texto tecleado. La
   // resolución funcionaba y su resultado se descartaba.
+  // Se resuelve contra TODOS los proyectos, activos e inactivos, y se arrastra
+  // el `activo` para poder avisar.
+  //
+  // Un correo que nombra una obra cerrada sí se ata a ella: el dato es correcto
+  // y además así se conserva la ZONA, que es la que elige proveedor. Dejarlo sin
+  // proyecto perdería ese criterio y la sugerencia caería a historial nacional.
+  //
+  // Lo que se bloquea no es registrar el requerimiento sino generarle la orden
+  // de compra: eso exige un proyecto activo. Quien lo reciba decide si reasigna
+  // a una obra abierta o si hay que reactivar esa en KAOS.
   const proyPorCodigo = {};
   for (const p of await repoCatalogos.getProyectos({ soloActivos: false })) {
     const codigo = String(p.nombre || '').trim();
     const key    = codigo.toUpperCase();
-    if (key) proyPorCodigo[key] = { zona: p.zona || '', codigo };
+    if (key) proyPorCodigo[key] = { zona: p.zona || '', codigo, activo: p.activo !== false };
   }
   // Añadir proyectos externos pasados explícitamente (carga manual)
   for (const p of (opts.proyectosExternos || [])) {
@@ -202,6 +212,11 @@ async function construirResultado(infoAsunto, requerimiento, opts = {}) {
       `⚠️ Proyecto "${codigoFinal}" no se pudo identificar con certeza` +
       (cands ? `. Se parece a: ${cands}` : '') +
       `. Queda SIN PROYECTO asignado y sin zona, así que la sugerencia de proveedor usó historial nacional. Asígnalo desde la bandeja de pendientes.`);
+  } else if (proyectoFinal.activo === false) {
+    // El requerimiento queda registrado y con su proyecto, pero no puede avanzar
+    // a orden de compra hasta que la obra esté abierta.
+    alertasGlobales.push(
+      `⚠️ El proyecto "${proyectoFinal.codigo}" está INACTIVO. El requerimiento queda registrado, pero no se le podrá generar la orden de compra hasta que se reasigne a un proyecto activo o se reactive esa obra en KAOS.`);
   } else if (!proyectoFinal.zona) {
     alertasGlobales.push(
       `ℹ️ El proyecto "${proyectoFinal.codigo}" no tiene zona asignada, así que la sugerencia de proveedor usó historial nacional. Se asigna en el panel de proyectos.`);

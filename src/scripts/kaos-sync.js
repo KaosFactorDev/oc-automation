@@ -22,14 +22,22 @@ const kaos = require('../kaosClient');
 const repo = require('../repo/proyectosKaos');
 const pg   = require('../pg');
 
-// Solo los activos. Un proyecto inactivo en KAOS no debe entrar a los
-// selectores del ERP, y el catálogo de KAOS tiene además pruebas y demos que
-// conviene que se filtren solos al inactivarlas allá.
+// Se traen TODOS los proyectos, activos e inactivos.
 //
-// Consecuencia: si un proyecto pasa a inactivo, el incremental NO se entera
-// —queda fuera del filtro— y el espejo conserva la copia vieja. Eso lo resuelve
-// la reconciliación completa, que es la que detecta lo que dejó de verse.
-const ESTADO = 'Activo';
+// El ERP no esconde los inactivos: los muestra en /proyectos/admin, la
+// resolución del correo los consulta a propósito —un correo que nombra una obra
+// terminada tiene que poder reconocerla— y los documentos históricos apuntan a
+// ellos. Lo que filtra por activo es la LECTURA, en
+// getProyectos({ soloActivos: true }), que es lo que alimenta los selectores de
+// creación de requerimientos y órdenes.
+//
+// Filtrar acá ponía la regla en la capa equivocada y además rompía dos cosas:
+// un proyecto que pasara a inactivo en KAOS dejaba de llegar y el espejo se
+// quedaba con la copia vieja diciendo que seguía activo, y la reconciliación
+// completa no podía distinguir un borrado de un cambio de estado.
+//
+// El `estado` de KAOS se traduce a `activo` al copiar al catálogo, no al
+// recibir.
 
 const TODO = process.argv.includes('--todo');
 const SOLO_INFORME = process.argv.includes('--solo-informe');
@@ -94,10 +102,10 @@ async function informe() {
 
       const desde = TODO ? null : await repo.marcaGuardada();
       console.log(TODO
-        ? `Reconciliación completa: trayendo todos los proyectos en estado "${ESTADO}".`
-        : `Incremental desde ${desde || 'el principio (primera corrida)'}, solo estado "${ESTADO}".`);
+        ? 'Reconciliación completa: trayendo el catálogo entero.'
+        : `Incremental desde ${desde || 'el principio (primera corrida)'}.`);
 
-      const proyectos = await kaos.listarProyectos({ desde, estado: ESTADO });
+      const proyectos = await kaos.listarProyectos({ desde });
       const guardados = await repo.volcar(proyectos);
 
       // La marca se mueve solo con lo que realmente llegó. Si la corrida no
@@ -114,10 +122,10 @@ async function informe() {
           `SELECT project_code, nombre FROM erp.proyectos_kaos
             WHERE visto_en < now() - interval '1 minute' ORDER BY nombre`);
         if (idos.length) {
-          seccion(`Ya no llegan de KAOS (salieron de "${ESTADO}" o se borraron)`);
+          seccion('Ya no están en KAOS');
           for (const r of idos) console.log(`  ${r.project_code}  ${r.nombre}`);
-          console.log('\n  La API no distingue un borrado de un cambio de estado: en los dos');
-          console.log('  casos el proyecto deja de venir. No se tocan acá.');
+          console.log('\n  Se borraron: la API no lista los borrados, y los inactivos sí llegan.');
+          console.log('  No se tocan acá; el espejo no decide bajas.');
         }
       }
     }

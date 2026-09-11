@@ -1190,10 +1190,11 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         </summary>
         <div style="margin-top:16px">
           <div style="font-size:11px;color:var(--txt-3);margin-bottom:10px;line-height:1.5">
-            Entraron con un proyecto que no está en el catálogo, casi siempre porque el asunto del
-            correo traía el nombre abreviado o mal escrito. El documento se guardó completo; solo
-            le falta el proyecto. <strong>Mientras no se asigne, su gasto se suma bajo
-            «(sin proyecto)» y queda fuera de cualquier filtro o informe por obra.</strong>
+            Lo que no puede convertirse en orden de compra, por dos motivos distintos.
+            <strong>Sin proyecto</strong>: el asunto del correo traía un nombre que no está en el
+            catálogo — el documento se guardó completo y su gasto se suma bajo «(sin proyecto)»,
+            fuera de todo informe por obra. <strong>Obra cerrada</strong>: el proyecto es correcto
+            pero está inactivo, así que hay que reasignarlo o reabrir la obra en KAOS.
           </div>
           <div id="sp-lista" style="margin-top:12px;max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:4px"></div>
           <div id="msg-sp" style="font-size:11px;margin-top:6px;min-height:16px"></div>
@@ -2653,14 +2654,28 @@ async function emitirOS() {
 }
 
 async function cargarAutocompletes(){
-  const [proveedores, insumos, proyectos] = await Promise.all([
+  // Dos listas de proyectos, y la diferencia importa:
+  //
+  //   ESTADO.proyectos      solo activos → para CREAR (OC, OS, requerimientos).
+  //                         A una obra cerrada no se le cuelga trabajo nuevo.
+  //   ESTADO.proyectosTodos activos e inactivos → para FILTRAR el historial.
+  //
+  // Antes había una sola, la de activos, y se repartía también a los filtros.
+  // El efecto: una obra terminada no se podía filtrar. Hoy 45 de las 52 filas
+  // del catálogo están inactivas —CT23-205 CERREJON con 460 documentos entre
+  // ellas— así que la mayoría del histórico era inalcanzable por obra.
+  const [proveedores, insumos, proyectos, proyectosTodos] = await Promise.all([
     fetch('/proveedores').then(r => r.json()).catch(() => []),
     fetch('/insumos').then(r => r.json()).catch(() => []),
     fetch('/proyectos').then(r => r.json()).catch(() => []),
+    fetch('/proyectos/admin').then(r => r.json()).catch(() => []),
   ]);
   ESTADO.proveedoresDB = proveedores;
   ESTADO.insumosBD     = insumos;
   ESTADO.proyectos     = proyectos;
+  // /proyectos/admin devuelve el objeto completo; los filtros usan el código.
+  ESTADO.proyectosTodos = (Array.isArray(proyectosTodos) ? proyectosTodos : [])
+    .map(p => p.codigo).filter(Boolean);
 
   const dl1 = $('#lista-proveedores');
   if (dl1) dl1.innerHTML = ESTADO.proveedoresDB.map(p => `<option value="${esc(p.nombre+' (NIT: '+p.nit+')')}">`).join('');
@@ -2686,8 +2701,11 @@ async function cargarAutocompletes(){
 
   const fReqP = $('#filtro-req-proyecto');
   const fOcP  = $('#filtro-oc-proyecto');
+  // Filtros: la lista COMPLETA. Filtrar es mirar el pasado, y el pasado incluye
+  // las obras cerradas — que son la mayoría del histórico.
   const proyHtml = '<option value="">Todos los proyectos</option>' +
-                   ESTADO.proyectos.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+                   (ESTADO.proyectosTodos.length ? ESTADO.proyectosTodos : ESTADO.proyectos)
+                     .map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
   if (fReqP) fReqP.innerHTML = proyHtml;
   if (fOcP)  fOcP.innerHTML  = proyHtml;
 
@@ -5364,15 +5382,26 @@ async function cargarSinProyecto(){
       const asignable = d.tipo === 'requerimiento';
       const control = asignable
         ? `<select id="sp-sel-${i}" class="td-input" style="border:1px solid var(--border);padding:5px 8px;font-size:11px;width:190px;flex:none">${opciones}</select>
-           <button class="btn btn-primary btn-sm" onclick="asignarProyectoDoc('${esc(d.id)}', ${i})">Asignar</button>`
+           <button class="btn btn-primary btn-sm" onclick="asignarProyectoDoc('${esc(d.id)}', ${i})">${d.motivo === 'proyecto_inactivo' ? 'Reasignar' : 'Asignar'}</button>`
         : `<span style="font-size:10px;color:var(--txt-3)">Asignar desde su ficha</span>`;
+
+      // Dos motivos, dos acciones. Sin proyecto se asigna uno; con la obra
+      // cerrada el dato está bien y lo que falta es decidir entre reasignar o
+      // reabrir la obra en KAOS.
+      const detalle = d.motivo === 'proyecto_inactivo'
+        ? `<span style="color:#b45309">Proyecto <strong>${esc(d.proyecto)}</strong> inactivo</span> — reasignalo o reactivá la obra en KAOS`
+        : `El correo decía: <strong>${esc(d.proyectoTexto || '(vacío)')}</strong>`;
+
+      const etiqueta = d.motivo === 'proyecto_inactivo'
+        ? '<span style="font-size:9px;background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:3px;margin-left:6px">OBRA CERRADA</span>'
+        : '';
 
       return `
         <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px">
           <div style="flex:1;min-width:0">
-            <div style="font-weight:500">${esc(SP_ETIQUETAS[d.tipo] || d.tipo)} ${esc(d.numero || '')}</div>
+            <div style="font-weight:500">${esc(SP_ETIQUETAS[d.tipo] || d.tipo)} ${esc(d.numero || '')}${etiqueta}</div>
             <div style="font-size:11px;color:var(--txt-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-              El correo decía: <strong>${esc(d.proyectoTexto || '(vacío)')}</strong>
+              ${detalle}
             </div>
           </div>
           ${control}

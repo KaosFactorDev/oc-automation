@@ -63,7 +63,7 @@ async function resolver(c, texto) {
  */
 async function pendientes({ limite = 200 } = {}) {
   const filas = await pg.rows(
-    `SELECT tipo, id, numero, proyecto_texto, created_at
+    `SELECT tipo, id, numero, proyecto_texto, created_at, motivo, proyecto
        FROM erp.vw_documentos_sin_proyecto
       ORDER BY created_at DESC
       LIMIT $1`, [limite]);
@@ -72,6 +72,8 @@ async function pendientes({ limite = 200 } = {}) {
     id:            String(f.id),
     numero:        f.numero || '',
     proyectoTexto: f.proyecto_texto || '',
+    motivo:        f.motivo,
+    proyecto:      f.proyecto || '',
     createdAt:     f.created_at,
   }));
 }
