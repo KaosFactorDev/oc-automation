@@ -105,6 +105,13 @@ async function informe() {
         ? 'Reconciliación completa: trayendo el catálogo entero.'
         : `Incremental desde ${desde || 'el principio (primera corrida)'}.`);
 
+      // La marca se toma ANTES de traer nada. Comparar contra
+      // `now() - interval '1 minute'` era suponer cuánto tarda la
+      // sincronización: con un catálogo grande o una red lenta, lo refrescado al
+      // principio de la corrida caería fuera del margen y se reportaría como
+      // borrado sin estarlo.
+      const inicio = (await pg.one('SELECT now() AS t')).t;
+
       const proyectos = await kaos.listarProyectos({ desde });
       const guardados = await repo.volcar(proyectos);
 
@@ -120,7 +127,7 @@ async function informe() {
       if (TODO) {
         const idos = await pg.rows(
           `SELECT project_code, nombre FROM erp.proyectos_kaos
-            WHERE visto_en < now() - interval '1 minute' ORDER BY nombre`);
+            WHERE visto_en < $1 ORDER BY nombre`, [inicio]);
         if (idos.length) {
           seccion('Ya no están en KAOS');
           for (const r of idos) console.log(`  ${r.project_code}  ${r.nombre}`);

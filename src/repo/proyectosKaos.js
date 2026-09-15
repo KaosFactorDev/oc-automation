@@ -163,16 +163,29 @@ async function aplicar({ aplicar: hacerlo = false } = {}) {
     // el desplegable del comprador y el PDF que recibe el proveedor dijeran
     // "KP-4T7Q2X" en vez del nombre de la obra. El KP queda en `kaos_code`,
     // que es donde sirve.
+    // DISTINCT ON no es un adorno. El filtro de abajo compara contra lo que ya
+    // hay en erp.proyectos, pero no entre las filas que esta misma sentencia
+    // inserta: dos proyectos de KAOS con el mismo nombre pasaban los dos y
+    // chocaban con el índice único sobre erp.norm(codigo).
+    //
+    // Y el fallo no era parcial: la sentencia corre dentro de la transacción del
+    // volcado, así que un solo duplicado en KAOS abortaba TODA la aplicación y
+    // no entraba ni un proyecto. Comprobado antes de arreglarlo.
+    //
+    // Se queda el modificado más recientemente; el otro se informa como choque
+    // para que alguien lo resuelva en KAOS, que es donde se decide cuál vale.
     const ins = await c.query(
       `INSERT INTO erp.proyectos
          (codigo, nombre, ciudad, departamento, zona, activo, origen, kaos_id, kaos_code)
-       SELECT k.nombre, k.nombre, k.ciudad, k.departamento,
+       SELECT DISTINCT ON (erp.norm(k.nombre))
+              k.nombre, k.nombre, k.ciudad, k.departamento,
               (SELECT z.zona FROM erp.zonas z WHERE erp.norm(z.zona) = erp.norm(k.zona)),
               (k.estado = 'Activo'), 'kaos', k.kaos_id, k.project_code
          FROM erp.proyectos_kaos k
         WHERE NOT EXISTS (SELECT 1 FROM erp.proyectos p WHERE p.kaos_id = k.kaos_id)
           AND NOT EXISTS (SELECT 1 FROM erp.proyectos p
                            WHERE erp.norm(p.codigo) = erp.norm(k.nombre))
+        ORDER BY erp.norm(k.nombre), k.kaos_actualizado DESC, k.project_code
        RETURNING codigo, kaos_code`);
 
     // Los que chocan: el nombre de KAOS ya existe en el catálogo, en una fila
@@ -186,11 +199,18 @@ async function aplicar({ aplicar: hacerlo = false } = {}) {
         WHERE p.kaos_id IS NULL
         ORDER BY k.nombre`);
 
-    if (!hacerlo) throw new SimulacionTerminada({
-      actualizados: upd.rowCount, insertados: ins.rows, choques: choques.rows,
-    });
+    // Duplicados dentro del propio KAOS: dos proyectos con el mismo nombre. Solo
+    // entra uno, así que el otro hay que verlo.
+    const duplicadosKaos = await c.query(
+      `SELECT erp.norm(nombre) AS nombre, string_agg(project_code, ' + ' ORDER BY project_code) AS codigos
+         FROM erp.proyectos_kaos GROUP BY 1 HAVING count(*) > 1 ORDER BY 1`);
 
-    return { actualizados: upd.rowCount, insertados: ins.rows, choques: choques.rows };
+    const resumen = {
+      actualizados: upd.rowCount, insertados: ins.rows,
+      choques: choques.rows, duplicadosKaos: duplicadosKaos.rows,
+    };
+    if (!hacerlo) throw new SimulacionTerminada(resumen);
+    return resumen;
   });
 }
 

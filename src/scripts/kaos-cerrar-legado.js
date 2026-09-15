@@ -40,6 +40,25 @@ const CANDIDATOS = `
 
 (async () => {
   try {
+    // La guarda que evita el peor error posible de este repositorio.
+    //
+    // Este comando inactiva todo lo que no venga de KAOS. Corrido ANTES de
+    // `kaos:aplicar` —cuando ninguna fila tiene todavía `origen = 'kaos'`— eso
+    // es el catálogo entero: los compradores se quedan sin un solo proyecto
+    // seleccionable y no hay manera de crear un documento.
+    //
+    // El documento del corte dice el orden, pero un orden que solo vive en la
+    // documentación es un orden que alguien se salta a las 7 de la tarde.
+    const deKaos = await pg.one(
+      `SELECT count(*)::int AS n FROM erp.proyectos WHERE origen = 'kaos' AND activo`);
+    if (!deKaos || !deKaos.n) {
+      console.error(
+        'No hay ningún proyecto activo de KAOS en el catálogo, así que cerrar el\n' +
+        'legado dejaría el ERP sin proyectos seleccionables.\n\n' +
+        'Corré primero:  npm run kaos:sync  →  npm run kaos:ligar  →  npm run kaos:aplicar');
+      process.exit(1);
+    }
+
     const filas = await pg.rows(CANDIDATOS);
 
     if (!filas.length) {

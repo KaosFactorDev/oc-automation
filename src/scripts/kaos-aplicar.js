@@ -53,6 +53,13 @@ function seccion(t) { console.log(`\n${t}\n${'─'.repeat(t.length)}`); }
       for (const x of r.insertados) console.log(`  ${x.kaos_code}  ${x.codigo}`);
     }
 
+    if (r.duplicadosKaos && r.duplicadosKaos.length) {
+      seccion('Duplicados dentro de KAOS — solo entra uno');
+      for (const x of r.duplicadosKaos) console.log(`  ${x.codigos}  "${x.nombre}"`);
+      console.log('\n  Son el mismo nombre creado dos veces allá. Entra el modificado más');
+      console.log('  recientemente; cuál vale se decide en KAOS, no acá.');
+    }
+
     if (r.choques.length) {
       seccion('No entran: el nombre ya existe en el catálogo');
       for (const x of r.choques) {
