@@ -27,24 +27,30 @@ const https = require('https');
 // reapunta y el cambio llega a produccion sin pasar por un deploy. Ver .env.example.
 const MODELO_POR_DEFECTO = 'gemini-3.5-flash';
 
-function normalizarModelo(valor) {
+// Modelo de respaldo. Se elige una generacion ANTERIOR a proposito: esta mas
+// desplegada y es la que menos se satura. Ademas, como la cuota del free tier se
+// cuenta por modelo, el respaldo llega con su propio cupo diario en vez de
+// compartir el del principal. Ver src/geminiClient.js.
+const MODELO_FALLBACK_POR_DEFECTO = 'gemini-2.5-flash';
+
+function normalizarModelo(valor, porDefecto = MODELO_POR_DEFECTO) {
   const crudo = String(valor ?? '').trim();
   const limpio = crudo
-    .replace(/^GEMINI_MODEL\s*=\s*/i, '')   // nombre de la variable pegado por error
+    .replace(/^GEMINI_MODEL(_FALLBACK)?\s*=\s*/i, '')  // nombre de la variable pegado por error
     .replace(/^["']+|["']+$/g, '')          // comillas: docker compose las pasa literales
     .replace(/^models\//, '')               // el prefijo models/ lo agrega la URL
     .trim();
 
   if (!limpio) {
-    if (crudo) console.error(`[geminiConfig] GEMINI_MODEL quedo vacio tras limpiar ${JSON.stringify(crudo)} — se usa ${MODELO_POR_DEFECTO}`);
-    return MODELO_POR_DEFECTO;
+    if (crudo) console.error(`[geminiConfig] GEMINI_MODEL quedo vacio tras limpiar ${JSON.stringify(crudo)} — se usa ${porDefecto}`);
+    return porDefecto;
   }
 
   // Los nombres de modelo de Google son letras, digitos, puntos y guiones. Cualquier
   // otra cosa es un typo, no un modelo nuevo.
   if (!/^[a-z0-9][a-z0-9.-]*$/i.test(limpio)) {
-    console.error(`[geminiConfig] GEMINI_MODEL invalido: ${JSON.stringify(crudo)} — se usa ${MODELO_POR_DEFECTO}`);
-    return MODELO_POR_DEFECTO;
+    console.error(`[geminiConfig] GEMINI_MODEL invalido: ${JSON.stringify(crudo)} — se usa ${porDefecto}`);
+    return porDefecto;
   }
 
   if (limpio !== crudo) {
@@ -53,15 +59,24 @@ function normalizarModelo(valor) {
   return limpio;
 }
 
-const MODELO = normalizarModelo(process.env.GEMINI_MODEL);
+const MODELO          = normalizarModelo(process.env.GEMINI_MODEL);
+const MODELO_FALLBACK = normalizarModelo(process.env.GEMINI_MODEL_FALLBACK, MODELO_FALLBACK_POR_DEFECTO);
+
+// Orden en que geminiClient.js los intenta. Deduplicado: si alguien pone el mismo
+// nombre en las dos variables, no tiene sentido intentarlo dos veces — y si el
+// respaldo quedara igual al principal, un 429 de cuota no tendria salida.
+const MODELOS = [...new Set([MODELO, MODELO_FALLBACK])];
 
 /**
- * Comprueba contra la API que el modelo configurado exista. Se llama al arrancar y
- * nunca lanza: solo escribe en el log. La idea es que un modelo mal escrito o
- * retirado por Google se vea al levantar el contenedor.
+ * Comprueba contra la API que los modelos configurados existan —el principal y el de
+ * respaldo—. Se llama al arrancar y nunca lanza: solo escribe en el log. La idea es
+ * que un modelo mal escrito o retirado por Google se vea al levantar el contenedor.
  *
  * Usa ListModels, que NO consume la cuota de generateContent — importante, porque en
  * free tier son 20 requests/dia por modelo y no se puede gastar uno en cada reinicio.
+ *
+ * Devuelve true solo si TODOS los modelos configurados existen. Que el respaldo
+ * tambien se verifique importa: es el que nadie mira hasta que hace falta.
  */
 function verificarModelo(apiKey, { timeoutMs = 8000 } = {}) {
   return new Promise((resolve) => {
@@ -80,14 +95,27 @@ function verificarModelo(apiKey, { timeoutMs = 8000 } = {}) {
             return resolve(false);
           }
           const nombres = (cuerpo.models || []).map(m => String(m.name || '').replace(/^models\//, ''));
-          if (nombres.includes(MODELO)) {
-            console.log(`[geminiConfig] Modelo Gemini: ${MODELO} (verificado)`);
-            return resolve(true);
+          let todosOk = true;
+
+          MODELOS.forEach((modelo, i) => {
+            const rol = i === 0 ? 'principal' : 'respaldo';
+            if (nombres.includes(modelo)) {
+              console.log(`[geminiConfig] Modelo Gemini (${rol}): ${modelo} (verificado)`);
+            } else {
+              todosOk = false;
+              const variable = i === 0 ? 'GEMINI_MODEL' : 'GEMINI_MODEL_FALLBACK';
+              console.error(`[geminiConfig] El modelo ${rol} "${modelo}" NO existe en la API. Corrige ${variable} en el .env.`);
+            }
+          });
+
+          if (!todosOk) {
+            const flash = nombres.filter(n => n.includes('flash') && !n.includes('latest')).slice(0, 6);
+            if (flash.length) console.error(`[geminiConfig] Disponibles (flash): ${flash.join(', ')}`);
           }
-          const flash = nombres.filter(n => n.includes('flash') && !n.includes('latest')).slice(0, 6);
-          console.error(`[geminiConfig] El modelo "${MODELO}" NO existe en la API. Corrige GEMINI_MODEL en el .env.`);
-          if (flash.length) console.error(`[geminiConfig] Disponibles (flash): ${flash.join(', ')}`);
-          resolve(false);
+          if (MODELOS.length === 1) {
+            console.warn('[geminiConfig] El respaldo es igual al principal: sin salida si Google satura ese modelo o se agota su cuota.');
+          }
+          resolve(todosOk);
         } catch (e) {
           console.warn(`[geminiConfig] Respuesta ilegible al verificar el modelo: ${e.message}`);
           resolve(false);
@@ -99,4 +127,8 @@ function verificarModelo(apiKey, { timeoutMs = 8000 } = {}) {
   });
 }
 
-module.exports = { MODELO, MODELO_POR_DEFECTO, normalizarModelo, verificarModelo };
+module.exports = {
+  MODELO, MODELO_FALLBACK, MODELOS,
+  MODELO_POR_DEFECTO, MODELO_FALLBACK_POR_DEFECTO,
+  normalizarModelo, verificarModelo,
+};
