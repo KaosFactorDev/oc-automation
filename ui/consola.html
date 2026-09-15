@@ -2385,10 +2385,9 @@ async function extraerOS() {
 
   const btn     = $('#btn-extraer-os');
   const spinner = $('#spinner-btn-os');
-  const msg     = $('#msg-estado-os');
   if (btn) btn.disabled = true;
   if (spinner) spinner.style.display = 'inline-block';
-  if (msg) msg.textContent = 'Analizando documento con Gemini…';
+  setEstadoOS('cargando', 'Analizando documento con Gemini…');
 
   try {
     const fd = new FormData();
@@ -2398,7 +2397,7 @@ async function extraerOS() {
 
     const data = await postConProgreso('/os/extraer', fd, (ev) => {
       const txt = textoProgresoIA(ev);
-      if (txt && msg) msg.textContent = txt;
+      if (txt) setEstadoOS('cargando', txt);
     });
 
     _osExtraccion = data;
@@ -2416,9 +2415,9 @@ async function extraerOS() {
         ${data.clausulas ? `<br><span style="color:#2d7a3a;font-weight:600">✓ Clausulado generado automáticamente (${data.clausulas.split('\n\n').filter(Boolean).length} cláusulas)</span>` : ''}`;
     }
     if (res) res.style.display = '';
-    if (msg) msg.textContent = 'Extracción y generación de clausulado completadas.';
+    setEstadoOS('ok', 'Extracción y generación de clausulado completadas.');
   } catch (e) {
-    if (msg) msg.textContent = 'Error: ' + e.message;
+    setEstadoOS('error', 'Error: ' + e.message);
   } finally {
     if (btn) btn.disabled = false;
     if (spinner) spinner.style.display = 'none';
@@ -2459,8 +2458,7 @@ function reiniciarExtraccionOS() {
   if (btn) btn.disabled = true;
   const res = $('#os-cot-resultado');
   if (res) res.style.display = 'none';
-  const msg = $('#msg-estado-os');
-  if (msg) msg.textContent = '';
+  setEstadoOS('', '');   // sin tipo = se oculta el contenedor
   _osExtraccion = null;
 }
 
@@ -4838,6 +4836,15 @@ function setEstadoOC(tipo, msg){
   const el = $('#estado-oc'); el.className = 'estado' + (tipo ? ' visible ' + tipo : '');
   $('#msg-estado-oc').textContent = msg;
   $('#spinner-oc-ext').style.display = tipo === 'cargando' ? 'block' : 'none';
+}
+// La pantalla de OS escribia directo en #msg-estado-os con textContent, sin tocar la
+// clase del contenedor. Como .estado nace en display:none y solo .estado.visible lo
+// muestra, TODO lo que escribia —progreso y errores— caia en un div invisible: el
+// usuario veia el boton deshabilitarse, volver a habilitarse y ningun mensaje.
+function setEstadoOS(tipo, msg){
+  const el = $('#estado-extraccion-os'); el.className = 'estado' + (tipo ? ' visible ' + tipo : '');
+  $('#msg-estado-os').textContent = msg;
+  $('#spinner-os-ext').style.display = tipo === 'cargando' ? 'block' : 'none';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
