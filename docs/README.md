@@ -72,6 +72,7 @@ Fuera de `graphStorage.js` no queda ni un `addListItem`, `updateListItem`,
 | [migracion-sharepoint-postgres.md](migracion-sharepoint-postgres.md) | Qué se migró, por qué, y qué falta. Empieza acá si vienes nuevo |
 | [esquema-erp.md](esquema-erp.md) | Referencia del esquema: tablas, reglas y equivalencia lista → tabla |
 | [operacion-base-de-datos.md](operacion-base-de-datos.md) | Comandos, respaldos, restauración y problemas conocidos |
+| [conexion-kaos-proyectos.md](conexion-kaos-proyectos.md) | El catálogo de proyectos viene de KAOS: qué cambia, el corte y la operación |
 
 ## Arranque rápido
 
