@@ -40,6 +40,7 @@ const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
 const geminiConfig     = require('./geminiConfig');
+const geminiClient     = require('./geminiClient');
 
 // ── Requerimientos: adaptadores a la forma de SharePoint ─────────────────────
 // El código accede a reqItem.fields.X en decenas de lugares. repo/requerimientos
@@ -526,9 +527,6 @@ async function ctxSharePoint() {
 
 const PORT         = process.env.PUERTO_COTIZACIONES || 3001;
 const GEMINI_KEY   = process.env.GEMINI_API_KEY || '';
-// Saneado y validado en geminiConfig.js: el .env de produccion se edita a mano y un
-// typo ahi antes no se veia hasta que un usuario subia un archivo.
-const MODELO_GEMINI = geminiConfig.MODELO;
 const TEMP_DIR     = path.join(__dirname, '../temp/cotizaciones');
 const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`;
 
@@ -587,187 +585,10 @@ async function agregarFilasCompras(filas) {
 
 // ── Extracción con Gemini API ─────────────────────────────────────────────────
 
-// Ejecuta un POST contra la API de Gemini y devuelve el cuerpo de respuesta ya
-// parseado. Centraliza tres garantías que antes faltaban en varios llamadores:
-//  - timeout: evita que un socket colgado deje la petición sin resolver (spinner infinito).
-//  - reintento: ante errores transitorios (HTTP 503 / status UNAVAILABLE) o cortes de red,
-//    reintenta con backoff exponencial (1s, 2s, ...). `reintentos: 0` = sin reintentos.
-//  - error legible: lanza un Error con el código HTTP y el mensaje crudo de Gemini.
-async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 0 } = {}) {
-  const https = require('https');
-  let ultimoError;
-  for (let intento = 0; intento <= reintentos; intento++) {
-    try {
-      const resp = await new Promise((resolve, reject) => {
-        const req = https.request(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, (res) => {
-          const chunks = [];
-          res.on('data', c => chunks.push(c));
-          res.on('end', () => {
-            try { resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) }); }
-            catch (e) { reject(new Error(`Respuesta de Gemini ilegible (HTTP ${res.statusCode})`)); }
-          });
-        });
-        req.setTimeout(timeoutMs, () => {
-          req.destroy();
-          // generateContent no hace streaming: Gemini no envia un solo byte hasta
-          // terminar de generar, asi que toda la fase de razonamiento cuenta como
-          // socket inactivo y este timeout es en realidad un techo al tiempo de
-          // generacion. Se marca para no reintentarlo: la generacion ya ocurrio del
-          // lado de Google (y ya consumio cuota), reintentar solo paga otra completa.
-          const err = new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s`);
-          err.generacionEnVuelo = true;
-          reject(err);
-        });
-        req.on('error', reject);
-        req.write(bodyStr);
-        req.end();
-      });
-
-      const err = resp.body?.error;
-      const esTransitorio = resp.status === 503 || err?.status === 'UNAVAILABLE' || err?.code === 503;
-      if (esTransitorio && intento < reintentos) {
-        const espera = 1000 * Math.pow(2, intento);
-        console.warn(`[postGemini] ${err?.status || 'HTTP ' + resp.status} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
-        ultimoError = new Error(`Gemini no disponible (HTTP ${err?.code || resp.status}): ${err?.message || 'UNAVAILABLE'}`);
-        await new Promise(r => setTimeout(r, espera));
-        continue;
-      }
-      if (err) throw new Error(`Gemini error (HTTP ${err.code || resp.status}): ${err.message}`);
-      return resp.body;
-    } catch (e) {
-      ultimoError = e;
-      // Reintenta solo cortes de red, donde la peticion nunca llego a generarse.
-      // Un timeout propio NO se reintenta (ver generacionEnVuelo mas arriba).
-      const reintentable = !e.generacionEnVuelo &&
-        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
-      if (reintentable && intento < reintentos) {
-        const espera = 1000 * Math.pow(2, intento);
-        console.warn(`[postGemini] ${e.message} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
-        await new Promise(r => setTimeout(r, espera));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw ultimoError || new Error('Gemini: fallo desconocido');
-}
-
-// Igual que postGemini pero contra :streamGenerateContent?alt=sse, entregando el
-// texto a medida que llega en vez de esperar la respuesta completa.
-//
-// Existe aparte y no reemplaza a postGemini a proposito: a postGemini la usan
-// geminiTexto, el clausulado, el analisis de inventario y leerRequerimientoPDF.js.
-// Son cuatro flujos que no necesitan progreso y que no vale la pena arriesgar.
-//
-// Dos ventajas sobre postGemini en los endpoints de extraccion:
-//  - permite informarle progreso al usuario mientras Gemini genera.
-//  - el timeout del socket vuelve a ser lo que dice ser. En postGemini es en
-//    realidad un techo al tiempo total de generacion, porque generateContent no
-//    envia un byte hasta terminar; aca llegan datos continuamente y el timeout
-//    solo salta si el stream de verdad se queda quieto.
-//
-// onTexto(acumulado) se llama en cada trozo. Devuelve el texto completo.
-async function streamGemini(url, bodyStr, { timeoutMs = 120000, reintentos = 2, onTexto } = {}) {
-  const https = require('https');
-  let ultimoError;
-
-  for (let intento = 0; intento <= reintentos; intento++) {
-    let huboDatos = false;
-    try {
-      return await new Promise((resolve, reject) => {
-        const req = https.request(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        }, (res) => {
-          // Los errores de la API no vienen como SSE: vienen con status != 200 y un
-          // cuerpo JSON normal. Se acumula completo y se lanza legible.
-          if (res.statusCode !== 200) {
-            const trozos = [];
-            res.on('data', c => trozos.push(c));
-            res.on('end', () => {
-              let apiErr;
-              try { apiErr = JSON.parse(Buffer.concat(trozos).toString())?.error; } catch {}
-              const e = new Error(`Gemini error (HTTP ${apiErr?.code || res.statusCode}): ${apiErr?.message || 'sin detalle'}`);
-              e.transitorio = res.statusCode === 503 || apiErr?.status === 'UNAVAILABLE';
-              reject(e);
-            });
-            return;
-          }
-
-          let pendiente = '';   // linea SSE partida entre dos chunks TCP
-          let texto     = '';
-          let finish;
-
-          res.setEncoding('utf-8');
-          res.on('data', (chunk) => {
-            huboDatos = true;
-            pendiente += chunk;
-            const lineas = pendiente.split('\n');
-            pendiente = lineas.pop();   // la ultima puede estar incompleta
-
-            for (const linea of lineas) {
-              if (!linea.startsWith('data:')) continue;
-              let payload;
-              try { payload = JSON.parse(linea.slice(5)); } catch { continue; }
-
-              if (payload.error) {
-                reject(new Error(`Gemini error (HTTP ${payload.error.code || 500}): ${payload.error.message}`));
-                req.destroy();
-                return;
-              }
-
-              const cand = payload.candidates?.[0];
-              if (cand?.finishReason) finish = cand.finishReason;
-
-              // Se saltan las partes de razonamiento. Con includeThoughts apagado no
-              // aparecen, pero no quiero que el conteo dependa de ese default.
-              for (const parte of cand?.content?.parts || []) {
-                if (parte.thought) continue;
-                if (parte.text) texto += parte.text;
-              }
-              if (onTexto) { try { onTexto(texto); } catch {} }
-            }
-          });
-
-          res.on('end', () => {
-            // MAX_TOKENS devuelve HTTP 200 con el texto cortado a la mitad. Si se deja
-            // pasar, falla mas abajo en el parseo con un mensaje que no dice nada.
-            if (finish === 'MAX_TOKENS') {
-              return reject(new Error('Gemini corto la respuesta por limite de tokens (MAX_TOKENS). Sube maxOutputTokens o reduce el documento.'));
-            }
-            resolve(texto);
-          });
-          res.on('error', reject);
-        });
-
-        req.setTimeout(timeoutMs, () => {
-          req.destroy();
-          const err = new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s sin datos`);
-          err.generacionEnVuelo = true;
-          reject(err);
-        });
-        req.on('error', reject);
-        req.write(bodyStr);
-        req.end();
-      });
-    } catch (e) {
-      ultimoError = e;
-      // Solo se reintenta lo que fallo ANTES del primer byte. Si el stream ya
-      // entrego texto, reintentar empieza de cero y paga otra generacion completa
-      // (y otra unidad de cuota) para tirar a la basura lo que ya habia llegado.
-      const reintentable = !huboDatos && !e.generacionEnVuelo &&
-        (e.transitorio || /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message));
-      if (reintentable && intento < reintentos) {
-        const espera = 1000 * Math.pow(2, intento);
-        console.warn(`[streamGemini] ${e.message} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
-        await new Promise(r => setTimeout(r, espera));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw ultimoError || new Error('Gemini: fallo desconocido');
-}
+// El transporte (POST, SSE, timeout, reintentos y salto al modelo de respaldo) vive
+// en src/geminiClient.js. Antes habia una copia de postGemini aca y otra en
+// leerRequerimientoPDF.js, y ademas la URL se armaba en cada llamador con el modelo
+// ya interpolado — asi que el helper no podia cambiar de modelo aunque quisiera.
 
 // Rescata objetos JSON completos de un texto que puede venir truncado (un array a
 // medio llegar, por ejemplo). Se construye una instancia nueva en cada llamada a
@@ -820,9 +641,6 @@ function parsearJSONGemini(str) {
 // Es opcional: sin el, la extraccion se comporta igual que antes de cara al llamador.
 async function extraerConGemini(contenidoBase64, mimeType, nombreArchivo, onProgreso) {
   if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
-
-  const MODELO = MODELO_GEMINI;
-  const URL    = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:streamGenerateContent?alt=sse&key=${GEMINI_KEY}`;
 
   const PROMPT = `Analiza este documento de cotización y extrae TODOS los ítems cotizados.
 Para cada ítem devuelve SOLO un JSON array con este formato exacto (sin texto adicional, sin markdown):
@@ -882,9 +700,12 @@ ${PROMPT}` }
   // Se cuentan los items completos a medida que llegan y se avisa solo cuando el
   // numero cambia: son ~45 avisos en vez de los ~190 chunks que manda Gemini.
   let ultimoN = 0;
-  const texto = await streamGemini(URL, body, {
+  const texto = await geminiClient.pedirStream(body, {
     timeoutMs: 120000,
-    reintentos: 2,
+    // La consola aborta a los 180s: pasarse de ahi le muestra al usuario un timeout
+    // generico en vez del error real.
+    presupuestoMs: 150000,
+    etiqueta: '/extraer',
     onTexto: onProgreso ? (parcial) => {
       const n = contarItemsParciales(parcial, 'insumo');
       if (n !== ultimoN) { ultimoN = n; onProgreso(n); }
@@ -897,15 +718,17 @@ ${PROMPT}` }
 
 // ── Gemini texto (prompt puro, sin documento adjunto) ─────────────────────────
 
-async function geminiTexto(prompt, timeoutMs = 5000, extraConfig = {}) {
+// presupuestoMs omitido = un solo intento, que es lo que quieren los llamadores
+// rapidos (autocompletado de precios, homologacion de insumos): se llaman N veces por
+// request y degradan a coincidencia por tokens, asi que alargarlos seria peor que
+// fallar. Los llamadores pesados lo piden explicito.
+async function geminiTexto(prompt, timeoutMs = 5000, extraConfig = {}, presupuestoMs) {
   if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
-  const MODELO = MODELO_GEMINI;
-  const URL    = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:generateContent?key=${GEMINI_KEY}`;
   const bodyStr = JSON.stringify({
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.3, maxOutputTokens: 4096, ...extraConfig },
   });
-  const respuesta = await postGemini(URL, bodyStr, { timeoutMs });
+  const respuesta = await geminiClient.pedir(bodyStr, { timeoutMs, presupuestoMs, etiqueta: 'geminiTexto' });
   return (respuesta.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
 }
 
@@ -3133,8 +2956,6 @@ const servidor = http.createServer(async (req, res) => {
         }
 
         if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
-        const MODELO = MODELO_GEMINI;
-        const GURL   = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:streamGenerateContent?alt=sse&key=${GEMINI_KEY}`;
 
         const PROMPT = `Analiza este documento que es una cotización o propuesta económica de servicios.
 Extrae los datos Y redacta el clausulado jurídico. Devuelve SOLO un JSON con este formato exacto (sin texto adicional, sin markdown, sin bloques de código):
@@ -3218,9 +3039,11 @@ Reglas para el clausulado (CRÍTICO — aplica todos sin excepción):
         }
 
         try {
-          const raw = await streamGemini(GURL, gBody, {
+          const raw = await geminiClient.pedirStream(gBody, {
             timeoutMs: 120000,
-            reintentos: 2,
+            // Igual que /extraer: la consola aborta a los 180s.
+            presupuestoMs: 150000,
+            etiqueta: '/os/extraer',
             onTexto: flujo ? senalar : undefined,
           });
           const clean = (raw || '{}').replace(/```json[\s\S]*?/g, '').replace(/```/g, '').trim();
@@ -3292,7 +3115,7 @@ FORMATO:
         const clausulas = await geminiTexto(prompt, 30000, {
           thinkingConfig: { thinkingBudget: 0 },
           maxOutputTokens: 2048,
-        });
+        }, 90000);   // presupuesto: redactar el clausulado justifica insistir
         json({ ok: true, clausulas });
       } catch (err) { json({ error: err.message }, 500); }
     });
@@ -3938,7 +3761,7 @@ PREGUNTA DEL USUARIO: ${pregunta || 'Analiza los consumos y detecta posibles sob
 ${historial.length > 0 ? 'CONVERSACIÓN PREVIA:\n' + historial.map(h => `${h.role === 'user' ? 'Usuario' : 'Asistente'}: ${h.content}`).join('\n') + '\n' : ''}
 Responde en español, de forma concisa y práctica. Señala alertas de sobreconsumo, proyecciones y recomendaciones.`;
 
-        const respuesta = await geminiTexto(prompt, 15000);
+        const respuesta = await geminiTexto(prompt, 15000, {}, 45000);
         return json({ ok: true, respuesta });
       } catch (err) { return json({ error: err.message }, 500); }
     });
