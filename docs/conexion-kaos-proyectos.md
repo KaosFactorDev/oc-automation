@@ -66,10 +66,35 @@ curl -s "$KAOS_API_URL/projects"
 
 ---
 
-## 3 · El corte
+## 3 · Los PR, y en qué orden
 
-Después de mergear el PR y de que el deploy termine. **El deploy no aplica
-migraciones ni corre ninguno de estos comandos**: hay que entrar al VPS.
+El despliegue al VPS se dispara con un **push a `main`**, así que el último PR de
+la lista es el que pone todo esto en producción. Los anteriores no despliegan
+nada.
+
+| # | PR | Desde → hacia | Por qué va ahí |
+|---|---|---|---|
+| 1 | Sincronizar `develop` con `main` | `main` → `develop` | `develop` está 2 commits atrás: le falta el que documentó el corte a Postgres. Sin esto, mergear encima arrastra un CONTRIBUTING que todavía dice que SharePoint es la fuente de verdad |
+| 2 | Conexión con KAOS | `fix/documents-keep-unassigned-project` → `develop` | Es una funcionalidad, y el CONTRIBUTING reserva la ruta directa a `main` para incidentes en producción |
+| 3 | Release | `develop` → `main` | **Este despliega.** Recién acá hay que estar listo para el corte |
+
+**El paso 1 no es opcional ni cosmético.** Es el back-merge que el propio
+CONTRIBUTING exige el mismo día de un hotfix, y quedó pendiente del 8 de
+septiembre. Mientras no se haga, cada rama que salga de `develop` nace con
+documentación que miente sobre dónde viven los datos.
+
+**Y entre el paso 3 y el corte no hay espera.** El deploy sube el código y
+reinicia los contenedores, pero no aplica migraciones ni corre ningún comando:
+hasta que se ejecute lo de la sección siguiente, el ERP queda con el código nuevo
+y el catálogo viejo. Eso funciona —nada se rompe— pero la conexión no existe
+todavía.
+
+---
+
+## 4 · El corte
+
+Después del PR 3 y de que el deploy termine. **El deploy no aplica migraciones ni
+corre ninguno de estos comandos**: hay que entrar al VPS.
 
 ```bash
 ssh <vps>
@@ -137,7 +162,7 @@ todavía, así que se pueden borrar.
 
 ---
 
-## 4 · La operación de todos los días
+## 5 · La operación de todos los días
 
 **`kaos:sync` no corre solo.** Hay que engancharlo al ciclo del mailer o a un
 cron del host. Mientras sea manual, un proyecto creado en KAOS no aparece en el
@@ -157,7 +182,7 @@ marca vieja es lo que se fue.
 
 ---
 
-## 5 · Lo que queda en manos de los administradores
+## 6 · Lo que queda en manos de los administradores
 
 El ERP ya no corrige nada del catálogo, a propósito. Estas cosas se resuelven en
 KAOS:
