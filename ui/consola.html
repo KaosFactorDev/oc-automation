@@ -1025,8 +1025,7 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
           </div>
           <div class="campo">
             <label>Proyecto (código)</label>
-            <input type="text" id="carga-proyecto" placeholder="Se detecta del Excel si está vacío" list="lista-proyectos-carga">
-            <datalist id="lista-proyectos-carga"></datalist>
+            <select id="carga-proyecto"><option value="">— Detectar del Excel —</option></select>
           </div>
           <div class="campo">
             <label>Responsable (opcional)</label>
@@ -1054,8 +1053,7 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
           <div class="campo">
             <label>Proyecto (código) *</label>
-            <input type="text" id="man-proyecto" placeholder="Requerido — selecciona o escribe" list="lista-proyectos-manual">
-            <datalist id="lista-proyectos-manual"></datalist>
+            <select id="man-proyecto"><option value="">— Selecciona el proyecto —</option></select>
           </div>
           <div class="campo">
             <label>Fecha de solicitud</label>
@@ -3775,10 +3773,15 @@ function abrirCargaManual(){
   $('#msg-carga-req').style.color = '';
   $('#btn-carga-req').disabled = true;
 
-  // Poblar datalist de proyectos con los conocidos (ambos modos)
-  const opciones = (ESTADO.proyectos || []).map(p => `<option value="${esc(p)}">`).join('');
-  $('#lista-proyectos-carga').innerHTML  = opciones;
-  $('#lista-proyectos-manual').innerHTML = opciones;
+  // Los dos eran <input> con datalist, que sugiere pero no obliga: se podía
+  // escribir cualquier cosa y el requerimiento entraba con un proyecto que no
+  // existe. Eran la última puerta por donde el catálogo dejaba de ser único.
+  //
+  // Como <select> solo se puede elegir lo que hay, y lo que hay son los
+  // proyectos activos — que desde la conexión vienen todos de KAOS.
+  const opciones = (ESTADO.proyectos || []).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  $('#carga-proyecto').innerHTML = '<option value="">— Detectar del Excel —</option>' + opciones;
+  $('#man-proyecto').innerHTML   = '<option value="">— Selecciona el proyecto —</option>' + opciones;
 
   resetCapturaManual();
   cambiarModoCarga('archivo');
@@ -4886,6 +4889,23 @@ function poblarDatalistInsumos(){
   const dedupe = [...new Set(lista)].sort();
   dl.innerHTML = dedupe.map(i => `<option value="${esc(i)}">`).join('');
 }
+// El proyecto de cada fila de la carga masiva: era un input libre, así que se
+// podía teclear cualquier cosa y la fila del historial de precios entraba sin
+// proyecto real. Cerrado a los activos, igual que el resto.
+//
+// Si la fila ya trae un proyecto que no está entre los activos —viene de un
+// documento viejo— se antepone para no perderlo en silencio; queda marcado.
+function opcionesProyectoFila(actual, idx) {
+  const valor = String(actual || '');
+  const activos = ESTADO.proyectos || [];
+  const fuera = valor && !activos.includes(valor);
+  const opts = ['<option value="">— Sin proyecto —</option>']
+    .concat(fuera ? [`<option value="${esc(valor)}" selected>${esc(valor)} (no activo)</option>`] : [])
+    .concat(activos.map(p => `<option value="${esc(p)}"${p === valor ? ' selected' : ''}>${esc(p)}</option>`))
+    .join('');
+  return `<select class="td-input" style="width:150px" onchange="actualizar(${idx},'proyecto',this.value)">${opts}</select>`;
+}
+
 function renderTabla(){
   const tbody = $('#tabla-cuerpo');
   tbody.innerHTML = '';
@@ -4902,7 +4922,7 @@ function renderTabla(){
       <td><input class="td-input" value="${esc(item.proveedor||'')}" oninput="actualizar(${idx},'proveedor',this.value)" style="width:180px"></td>
       <td><input class="td-input" value="${esc(item.nit||'')}" oninput="actualizar(${idx},'nit',this.value)" style="width:90px"></td>
       <td><input class="td-input" value="${esc(item.fechaVigencia||'')}" oninput="actualizar(${idx},'fechaVigencia',this.value)" placeholder="DD/MM/YYYY" style="width:100px"></td>
-      <td><input class="td-input" value="${esc(item.proyecto||'')}" oninput="actualizar(${idx},'proyecto',this.value)" style="width:150px"></td>
+      <td>${opcionesProyectoFila(item.proyecto, idx)}</td>
       <td>${nuevo ? '<span class="tag tag-pendiente">nuevo</span>' : '<span class="tag tag-cerrado">existente</span>'}</td>`;
     tbody.appendChild(tr);
   });
