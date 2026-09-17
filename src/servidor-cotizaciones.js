@@ -3775,10 +3775,13 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
   }
 
   // ── PATCH /usuarios/:id → actualizar rol/activo (solo admin) ─────────────
-  const mUsrId = url.match(/^\/usuarios\/([^\/]+)$/);
+  // El id es la llave de Postgres, no el sp_id de SharePoint: los usuarios que
+  // nacen en la app (registro pendiente tras el login) no tienen sp_id, y con
+  // el sp_id en la ruta el UPDATE no encontraba a nadie.
+  const mUsrId = url.match(/^\/usuarios\/(\d+)$/);
   if (req.method === 'PATCH' && mUsrId) {
     if (req._sesion?.rol !== 'admin') return json({ error: 'Acceso denegado' }, 403);
-    const spId = mUsrId[1];
+    const usrId = mUsrId[1];
     const chunks = [];
     req.on('data', c => chunks.push(c));
     req.on('end', async () => {
@@ -3791,7 +3794,7 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
         if (data.nombre !== undefined) fields.nombre = String(data.nombre);
         if (data.cargo  !== undefined) fields.cargo  = String(data.cargo);
 
-        const actualizado = await repoCatalogos.actualizarUsuario(spId, fields);
+        const actualizado = await repoCatalogos.actualizarUsuario(usrId, fields);
         if (!actualizado) return json({ error: 'Usuario no encontrado' }, 404);
         return json({ ok: true });
       } catch (e) { return json({ error: e.message }, 500); }
