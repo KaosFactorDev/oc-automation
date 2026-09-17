@@ -1753,22 +1753,22 @@ async function cargarUsuariosAdmin(){
         <td>
           <input class="td-input" style="border:1px solid var(--border);padding:4px 8px;font-size:11px;width:100%"
             value="${esc(u.cargo || '')}"
-            onchange="patchUsuario('${esc(u.sp_id)}','cargo',this.value)">
+            onchange="patchUsuario('${u.id}','cargo',this.value)">
         </td>
         <td>
           <select class="td-input" style="border:1px solid var(--border);padding:4px 8px;font-size:11px"
-            onchange="patchUsuario('${esc(u.sp_id)}','rol',this.value)">
+            onchange="patchUsuario('${u.id}','rol',this.value)">
             <option value="operador" ${u.rol==='operador'?'selected':''}>Operador</option>
             <option value="admin"    ${u.rol==='admin'   ?'selected':''}>Admin</option>
           </select>
         </td>
         <td>
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
-            <input type="checkbox" ${u.activo?'checked':''} onchange="patchUsuario('${esc(u.sp_id)}','activo',this.checked)">
+            <input type="checkbox" ${u.activo?'checked':''} onchange="patchUsuario('${u.id}','activo',this.checked)">
             <span class="tag ${u.activo?'tag-aprobada':'tag-borrador'}">${u.activo?'Activo':'Pendiente'}</span>
           </label>
         </td>
-        <td style="font-size:10px;color:var(--txt-3)">${u.sp_id}</td>
+        <td style="font-size:10px;color:var(--txt-3)">${u.id}</td>
       </tr>`).join('');
     if (loading) loading.style.display = 'none';
     if (wrap)   wrap.style.display = '';
@@ -1777,14 +1777,22 @@ async function cargarUsuariosAdmin(){
   }
 }
 
-async function patchUsuario(spId, campo, valor){
+async function patchUsuario(id, campo, valor){
   try {
-    await fetch(`/usuarios/${spId}`, {
+    const res  = await fetch(`/usuarios/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ [campo]: valor }),
     });
-  } catch(e) { alert('Error al actualizar usuario: ' + e.message); }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    // Repintar con lo que quedó guardado: si el PATCH no cambió nada, el
+    // checkbox no se queda marcado engañando al admin.
+    await cargarUsuariosAdmin();
+  } catch(e) {
+    alert('Error al actualizar usuario: ' + e.message);
+    await cargarUsuariosAdmin();
+  }
 }
 
 async function cargarRequerimientos(){
