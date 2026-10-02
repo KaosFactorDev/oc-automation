@@ -25,13 +25,17 @@ const https = require('https');
 
 // Version concreta, nunca un alias movil como gemini-flash-latest: Google los
 // reapunta y el cambio llega a produccion sin pasar por un deploy. Ver .env.example.
-const MODELO_POR_DEFECTO = 'gemini-3.5-flash';
+const MODELO_POR_DEFECTO = 'gemini-3.8-flash';
 
-// Modelo de respaldo. Se elige una generacion ANTERIOR a proposito: esta mas
-// desplegada y es la que menos se satura. Ademas, como la cuota del free tier se
-// cuenta por modelo, el respaldo llega con su propio cupo diario en vez de
-// compartir el del principal. Ver src/geminiClient.js.
-const MODELO_FALLBACK_POR_DEFECTO = 'gemini-2.5-flash';
+// Modelo de respaldo. La idea original era una generacion ANTERIOR al
+// principal (mas desplegada, menos saturada). Pero Google retiro toda la
+// linea 2.x para keys/proyectos "nuevos" (404 "no longer available to new
+// users" en gemini-2.5-flash Y en gemini-2.5-flash-lite, verificado el
+// 22-09-2026), asi que el respaldo ahora es un modelo "lite" de la MISMA
+// generacion del principal: bucket de cuota propio (la cuota del free tier
+// se cuenta por modelo) sin depender de una generacion que Google puede
+// seguir retirando. Ver src/geminiClient.js.
+const MODELO_FALLBACK_POR_DEFECTO = 'gemini-3.6-flash';
 
 function normalizarModelo(valor, porDefecto = MODELO_POR_DEFECTO) {
   const crudo = String(valor ?? '').trim();

@@ -23,6 +23,12 @@ const { htmlAPdf } = require('../pdfGenerator');
 const CONFIRM = process.argv.includes('--confirm');
 const TODOS   = process.argv.includes('--todos');
 
+function fechaLocal(v) {
+  if (!v) return '';
+  const iso = typeof v === 'string' ? v : new Date(v).toISOString();
+  return new Date(iso.slice(0, 10) + 'T12:00:00').toLocaleDateString('es-CO');
+}
+
 function osDesdeFields(item) {
   const f = item.fields || item;
   let items = [];
@@ -30,7 +36,7 @@ function osDesdeFields(item) {
   return {
     id:                     item.id || f.id,
     numeroOS:               f.numeroOS || '',
-    fecha:                  f.fechaCreacion ? new Date(f.fechaCreacion).toLocaleDateString('es-CO') : '',
+    fecha:                  fechaLocal(f.fechaCreacion),
     proyecto:               f.proyecto || '',
     proveedorNit:           f.proveedorNit || '',
     proveedorNombre:        f.proveedorNombre || '',
@@ -48,17 +54,17 @@ function osDesdeFields(item) {
     total:                  Number(f.total || 0),
     estado:                 f.estado || 'borrador',
     lugarPrestacion:        f.lugarPrestacion || '',
-    fechaInicio:            f.fechaInicio ? new Date(f.fechaInicio).toLocaleDateString('es-CO') : '',
-    fechaFin:               f.fechaFin ? new Date(f.fechaFin).toLocaleDateString('es-CO') : '',
+    fechaInicio:            fechaLocal(f.fechaInicio),
+    fechaFin:               fechaLocal(f.fechaFin),
     condicionesComerciales: f.condicionesComerciales || '',
     observaciones:          f.observaciones || '',
     tipoGasto:              f.tipoGasto || '',
     pagado:                 !!f.pagado,
     pagadoPor:              f.pagadoPor || '',
-    fechaPago:              f.fechaPago ? new Date(f.fechaPago).toLocaleDateString('es-CO') : '',
+    fechaPago:              fechaLocal(f.fechaPago),
     cumplido:               !!f.cumplido,
     cumplidoPor:            f.cumplidoPor || '',
-    fechaCumplido:          f.fechaCumplido ? new Date(f.fechaCumplido).toLocaleDateString('es-CO') : '',
+    fechaCumplido:          fechaLocal(f.fechaCumplido),
   };
 }
 

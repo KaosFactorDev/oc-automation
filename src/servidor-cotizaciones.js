@@ -170,7 +170,7 @@ async function ocDesdeSharePoint(itemId) {
   }));
   return {
     numeroOC: f.numeroOC || '',
-    fecha: f.fechaCreacion ? new Date(f.fechaCreacion).toLocaleDateString('es-CO') : '',
+    fecha: fechaLocal(f.fechaCreacion),
     proyecto: f.proyecto || '',
     proveedor: {
       nombre: f.proveedorNombre || '',
@@ -178,8 +178,8 @@ async function ocDesdeSharePoint(itemId) {
       direccion: '', municipio: '', telefono: '', correo: '',
     },
     lugarEntrega:           f.lugarEntrega || '',
-    fechaEntregaPrevista:   f.fechaEntregaPrevista ? new Date(f.fechaEntregaPrevista).toLocaleDateString('es-CO') : '',
-    fechaEntrega:           f.fechaEntrega ? new Date(f.fechaEntrega).toLocaleDateString('es-CO') : '',
+    fechaEntregaPrevista:   fechaLocal(f.fechaEntregaPrevista),
+    fechaEntrega:           fechaLocal(f.fechaEntrega),
     requerimientoOrigen:    f.requerimientoOrigen || '',
     condicionesComerciales: f.condicionesComerciales || '',
     observaciones:          f.observaciones || '',
@@ -276,7 +276,7 @@ async function remisionDesdeOCs(ocIds, extra = {}) {
   const primer = ocsRaw[0].fields || {};
   return {
     numero:               extra.numero || '',
-    fecha:                extra.fecha ? new Date(extra.fecha).toLocaleDateString('es-CO') : new Date().toLocaleDateString('es-CO'),
+    fecha:                extra.fecha ? fechaLocal(extra.fecha) : new Date().toLocaleDateString('es-CO'),
     proyecto:             primer.proyecto || '',
     lugarEntrega:         extra.lugarEntrega || primer.lugarEntrega || '',
     solicitante:          primer.creadoPor || '',
@@ -734,6 +734,12 @@ async function geminiTexto(prompt, timeoutMs = 5000, extraConfig = {}, presupues
 
 // ── OS helpers ────────────────────────────────────────────────────────────────
 
+function fechaLocal(v) {
+  if (!v) return '';
+  const iso = typeof v === 'string' ? v : new Date(v).toISOString();
+  return new Date(iso.slice(0, 10) + 'T12:00:00').toLocaleDateString('es-CO');
+}
+
 function osDesdeFields(item) {
   // Compatible con objeto SP {id, fields} y con objeto plano SQLite {id, ...campos}
   const f = item.fields || item;
@@ -742,7 +748,7 @@ function osDesdeFields(item) {
   return {
     id:                     item.id || f.id,
     numeroOS:               f.numeroOS || '',
-    fecha:                  f.fechaCreacion ? new Date(f.fechaCreacion).toLocaleDateString('es-CO') : '',
+    fecha:                  fechaLocal(f.fechaCreacion),
     proyecto:               f.proyecto || '',
     proveedorNit:           f.proveedorNit || '',
     proveedorNombre:        f.proveedorNombre || '',
@@ -760,17 +766,17 @@ function osDesdeFields(item) {
     total:                  Number(f.total || 0),
     estado:                 f.estado || 'borrador',
     lugarPrestacion:        f.lugarPrestacion || '',
-    fechaInicio:            f.fechaInicio ? new Date(f.fechaInicio).toLocaleDateString('es-CO') : '',
-    fechaFin:               f.fechaFin ? new Date(f.fechaFin).toLocaleDateString('es-CO') : '',
+    fechaInicio:            fechaLocal(f.fechaInicio),
+    fechaFin:               fechaLocal(f.fechaFin),
     condicionesComerciales: f.condicionesComerciales || '',
     observaciones:          f.observaciones || '',
     tipoGasto:              f.tipoGasto || '',
     pagado:                 !!f.pagado,
     pagadoPor:              f.pagadoPor || '',
-    fechaPago:              f.fechaPago ? new Date(f.fechaPago).toLocaleDateString('es-CO') : '',
+    fechaPago:              fechaLocal(f.fechaPago),
     cumplido:               !!f.cumplido,
     cumplidoPor:            f.cumplidoPor || '',
-    fechaCumplido:          f.fechaCumplido ? new Date(f.fechaCumplido).toLocaleDateString('es-CO') : '',
+    fechaCumplido:          fechaLocal(f.fechaCumplido),
   };
 }
 
@@ -1988,7 +1994,7 @@ const servidor = http.createServer(async (req, res) => {
       const rem = {
         numero:               f.numero || it.id,
         consecutivoReq:       '',
-        fecha:                f.fecha ? new Date(f.fecha).toLocaleDateString('es-CO') : '',
+        fecha:                fechaLocal(f.fecha),
         proyecto:             f.proyecto || '',
         lugarEntrega:         f.lugarEntrega || '',
         solicitante:          f.creadoPor || '',
