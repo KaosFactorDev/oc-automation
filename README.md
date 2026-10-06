@@ -110,7 +110,6 @@ gana).
 | `UsuariosERP` | `usuarios` | Usuarios con acceso al ERP y sus roles |
 | `ConfiguracionApp` | *(sin caché)* | Logo, emisor, firmante, IVA y observaciones por defecto |
 | *(local)* | `consecutivos_proyecto` | Contador atómico de consecutivos por proyecto |
-| *(local)* | `mapeo_proyectos_tesoreria` | Última equivalencia proyecto ERP ↔ proyecto de tesorería |
 | *(local)* | `sesiones` | Sesiones activas (solo local, nunca va a SharePoint) |
 | *(local)* | `sync_state` | Última sincronización y conteo por lista |
 
@@ -233,7 +232,7 @@ Las entradas, salidas y devoluciones se crean agrupadas en un lote (`batchId` co
 
 Desde el **1.3 Registro OCs** una OC `aprobada` o `finalizada` se puede enviar al módulo de tesorería (Pagos Diarios) como solicitud de pago.
 
-- **Es deliberadamente manual.** El proyecto de tesorería y el concepto los elige una persona, y queda registrado quién lo hizo (`solicitado_por`). Los nombres de proyecto no coinciden entre los dos sistemas (`CT25-202 Micropilotes IZZI 96` vs `0378 IZZI 96`), así que la primera vez se empareja a mano y el sistema **recuerda esa elección** para preseleccionarla después (tabla local `mapeo_proyectos_tesoreria`). Es una sugerencia, nunca un automatismo.
+- **Es deliberadamente manual.** Una persona confirma el proyecto y escribe el concepto, y queda registrado quién lo hizo (`solicitado_por`). El proyecto viene **preseleccionado**: el ERP y tesorería usan el mismo id, el de KAOS, así que el proyecto de la OC ya sabe cuál es (`erp.proyectos.kaos_id`). Si el proyecto de la OC no está atado a KAOS, el modal muestra su texto y se elige a mano entre los proyectos de KAOS (`erp.proyectos_kaos`).
 - **Las credenciales no salen del servidor.** `tesoreriaClient.js` es el único módulo que las conoce; el navegador solo habla con las rutas `/tesoreria/*` del ERP, nunca con Supabase directamente.
 - **Si falta cualquiera de las cuatro variables** `TESORERIA_*`, la integración simplemente no aparece en la consola en vez de dar errores.
 - La Edge Function del lado de tesorería es idempotente, así que reintentar un envío es seguro.

@@ -4683,12 +4683,13 @@ async function enviarATesoreria(id){
 
   const proyectos = ESTADO.tesoreria.proyectos || [];
   if (!proyectos.length) {
-    alert('No se pudieron cargar los proyectos de tesorería. Intenta refrescar.');
+    alert('No se pudieron cargar los proyectos de KAOS. Intenta refrescar; si sigue vacío, falta correr kaos:sync en el servidor.');
     return;
   }
 
-  // Sugerencia de proyecto: el par que un humano ya eligió para este proyecto.
-  // Los nombres de los dos sistemas no coinciden, así que nunca se adivina.
+  // El proyecto de la OC ya está atado a uno de KAOS, que es el mismo id que usa
+  // tesorería: ese viene elegido. Si no está atado, se elige a mano viendo el
+  // texto del proyecto de la OC. Nunca se adivina por nombre.
   let mapeo = null;
   try {
     const r = await fetch('/tesoreria/mapeo?proyecto=' + encodeURIComponent(o.proyecto || '')).then(r => r.json());
@@ -4709,8 +4710,9 @@ async function enviarATesoreria(id){
         <span style="color:var(--txt-2)">Proveedor</span><span>${esc(o.proveedorNombre || '—')}</span>
         <span style="color:var(--txt-2)">NIT</span><span class="mono">${esc(o.proveedorNit || '—')}</span>
         <span style="color:var(--txt-2)">Total</span><strong class="mono">${fmt$(o.total)}</strong>
+        <span style="color:var(--txt-2)">Proyecto en la OC</span><span>${esc(o.proyecto || '—')}</span>
       </div>
-      <label>Proyecto de tesorería *</label>
+      <label>Proyecto (KAOS) *</label>
       <input type="text" id="tes-proy-buscar" placeholder="Filtrar proyectos…" autocomplete="off">
       <!-- option:checked explícito: sin esto el navegador pinta la opción
            elegida en gris pálido al perder el foco y la elección parece
@@ -4721,9 +4723,7 @@ async function enviarATesoreria(id){
       </style>
       <select id="tes-proy" size="6" style="margin-top:6px;width:100%"></select>
       <div id="tes-proy-elegido" style="margin-top:6px;font-size:12px"></div>
-      <small class="text-muted" style="display:block;margin-top:4px" id="tes-proy-hint">
-        Los nombres no coinciden con los códigos del ERP (${esc(o.proyecto || 'sin proyecto')}); elígelo a mano.
-      </small>
+      <small class="text-muted" style="display:block;margin-top:4px" id="tes-proy-hint"></small>
       <label style="margin-top:12px">Concepto *</label>
       <textarea id="tes-concepto" rows="3" maxlength="1000">${esc(_conceptoSugerido(o))}</textarea>
       <small class="text-muted" style="display:block;margin-top:2px">
@@ -4771,23 +4771,25 @@ async function enviarATesoreria(id){
   // un proyecto que ya estaba elegido.
   const pintarElegido = () => {
     const p = proyectos.find(x => x.id === elegido);
+    const textoOC = o.proyecto || 'sin proyecto';
     if (p) {
       elegidoEl.innerHTML = `<span style="color:var(--success)">✓ Elegido:</span> <strong>${esc(p.name)}</strong>`;
-      hint.textContent = sugeridoId && elegido !== sugeridoId
-        ? 'Esta elección reemplaza la sugerida y se recordará para las próximas OC de ' + (o.proyecto || 'este proyecto') + '.'
-        : 'Se recordará para las próximas OC de ' + (o.proyecto || 'este proyecto') + '.';
+      if (!sugeridoId) {
+        hint.textContent = `«${textoOC}» no está atado a KAOS: confirma que este sea el proyecto.`;
+      } else if (elegido === sugeridoId) {
+        hint.textContent = `Es el proyecto de KAOS de «${textoOC}».`;
+      } else {
+        hint.innerHTML = `<span style="color:var(--warn)">Cambiaste el proyecto que tiene la OC en KAOS (${esc(proyectos.find(x => x.id === sugeridoId)?.name || '')}). Verifica que sea correcto.</span>`;
+      }
     } else {
       elegidoEl.innerHTML = '<span style="color:var(--warn)">Ningún proyecto elegido todavía</span>';
-      hint.textContent = `Los nombres no coinciden con los códigos del ERP (${o.proyecto || 'sin proyecto'}); elígelo a mano.`;
+      hint.innerHTML = `El proyecto de la OC, <strong>«${esc(textoOC)}»</strong>, no está atado a KAOS: elige a mano el que corresponda.`;
     }
     actualizarBotonOk();
   };
 
   pintarOpciones();
   pintarElegido();
-  if (sugeridoId) {
-    hint.innerHTML = `<span style="color:var(--warn)">Sugerido por envíos anteriores de ${esc(o.proyecto || '')} — verifica que sea el correcto.</span>`;
-  }
   buscar.addEventListener('input', () => pintarOpciones(buscar.value));
   sel.addEventListener('change', () => { elegido = sel.value; pintarElegido(); });
   conceptoEl.addEventListener('input', actualizarBotonOk);

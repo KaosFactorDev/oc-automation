@@ -219,4 +219,34 @@ class SimulacionTerminada extends Error {
   constructor(resumen) { super('simulacion'); this.resumen = resumen; }
 }
 
-module.exports = { volcar, marcaGuardada, guardarMarca, discrepancias, aplicar, SimulacionTerminada };
+// ── Para tesorería ──────────────────────────────────────────────────────────
+// Cash_Flow ya no tiene catálogo propio: su proyecto_id es el UUID de KAOS. El
+// desplegable de "Enviar a tesorería" sale de este espejo, sin salir a la red:
+// si KAOS no responde, el envío sigue funcionando con la última sincronización.
+
+/** Los proyectos de KAOS, ordenados por nombre. `id` es el kaos_id. */
+async function paraTesoreria() {
+  return pg.rows(
+    `SELECT kaos_id::text AS id, nombre AS name, project_code AS codigo, estado
+       FROM erp.proyectos_kaos
+      ORDER BY nombre`);
+}
+
+/**
+ * El proyecto de KAOS al que está atado un proyecto del ERP, buscado por su
+ * código. null si no está atado (origen local) o si el espejo no lo tiene.
+ */
+async function deProyectoErp(codigo) {
+  const limpio = String(codigo || '').trim();
+  if (!limpio) return null;
+  return pg.one(
+    `SELECT k.kaos_id::text AS id, k.nombre AS name
+       FROM erp.proyectos p
+       JOIN erp.proyectos_kaos k ON k.kaos_id = p.kaos_id
+      WHERE erp.norm(p.codigo) = erp.norm($1)`, [limpio]);
+}
+
+module.exports = {
+  volcar, marcaGuardada, guardarMarca, discrepancias, aplicar, SimulacionTerminada,
+  paraTesoreria, deProyectoErp,
+};

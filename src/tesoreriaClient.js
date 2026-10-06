@@ -21,8 +21,7 @@
 
 const fetch = require('node-fetch');
 
-const CACHE_PROYECTOS_MS = 5 * 60 * 1000; // los proyectos cambian poco
-const MARGEN_TOKEN_MS    = 60 * 1000;     // renovar 1 min antes de expirar
+const MARGEN_TOKEN_MS = 60 * 1000; // renovar 1 min antes de expirar
 
 // ── Configuración ─────────────────────────────────────────────────────────────
 
@@ -134,29 +133,16 @@ async function pedir(ruta, { method = 'GET', body } = {}) {
   return res;
 }
 
-// ── §2 Lista de proyectos (el desplegable) ────────────────────────────────────
+// ── Comprobar el login ────────────────────────────────────────────────────────
+//
+// Antes esto era §2, la lista de proyectos de tesorería para el desplegable.
+// Cash_Flow ya no tiene catálogo propio: el proyecto_id que espera es el UUID de
+// KAOS, y el desplegable sale del espejo local (repo/proyectosKaos.paraTesoreria).
 
-let _proyectos    = null;
-let _proyectosTs  = 0;
-
-/**
- * Proyectos de tesorería activos, ordenados por nombre. Con caché de ~5 min.
- * OJO: los nombres NO coinciden con los códigos de oc-automation, el usuario
- * elige a mano. No intentar emparejar por texto.
- * @returns {Promise<Array<{id: string, name: string}>>}
- */
-async function listarProyectos() {
-  if (_proyectos && Date.now() - _proyectosTs < CACHE_PROYECTOS_MS) return _proyectos;
-
-  const res = await pedir('/rest/v1/projects?select=id,name&deleted_at=is.null&order=name');
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`No se pudieron leer los proyectos de tesorería (HTTP ${res.status}) ${txt}`.trim());
-  }
-  const data = await res.json();
-  _proyectos   = Array.isArray(data) ? data : [];
-  _proyectosTs = Date.now();
-  return _proyectos;
+/** Inicia sesión en tesorería. Lanza si las credenciales no sirven. */
+async function probarLogin() {
+  await getToken();
+  return true;
 }
 
 // ── §1 Crear la solicitud ─────────────────────────────────────────────────────
@@ -232,7 +218,7 @@ async function consultarEnviadas(numerosOC) {
 
 module.exports = {
   habilitado,
-  listarProyectos,
+  probarLogin,
   crearSolicitud,
   consultarEnviadas,
 };

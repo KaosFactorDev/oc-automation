@@ -36,6 +36,7 @@ const repoInventario     = require('./repo/inventario');
 const repoHistorial      = require('./repo/historialPrecios');
 const repoGastos         = require('./repo/gastos');
 const repoProyecto       = require('./repo/_proyecto');
+const repoProyectosKaos  = require('./repo/proyectosKaos');
 const localDb          = require('./db');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
@@ -2352,10 +2353,14 @@ const servidor = http.createServer(async (req, res) => {
   // Un solo endpoint sirve para las dos cosas: la UI lo pide al cargar y así
   // sabe si mostrar la columna y el botón. Sin credenciales → habilitado:false
   // y la integración queda oculta en vez de dar errores.
+  //
+  // Los proyectos son los de KAOS, del espejo local: Cash_Flow ya no tiene
+  // catálogo propio y su proyecto_id es el UUID de KAOS. Leer el espejo no sale
+  // a la red, así que el envío no depende de que KAOS responda en ese momento.
   if (req.method === 'GET' && url === '/tesoreria/proyectos') {
     try {
       if (!tesoreria.habilitado()) return json({ habilitado: false, proyectos: [] });
-      const proyectos = await tesoreria.listarProyectos();
+      const proyectos = await repoProyectosKaos.paraTesoreria();
       return json({ habilitado: true, proyectos });
     } catch (err) {
       console.error('GET /tesoreria/proyectos:', err.message);
@@ -2378,13 +2383,16 @@ const servidor = http.createServer(async (req, res) => {
     }
   }
 
-  // ── GET /tesoreria/mapeo?proyecto=CT25-202… → última elección humana ──────
-  // Lee de SQLite, sin salir a la red. Solo es una sugerencia para preseleccionar
-  // el desplegable: el usuario puede cambiarla siempre.
+  // ── GET /tesoreria/mapeo?proyecto=CT25-202… → su proyecto en KAOS ─────────
+  // El proyecto de la OC ya está atado a KAOS (kaos_id), y ese es exactamente el
+  // proyecto_id que espera tesorería: se preselecciona sin que nadie empareje
+  // nombres. Si no está atado (origen local) devuelve null y la persona elige a
+  // mano, viendo el texto del proyecto de la OC.
   if (req.method === 'GET' && url === '/tesoreria/mapeo') {
     try {
       const qs = require('url').parse(req.url, true).query;
-      return json({ mapeo: localDb.getMapeoTesoreria(String(qs.proyecto || '').trim()) });
+      const k  = await repoProyectosKaos.deProyectoErp(String(qs.proyecto || '').trim());
+      return json({ mapeo: k ? { tesoreria_id: k.id, tesoreria_nombre: k.name } : null });
     } catch (err) {
       console.warn('GET /tesoreria/mapeo:', err.message);
       return json({ mapeo: null });
@@ -2392,8 +2400,9 @@ const servidor = http.createServer(async (req, res) => {
   }
 
   // ── POST /ordenes/:id/solicitud-tesoreria → crear solicitud de pago ──────
-  // El flujo no es automático a propósito: proyecto de tesorería y concepto los
-  // decide una persona, y queda registrada en solicitado_por.
+  // El flujo no es automático a propósito: una persona confirma el proyecto
+  // (preseleccionado con el de KAOS de la OC) y escribe el concepto, y queda
+  // registrada en solicitado_por.
   const mSolTes = url.match(/^\/ordenes\/([^\/]+)\/solicitud-tesoreria$/);
   if (req.method === 'POST' && mSolTes) {
     const chunks = [];
@@ -2427,7 +2436,7 @@ const servidor = http.createServer(async (req, res) => {
         const proyectoId = String(body.proyecto_id || '').trim();
         const concepto   = String(body.concepto    || '').trim();
         const detalles = [];
-        if (!proyectoId) detalles.push('Falta el proyecto de tesorería');
+        if (!proyectoId) detalles.push('Falta el proyecto');
         if (!concepto)   detalles.push('Falta el concepto');
         if (concepto.length > 1000) detalles.push('El concepto no puede pasar de 1000 caracteres');
         if (!(Number(oc.total) > 0)) detalles.push(`El total de la OC debe ser mayor a 0 (es ${oc.total})`);
@@ -2450,9 +2459,6 @@ const servidor = http.createServer(async (req, res) => {
         // debe tumbar la respuesta: perder el egreso_id de vista es menos grave
         // que hacer creer al usuario que el envío falló (y un reintento es
         // seguro, la Edge Function es idempotente).
-        //
-        // Los dos registros van en try/catch separados a propósito: si
-        // SharePoint no responde, la elección de proyecto igual se recuerda.
         try {
           await repoOrdenesCompra.actualizar(itemId, {
             solicitudTesoreriaId:    resultado.egreso_id || '',
@@ -2461,18 +2467,6 @@ const servidor = http.createServer(async (req, res) => {
           });
         } catch (e) {
           console.warn(`[OC ${numeroOC}] Solicitud ${resultado.egreso_id} creada, pero no se pudo marcar la OC:`, e.message);
-        }
-
-        // Recordar la elección humana de proyecto para preseleccionarla luego
-        try {
-          localDb.setMapeoTesoreria({
-            proyecto:        oc.proyecto || '',
-            tesoreriaId:     proyectoId,
-            tesoreriaNombre: String(body.proyecto_nombre || '').trim(),
-            actualizadoPor:  req._sesion?.email || '',
-          });
-        } catch (e) {
-          console.warn(`[OC ${numeroOC}] No se pudo recordar el mapeo de proyecto:`, e.message);
         }
 
         return json({
