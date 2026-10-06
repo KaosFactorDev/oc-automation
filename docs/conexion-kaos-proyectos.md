@@ -18,6 +18,15 @@ proyectos.** Todo eso se hace en KAOS y llega por sincronización.
 | Se activaban e inactivaban desde Configuración | Lo decide KAOS |
 | Una OC podía salir sin proyecto | No sale sin proyecto **activo** |
 | Enviar a tesorería: emparejar a mano el proyecto con el de tesorería | Viene preseleccionado: los dos usan el id de KAOS |
+| Un proyecto inactivo se podía seguir usando en algunos documentos | **Solo los activos en KAOS se usan.** Los inactivos son historial: se consultan, pero para registrarles algo nuevo hay que reactivarlos en KAOS |
+
+**Activo o inactivo lo decide KAOS** (`kaos:aplicar` copia el estado). Con un
+proyecto inactivo el ERP no deja: generar OC u OS, hacer remisiones o salidas
+de almacén, asignárselo a un requerimiento o a un documento de la bandeja, ni
+enviarle un pago a tesorería (el desplegable solo trae activos). Sí deja: ver
+todo su historial; registrar un requerimiento que llega por correo nombrándolo
+(queda marcado «Obra cerrada» para reasignarlo); recibir en almacén una OC que
+ya se había emitido; y guardar un requerimiento suyo sin cambiarle la obra.
 
 **Los requerimientos que hay que revisar están en la pestaña Requerimientos,
 arriba de todo**, porque son trabajo del comprador:
