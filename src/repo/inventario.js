@@ -213,7 +213,10 @@ async function crearLote(movimientos, { emitirDocumento = false } = {}) {
 
     const ids = [];
     for (const m of movimientos) {
-      const { proyectoId, proyectoTexto } = await resolverProyecto(c, m.proyecto);
+      // Una entrada que recibe una OC ya emitida completa ese documento, aunque
+      // la obra se haya cerrado después: se deja pasar. Todo lo demás —salidas,
+      // ajustes, entradas sueltas— usa la obra y exige que esté activa.
+      const { proyectoId, proyectoTexto } = await resolverProyecto(c, m.proyecto, { exigirActivo: !m.ocId });
       const r = await c.query(
         `INSERT INTO erp.movimientos_inventario
            (tipo, fecha, proyecto_id, orden_compra_id, insumo, unidad, cantidad,

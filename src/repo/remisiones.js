@@ -145,7 +145,7 @@ async function crear(datos, items = [], ocIds = []) {
     const numero = datos.numero
       || (await c.query('SELECT erp.siguiente_numero_remision() AS n')).rows[0].n;
 
-    const { proyectoId, proyectoTexto } = await resolverProyecto(c, datos.proyecto);
+    const { proyectoId, proyectoTexto } = await resolverProyecto(c, datos.proyecto, { exigirActivo: true });
 
     const cab = await c.query(
       `INSERT INTO erp.remisiones

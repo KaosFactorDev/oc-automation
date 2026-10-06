@@ -2425,7 +2425,7 @@ const servidor = http.createServer(async (req, res) => {
     try {
       const qs = require('url').parse(req.url, true).query;
       const k  = await repoProyectosKaos.deProyectoErp(String(qs.proyecto || '').trim());
-      return json({ mapeo: k ? { tesoreria_id: k.id, tesoreria_nombre: k.name } : null });
+      return json({ mapeo: k ? { tesoreria_id: k.id, tesoreria_nombre: k.name, estado: k.estado } : null });
     } catch (err) {
       console.warn('GET /tesoreria/mapeo:', err.message);
       return json({ mapeo: null });
@@ -2470,6 +2470,9 @@ const servidor = http.createServer(async (req, res) => {
         const concepto   = String(body.concepto    || '').trim();
         const detalles = [];
         if (!proyectoId) detalles.push('Falta el proyecto');
+        else if (!(await repoProyectosKaos.activoParaTesoreria(proyectoId))) {
+          detalles.push('Ese proyecto no está activo en KAOS: solo se puede consultar como historial. Reactívalo en KAOS para cargarle un pago.');
+        }
         if (!concepto)   detalles.push('Falta el concepto');
         if (concepto.length > 1000) detalles.push('El concepto no puede pasar de 1000 caracteres');
         if (!(Number(oc.total) > 0)) detalles.push(`El total de la OC debe ser mayor a 0 (es ${oc.total})`);
