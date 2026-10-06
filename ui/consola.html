@@ -5420,7 +5420,10 @@ async function cargarSinProyecto(){
       // Se preselecciona el proyecto que más se parece al texto que traía el
       // documento: elegir es confirmar o corregir, no buscar en toda la lista.
       // Una obra cerrada no se sugiere a sí misma.
-      const sugerido = d.motivo === 'proyecto_inactivo' ? '' : sugerirProyecto(d.proyectoTexto, lista);
+      // Primero lo que se deduce del propio documento (el proyecto de la OC de
+      // la que salió); si no, el más parecido al texto que traía.
+      const sugerido = d.motivo === 'proyecto_inactivo' ? ''
+        : (lista.includes(d.proyectoDeducido) ? d.proyectoDeducido : sugerirProyecto(d.proyectoTexto, lista));
       const opciones = ['<option value="">Elegir proyecto…</option>']
         .concat(lista.map(c => `<option value="${esc(c)}" ${c === sugerido ? 'selected' : ''}>${esc(c)}${c === sugerido ? '  (sugerido)' : ''}</option>`))
         .join('');
@@ -5431,9 +5434,14 @@ async function cargarSinProyecto(){
       // Dos motivos, dos acciones. Sin proyecto se asigna uno; con la obra
       // cerrada el dato está bien y lo que falta es decidir entre reasignar o
       // reabrir la obra en KAOS.
-      const detalle = d.motivo === 'proyecto_inactivo'
+      const motivo = d.motivo === 'proyecto_inactivo'
         ? `<span style="color:#b45309">Proyecto <strong>${esc(d.proyecto)}</strong> inactivo</span> — reasignalo o reactivá la obra en KAOS`
-        : `El correo decía: <strong>${esc(d.proyectoTexto || '(vacío)')}</strong>`;
+        : d.proyectoTexto
+          ? `El correo decía: <strong>${esc(d.proyectoTexto)}</strong>`
+          : 'Llegó sin proyecto y sin texto de origen';
+      const pista = d.proyectoDeducido && d.proyectoDeducido === sugerido
+        ? ` · <span style="color:var(--success)">sugerido por su OC</span>` : '';
+      const detalle = `${motivo}${pista}${d.detalle ? `<br><span style="color:var(--txt-2)">${esc(d.detalle)}</span>` : ''}`;
 
       const etiqueta = d.motivo === 'proyecto_inactivo'
         ? '<span style="font-size:9px;background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:3px;margin-left:6px">OBRA CERRADA</span>'

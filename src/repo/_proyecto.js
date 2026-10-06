@@ -67,15 +67,83 @@ async function pendientes({ limite = 200 } = {}) {
        FROM erp.vw_documentos_sin_proyecto
       ORDER BY created_at DESC
       LIMIT $1`, [limite]);
-  return filas.map((f) => ({
-    tipo:          f.tipo,
-    id:            String(f.id),
-    numero:        f.numero || '',
-    proyectoTexto: f.proyecto_texto || '',
-    motivo:        f.motivo,
-    proyecto:      f.proyecto || '',
-    createdAt:     f.created_at,
-  }));
+  const det = await detalles(filas);
+  return filas.map((f) => {
+    const d = det.get(`${f.tipo}:${f.id}`) || {};
+    return {
+      tipo:          f.tipo,
+      id:            String(f.id),
+      numero:        f.numero || '',
+      proyectoTexto: f.proyecto_texto || '',
+      motivo:        f.motivo,
+      proyecto:      f.proyecto || '',
+      createdAt:     f.created_at,
+      detalle:       d.detalle || '',
+      // Proyecto que se deduce del propio documento (la OC de la que salió un
+      // movimiento de almacén). Es una pista firme, no un parecido de nombres.
+      proyectoDeducido: d.proyecto_deducido || '',
+    };
+  });
+}
+
+/**
+ * Qué es cada documento, en una línea, para poder decidir a qué proyecto va:
+ * un número suelto («Historial de precios 3861») no le dice nada a nadie.
+ * Una consulta por tipo, solo por los ids de la página.
+ */
+async function detalles(filas) {
+  const ids = (tipo) => filas.filter(f => f.tipo === tipo).map(f => Number(f.id));
+  const mapa = new Map();
+  const peso = (n) => n == null ? '' : '$' + Number(n).toLocaleString('es-CO', { maximumFractionDigits: 0 });
+  const dia  = (d) => d ? new Date(d).toISOString().slice(0, 10) : '';
+  const poner = (tipo, rows, fn) => rows.forEach(r => mapa.set(`${tipo}:${r.id}`, fn(r)));
+
+  const consultas = {
+    requerimiento: `SELECT r.id, r.solicitante, r.fecha_solicitud AS fecha,
+                           (SELECT string_agg(i.insumo, ', ' ORDER BY i.linea)
+                              FROM (SELECT * FROM erp.requerimiento_items WHERE requerimiento_id = r.id ORDER BY linea LIMIT 3) i) AS insumos,
+                           (SELECT count(*) FROM erp.requerimiento_items WHERE requerimiento_id = r.id) AS n
+                      FROM erp.requerimientos r WHERE r.id = ANY($1)`,
+    orden_compra:  `SELECT o.id, o.fecha_creacion AS fecha, o.total, o.estado, pv.razon_social AS proveedor
+                      FROM erp.ordenes_compra o LEFT JOIN erp.proveedores pv ON pv.nit = o.proveedor_nit
+                     WHERE o.id = ANY($1)`,
+    orden_servicio:`SELECT s.id, s.fecha_creacion AS fecha, s.total, s.estado, s.tipo_servicio, pv.razon_social AS proveedor
+                      FROM erp.ordenes_servicio s LEFT JOIN erp.proveedores pv ON pv.nit = s.proveedor_nit
+                     WHERE s.id = ANY($1)`,
+    remision:      `SELECT id, fecha, lugar_entrega, responsable_recepcion FROM erp.remisiones WHERE id = ANY($1)`,
+    movimiento_inventario:
+                   `SELECT m.id, m.tipo, m.fecha, m.insumo, m.cantidad, m.unidad, m.documento_ref,
+                           o.numero_oc, po.codigo AS proyecto_oc
+                      FROM erp.movimientos_inventario m
+                      LEFT JOIN erp.ordenes_compra o ON o.id = m.orden_compra_id
+                      LEFT JOIN erp.proyectos po ON po.id = o.proyecto_id
+                     WHERE m.id = ANY($1)`,
+    historial_precio:
+                   `SELECT id, insumo, proveedor_nombre, precio_unitario, fecha, numero_compra
+                      FROM erp.historial_precios WHERE id = ANY($1)`,
+  };
+
+  for (const [tipo, sql] of Object.entries(consultas)) {
+    const lista = ids(tipo);
+    if (!lista.length) continue;
+    const rows = await pg.rows(sql, [lista]);
+    if (tipo === 'requerimiento') poner(tipo, rows, r => ({
+      detalle: [r.solicitante, dia(r.fecha), r.n ? `${r.n} ítem(s): ${r.insumos}${r.n > 3 ? '…' : ''}` : ''].filter(Boolean).join(' · ') }));
+    if (tipo === 'orden_compra') poner(tipo, rows, r => ({
+      detalle: [r.proveedor, peso(r.total), r.estado, dia(r.fecha)].filter(Boolean).join(' · ') }));
+    if (tipo === 'orden_servicio') poner(tipo, rows, r => ({
+      detalle: [r.proveedor, r.tipo_servicio, peso(r.total), r.estado, dia(r.fecha)].filter(Boolean).join(' · ') }));
+    if (tipo === 'remision') poner(tipo, rows, r => ({
+      detalle: [dia(r.fecha), r.lugar_entrega, r.responsable_recepcion].filter(Boolean).join(' · ') }));
+    if (tipo === 'movimiento_inventario') poner(tipo, rows, r => ({
+      detalle: [`${r.tipo} ${r.documento_ref || ''}`.trim(), dia(r.fecha), r.insumo,
+                r.cantidad != null ? `${Number(r.cantidad)} ${r.unidad || ''}`.trim() : '',
+                r.numero_oc ? `de la OC ${r.numero_oc}${r.proyecto_oc ? ` (${r.proyecto_oc})` : ''}` : ''].filter(Boolean).join(' · '),
+      proyecto_deducido: r.proyecto_oc || '' }));
+    if (tipo === 'historial_precio') poner(tipo, rows, r => ({
+      detalle: [r.insumo, r.proveedor_nombre, peso(r.precio_unitario), dia(r.fecha), r.numero_compra].filter(Boolean).join(' · ') }));
+  }
+  return mapa;
 }
 
 /** Cuántos hay pendientes, para el contador del menú. */
