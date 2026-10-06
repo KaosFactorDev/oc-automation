@@ -155,10 +155,11 @@ CREATE TABLE IF NOT EXISTS erp.empalme_kaos_documentos (
   proyecto_antes    bigint NOT NULL,
   codigo_antes      text   NOT NULL,
   proyecto_despues  bigint,
+  consecutivo_antes text,
   PRIMARY KEY (tabla, documento_id)
 );
 COMMENT ON TABLE erp.empalme_kaos_documentos IS
-  'Cada documento que el empalme con KAOS (20261006120000) cambió de proyecto, con el proyecto y el código que tenía antes. proyecto_despues NULL = quedó en la bandeja.';
+  'Cada documento que el empalme con KAOS (20261006120000) cambió de proyecto, con el proyecto y el código que tenía antes. proyecto_despues NULL = quedó en la bandeja. consecutivo_antes: el número que tenía un requerimiento mandado a la bandeja, que se le quitó.';
 
 INSERT INTO erp.empalme_kaos_proyectos
 SELECT p.* FROM erp.proyectos p JOIN _filas f ON f.id = p.id WHERE f.papel <> 'ligar';
@@ -196,6 +197,21 @@ BEGIN
         WHERE x.proyecto_id = m.desde', t);
   END LOOP;
 END $$;
+
+-- Un requerimiento que va a la bandeja pierde el número que le dio SIN_PROYECTO:
+-- era el contador de un comodín, no de una obra. Si lo conservara, al
+-- asignarlo quedaría con un número que ya existe en su obra; sin número,
+-- repoRequerimientos.actualizar() le emite el siguiente de la obra al asignarlo.
+-- El número viejo queda en el respaldo.
+UPDATE erp.empalme_kaos_documentos d
+   SET consecutivo_antes = r.consecutivo_sistema
+  FROM erp.requerimientos r
+ WHERE d.tabla = 'requerimientos' AND d.documento_id = r.id AND d.proyecto_despues IS NULL;
+
+UPDATE erp.requerimientos r
+   SET consecutivo_sistema = NULL
+  FROM erp.empalme_kaos_documentos d
+ WHERE d.tabla = 'requerimientos' AND d.documento_id = r.id AND d.proyecto_despues IS NULL;
 
 -- El consecutivo de requerimientos va por proyecto, y erp.siguiente_consecutivo_req()
 -- da contador + 1. Cada obra queda con el MAYOR entre su contador, el de sus
