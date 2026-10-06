@@ -13,19 +13,26 @@ proyectos.** Todo eso se hace en KAOS y llega por sincronización.
 | Antes | Ahora |
 |---|---|
 | El proyecto se escribía a mano en la carga manual | Se elige de una lista cerrada |
-| Un proyecto desconocido se creaba solo, inactivo y marcado | El documento se guarda **sin proyecto** y queda en una bandeja |
+| Un proyecto desconocido se creaba solo, inactivo y marcado | El requerimiento se guarda **sin proyecto** y queda arriba en Requerimientos para revisar |
 | Se daban de alta proyectos desde Configuración | Se dan de alta en KAOS |
 | Se activaban e inactivaban desde Configuración | Lo decide KAOS |
 | Una OC podía salir sin proyecto | No sale sin proyecto **activo** |
+| Enviar a tesorería: emparejar a mano el proyecto con el de tesorería | Viene preseleccionado: los dos usan el id de KAOS |
 
-**Documentos sin proyecto** (Configuración → *Documentos sin proyecto*) es la
-pantalla nueva. Muestra lo que no puede convertirse en orden de compra, por dos
-motivos distintos:
+**Los requerimientos que hay que revisar están en la pestaña Requerimientos,
+arriba de todo**, porque son trabajo del comprador:
 
-- **Sin proyecto** — el correo traía un nombre que no está en el catálogo. Se
-  asigna desde ahí.
-- **Obra cerrada** — el proyecto es correcto pero está inactivo. Se reasigna, o
-  se reabre la obra en KAOS.
+- **⚠ Sin proyecto — revisar**: el correo traía un nombre que no está en el
+  catálogo. Cada fila muestra qué decía. Se abre y, con **Editar**, se le asigna
+  la obra —viene preseleccionada la más parecida, marcada «sugerido»— y recibe
+  su consecutivo; o se **anula** si no corresponde.
+- **Obra cerrada**: el proyecto es correcto pero está inactivo. Se reasigna con
+  Editar, o se reabre la obra en KAOS.
+
+**Documentos sin proyecto** (Configuración) queda solo para órdenes, remisiones
+y movimientos de inventario sueltos sin proyecto —casi siempre de la
+importación de SharePoint—. Cada fila dice qué es el documento, y si viene de
+una OC con proyecto, ese viene sugerido. No lista anulados ni precios.
 
 Un requerimiento que entra nombrando una obra cerrada **sí se registra y sí se
 ata a ella**: el dato es correcto y así conserva su zona, que es la que elige
