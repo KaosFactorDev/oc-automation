@@ -101,6 +101,10 @@ ssh <vps>
 cd <ruta-del-erp>
 
 # ── 1. Las migraciones ────────────────────────────────────────────────────
+#     Incluye el EMPALME (20261006120000): ata las 29 obras del catálogo a su
+#     proyecto de KAOS, fusiona las 21 variantes escritas a mano en su obra,
+#     manda los documentos de SIN_PROYECTO a la bandeja y borra TALENTO
+#     HUMANO. Se niega entera si algún nombre no cuadra. Ver §4.1.
 npm run db:push -- --dry-run     # ver cuáles faltan
 npm run db:push
 
@@ -108,29 +112,55 @@ npm run db:push
 #     No toca nada del catálogo: llena erp.proyectos_kaos y mide la brecha.
 npm run kaos:sync -- --todo
 
-# ── 3. Ligar lo que es la misma obra ──────────────────────────────────────
-#     Solo cuando el nombre es idéntico salvo mayúsculas y tildes, ambos lados
-#     están activos, y no hay ambigüedad. Ensayo primero.
-npm run kaos:ligar
-npm run kaos:ligar -- --si
-
-# ── 4. Volcar el espejo sobre el catálogo ─────────────────────────────────
+# ── 3. Volcar el espejo sobre el catálogo ─────────────────────────────────
 #     Acá KAOS pasa a mandar. Mirar el ensayo ANTES: dice cuántos proyectos
 #     entrarían y cuáles.
 npm run kaos:aplicar
 npm run kaos:aplicar -- --si
 
-# ── 5. Cerrar lo que quedó del ERP ────────────────────────────────────────
+# ── 4. Cerrar lo que quedó del ERP ────────────────────────────────────────
 #     Todo lo que no viene de KAOS pasa a histórico. El ensayo avisa cuántos
 #     requerimientos abiertos quedarían bloqueados por cada cierre.
 npm run kaos:cerrar-legado
 npm run kaos:cerrar-legado -- --si
 ```
 
-**El orden no es indiferente.** Ligar antes de aplicar es lo que evita que una
-obra viva en los dos sistemas se parta en dos filas: el histórico de un lado y
-las órdenes nuevas del otro. Y cerrar el legado antes de aplicar dejaría a los
-compradores sin ningún proyecto seleccionable.
+**El orden no es indiferente.** El empalme (en las migraciones) va antes de
+aplicar: es lo que evita que una obra viva en los dos sistemas se parta en dos
+filas, el histórico de un lado y las órdenes nuevas del otro. Y cerrar el
+legado antes de aplicar dejaría a los compradores sin ningún proyecto
+seleccionable.
+
+`kaos:ligar` ya no hace falta en el corte: solo ata nombres idénticos, y desde
+que KAOS les agregó el código al final («… (0380)») casi ninguno lo es. El
+empalme lo reemplaza con la correspondencia decidida a mano.
+
+### 4.1 · El empalme
+
+`supabase/migrations/20261006120000_empalme_proyectos_kaos.sql`. Las 53 filas de
+producción, decididas una por una el 2026-10-06 — la misma correspondencia que
+usa Cash_Flow, así que cada obra tiene el mismo `kaos_id` en los dos sistemas:
+
+| Qué | Cuántas | Qué pasa |
+|---|--:|---|
+| Obras | 29 | `kaos_id`, `kaos_code`, `origen='kaos'`. `codigo` no cambia: es lo impreso en los PDF |
+| Variantes («mistral», «IZZY 96», «LT Norte»…) | 21 | sus documentos pasan a su obra y la fila se borra |
+| SIN_PROYECTO | 1 | sus documentos quedan sin proyecto, en la bandeja, con ese texto como pista |
+| TALENTO HUMANO | 1 | se borra (no tenía nada) |
+| REACTIVACION DE CLIENTES COLPREVENCIO | 1 | no existe en KAOS: historial local, inactivo |
+
+También corrige los contadores de requerimientos: cada obra queda con el mayor
+entre el suyo, el de sus variantes y el número más alto ya emitido. En
+producción varios estaban atrasados (CT26-026 en 11 con el 0015 usado) y el
+siguiente requerimiento habría repetido un número.
+
+No borra documentos. Lo que mueve queda en `erp.empalme_kaos_documentos` (con
+el proyecto y el código de antes) y las filas retiradas en
+`erp.empalme_kaos_proyectos`.
+
+Probado sobre una copia de producción: 0 diferencias en los documentos de las
+seis tablas, 0 contadores por debajo de lo emitido; con un nombre alterado se
+niega sin tocar nada; sobre una base vacía no hace nada.
 
 ### Verificación
 
