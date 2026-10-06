@@ -26,6 +26,7 @@
 
 const pg = require('../pg');
 
+const repoProyecto = require('./_proyecto');
 const CABECERA = `
   o.id, o.numero_oc, o.requerimiento_id, o.requerimiento_origen, o.cotizacion_id,
   o.proveedor_nit, o.proyecto_id, o.subtotal, o.iva, o.total, o.estado,
@@ -160,22 +161,23 @@ async function obtenerVarias(ids) {
  */
 async function crear(datos, items = []) {
   return pg.tx(async (c) => {
-    const proyectoId = await resolverProyecto(c, datos.proyecto);
+    const { proyectoId, proyectoTexto } = await resolverProyecto(c, datos.proyecto);
     const nit        = await resolverProveedor(c, datos.proveedorNit, datos.proveedorNombre);
 
     const cab = await c.query(
       `INSERT INTO erp.ordenes_compra
          (numero_oc, requerimiento_id, requerimiento_origen, cotizacion_id,
           proveedor_nit, proyecto_id, subtotal, iva, total, estado,
-          creado_por, fecha_creacion)
+          creado_por, fecha_creacion, proyecto_texto)
        VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9,'borrador'), $10,
-               COALESCE($11, now()))
+               COALESCE($11, now()), $12)
        RETURNING id`,
       [
         datos.requerimientoId || null, datos.requerimientoOrigen || null,
         datos.cotizacionId || null, nit, proyectoId,
         Number(datos.subtotal) || 0, Number(datos.iva) || 0, Number(datos.total) || 0,
         datos.estado || null, datos.creadoPor || null, datos.fechaCreacion || null,
+        proyectoTexto,
       ]);
     const id = cab.rows[0].id;
     await insertarItems(c, id, items);
@@ -286,17 +288,10 @@ async function insertarItems(c, id, items) {
 // igual que hace el import: se prefiere no perder la referencia del documento
 // antes que rechazarlo.
 
-async function resolverProyecto(c, texto) {
-  const s = String(texto || '').trim();
-  if (!s) return null;
-  const hallado = await c.query(
-    'SELECT id FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)', [s]);
-  if (hallado.rowCount) return hallado.rows[0].id;
-  const creado = await c.query(
-    `INSERT INTO erp.proyectos (codigo, nombre, activo, requiere_revision)
-     VALUES ($1, $1, false, true) RETURNING id`, [s]);
-  return creado.rows[0].id;
-}
+// Resolver ya no crea el proyecto que falta: devuelve `proyectoId` en null y
+// el texto que llegó, para que el documento se guarde sin asignar y una
+// persona lo resuelva desde la bandeja. Ver src/repo/_proyecto.js.
+const resolverProyecto = repoProyecto.resolver;
 
 async function resolverProveedor(c, nit, nombre) {
   const s = String(nit || '').trim();

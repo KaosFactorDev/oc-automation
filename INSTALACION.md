@@ -239,8 +239,10 @@ El `.env` y el volumen de datos (`data/`) no se tocan durante la actualización.
 
 Permite que, sobre una OC ya aprobada, una persona envíe la solicitud de pago a
 Pagos Diarios sin re-teclear los datos. El flujo **no es automático**: quien
-envía elige el proyecto de tesorería y escribe el concepto, y queda registrado
-su correo en la solicitud.
+envía confirma el proyecto —preseleccionado con el de KAOS de la OC— y escribe
+el concepto, y queda registrado su correo en la solicitud. El desplegable sale
+de la copia local de KAOS (`erp.proyectos_kaos`), así que hace falta haber
+corrido `npm run kaos:sync` al menos una vez.
 
 Si estas variables no están configuradas, la integración no aparece en la
 consola (ni la columna "Tesorería" ni el botón). No hay nada que desactivar.

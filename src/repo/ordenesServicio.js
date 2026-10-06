@@ -17,6 +17,7 @@
 
 const pg = require('../pg');
 
+const repoProyecto = require('./_proyecto');
 const CABECERA = `
   o.id, o.numero_os, o.requerimiento_id, o.proyecto_id, o.proveedor_nit,
   o.tipo_servicio, o.clausulas, o.oferta_economica_ref, o.oferta_economica_condiciones,
@@ -150,7 +151,7 @@ const COLUMNAS = {
 
 async function crear(datos, items = []) {
   return pg.tx(async (c) => {
-    const proyectoId = await resolverProyecto(c, datos.proyecto);
+    const { proyectoId, proyectoTexto } = await resolverProyecto(c, datos.proyecto);
     const nit        = await resolverProveedor(c, datos.proveedorNit, datos.proveedorNombre);
 
     const cab = await c.query(
@@ -159,11 +160,12 @@ async function crear(datos, items = []) {
           clausulas, oferta_economica_ref, oferta_economica_condiciones,
           valor, iva, total, tipo_contrato, aiu_a, aiu_i, aiu_u,
           estado, tipo_gasto, lugar_prestacion, fecha_inicio, fecha_fin,
-          condiciones_comerciales, observaciones, creado_por, fecha_creacion)
+          condiciones_comerciales, observaciones, creado_por, fecha_creacion,
+          proyecto_texto)
        VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                COALESCE($11,'IVA_PLENO'), $12, $13, $14,
                COALESCE($15,'borrador'), $16, $17, $18, $19, $20, $21, $22,
-               COALESCE($23, now()))
+               COALESCE($23, now()), $24)
        RETURNING id`,
       [
         datos.requerimientoId || null, proyectoId, nit,
@@ -176,6 +178,7 @@ async function crear(datos, items = []) {
         datos.fechaInicio || null, datos.fechaFin || null,
         datos.condicionesComerciales || null, datos.observaciones || null,
         datos.creadoPor || null, datos.fechaCreacion || null,
+        proyectoTexto,
       ]);
     const id = cab.rows[0].id;
     await insertarItems(c, id, items);
@@ -256,17 +259,10 @@ async function insertarItems(c, id, items) {
 // Mismos resolvedores que en las OC: si el proyecto o el proveedor no están en
 // su catálogo se crean marcados para revisión, antes que rechazar el documento.
 
-async function resolverProyecto(c, texto) {
-  const s = String(texto || '').trim();
-  if (!s) return null;
-  const hallado = await c.query(
-    'SELECT id FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)', [s]);
-  if (hallado.rowCount) return hallado.rows[0].id;
-  const creado = await c.query(
-    `INSERT INTO erp.proyectos (codigo, nombre, activo, requiere_revision)
-     VALUES ($1, $1, false, true) RETURNING id`, [s]);
-  return creado.rows[0].id;
-}
+// Resolver ya no crea el proyecto que falta: devuelve `proyectoId` en null y
+// el texto que llegó, para que el documento se guarde sin asignar y una
+// persona lo resuelva desde la bandeja. Ver src/repo/_proyecto.js.
+const resolverProyecto = repoProyecto.resolver;
 
 async function resolverProveedor(c, nit, nombre) {
   const s = String(nit || '').trim();

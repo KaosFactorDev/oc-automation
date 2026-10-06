@@ -1025,8 +1025,7 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
           </div>
           <div class="campo">
             <label>Proyecto (código)</label>
-            <input type="text" id="carga-proyecto" placeholder="Se detecta del Excel si está vacío" list="lista-proyectos-carga">
-            <datalist id="lista-proyectos-carga"></datalist>
+            <select id="carga-proyecto"><option value="">— Detectar del Excel —</option></select>
           </div>
           <div class="campo">
             <label>Responsable (opcional)</label>
@@ -1054,8 +1053,7 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
           <div class="campo">
             <label>Proyecto (código) *</label>
-            <input type="text" id="man-proyecto" placeholder="Requerido — selecciona o escribe" list="lista-proyectos-manual">
-            <datalist id="lista-proyectos-manual"></datalist>
+            <select id="man-proyecto"><option value="">— Selecciona el proyecto —</option></select>
           </div>
           <div class="campo">
             <label>Fecha de solicitud</label>
@@ -1183,27 +1181,42 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         </div>
       </details>
 
+      <details id="cfg-sin-proyecto" style="border-top:1px solid var(--border);padding-top:18px" ontoggle="if(this.open)cargarSinProyecto()">
+        <summary style="cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:600;list-style:none;display:flex;align-items:center;gap:6px">
+          <span>&#9654;</span> Documentos sin proyecto
+          <span id="sp-contador" style="display:none;background:#c33;color:#fff;border-radius:9px;padding:1px 7px;font-size:10px;letter-spacing:0">0</span>
+        </summary>
+        <div style="margin-top:16px">
+          <div style="font-size:11px;color:var(--txt-3);margin-bottom:10px;line-height:1.5">
+            Órdenes, remisiones y movimientos de inventario que quedaron sin proyecto —casi
+            siempre de la importación de SharePoint—. Su gasto se suma bajo «(sin proyecto)»,
+            fuera de todo informe por obra, hasta que se les asigne uno.
+            Los <strong>requerimientos</strong> sin proyecto o de obra cerrada no están aquí: se
+            revisan en la pestaña <strong>Requerimientos</strong>, arriba de todo.
+          </div>
+          <div id="sp-lista" style="margin-top:12px;max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:4px"></div>
+          <div id="msg-sp" style="font-size:11px;margin-top:6px;min-height:16px"></div>
+        </div>
+      </details>
+
       <details id="cfg-proyectos" style="border-top:1px solid var(--border);padding-top:18px">
         <summary style="cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:600;list-style:none;display:flex;align-items:center;gap:6px">
           <span>&#9654;</span> Proyectos activos
         </summary>
         <div style="margin-top:16px">
-          <div style="font-size:11px;color:var(--txt-3);margin-bottom:10px;line-height:1.5">Al inactivar un proyecto, deja de aparecer en los selectores. La información histórica de compras, proveedores e insumos no se ve afectada.</div>
+          <div style="font-size:11px;color:var(--txt-3);margin-bottom:10px;line-height:1.5">Solo los proyectos activos aparecen en los selectores de requerimientos y órdenes. La información histórica de compras, proveedores e insumos no se ve afectada.</div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-top:10px">
-            <input class="td-input" id="proy-codigo" placeholder="Código (ej. CT25-040)" style="border:1px solid var(--border);padding:7px 10px">
-            <input class="td-input" id="proy-nombre" placeholder="Nombre" style="border:1px solid var(--border);padding:7px 10px">
-            <button id="btn-agregar-proy" class="btn btn-primary btn-sm" onclick="crearProyecto()">Agregar</button>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:6px">
-            <input class="td-input" id="proy-tipo" placeholder="Tipo" style="border:1px solid var(--border);padding:7px 10px">
-            <input class="td-input" id="proy-ciudad" placeholder="Ciudad" style="border:1px solid var(--border);padding:7px 10px">
-            <select id="proy-zona" class="td-input" style="border:1px solid var(--border);padding:7px 10px">
-              <option value="Centro">Centro</option><option value="Caribe">Caribe</option>
-              <option value="Occidente">Occidente</option><option value="Nororiente">Nororiente</option>
-              <option value="Sur">Sur</option><option value="Llanos">Llanos</option>
-              <option value="Internacional">Internacional</option>
-            </select>
+          <!--
+            El alta de proyectos salió de acá: el catálogo se administra en KAOS
+            y el ERP solo lo consume. Dejar el formulario habría significado dos
+            catálogos divergiendo, que es justo lo que se está desarmando.
+            La ruta POST /proyectos responde 405 con este mismo motivo.
+          -->
+          <div style="font-size:11px;color:var(--txt-3);background:var(--bg-2,#f6f6f6);border:1px solid var(--border);border-radius:4px;padding:10px 12px;margin-top:10px;line-height:1.5">
+            Los proyectos se crean y se administran en <strong>KAOS</strong>. Este panel es de
+            consulta: el estado llega por la sincronización y no se cambia desde acá. Las filas
+            marcadas <strong>Histórico</strong> son anteriores a la conexión y se conservan por
+            sus documentos; lo que siga en uso se da de alta en KAOS.
           </div>
           <div id="msg-proy" style="font-size:11px;margin-top:6px;min-height:16px"></div>
 
@@ -2646,14 +2659,28 @@ async function emitirOS() {
 }
 
 async function cargarAutocompletes(){
-  const [proveedores, insumos, proyectos] = await Promise.all([
+  // Dos listas de proyectos, y la diferencia importa:
+  //
+  //   ESTADO.proyectos      solo activos → para CREAR (OC, OS, requerimientos).
+  //                         A una obra cerrada no se le cuelga trabajo nuevo.
+  //   ESTADO.proyectosTodos activos e inactivos → para FILTRAR el historial.
+  //
+  // Antes había una sola, la de activos, y se repartía también a los filtros.
+  // El efecto: una obra terminada no se podía filtrar. Hoy 45 de las 52 filas
+  // del catálogo están inactivas —CT23-205 CERREJON con 460 documentos entre
+  // ellas— así que la mayoría del histórico era inalcanzable por obra.
+  const [proveedores, insumos, proyectos, proyectosTodos] = await Promise.all([
     fetch('/proveedores').then(r => r.json()).catch(() => []),
     fetch('/insumos').then(r => r.json()).catch(() => []),
     fetch('/proyectos').then(r => r.json()).catch(() => []),
+    fetch('/proyectos/admin').then(r => r.json()).catch(() => []),
   ]);
   ESTADO.proveedoresDB = proveedores;
   ESTADO.insumosBD     = insumos;
   ESTADO.proyectos     = proyectos;
+  // /proyectos/admin devuelve el objeto completo; los filtros usan el código.
+  ESTADO.proyectosTodos = (Array.isArray(proyectosTodos) ? proyectosTodos : [])
+    .map(p => p.codigo).filter(Boolean);
 
   const dl1 = $('#lista-proveedores');
   if (dl1) dl1.innerHTML = ESTADO.proveedoresDB.map(p => `<option value="${esc(p.nombre+' (NIT: '+p.nit+')')}">`).join('');
@@ -2679,8 +2706,11 @@ async function cargarAutocompletes(){
 
   const fReqP = $('#filtro-req-proyecto');
   const fOcP  = $('#filtro-oc-proyecto');
+  // Filtros: la lista COMPLETA. Filtrar es mirar el pasado, y el pasado incluye
+  // las obras cerradas — que son la mayoría del histórico.
   const proyHtml = '<option value="">Todos los proyectos</option>' +
-                   ESTADO.proyectos.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+                   (ESTADO.proyectosTodos.length ? ESTADO.proyectosTodos : ESTADO.proyectos)
+                     .map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
   if (fReqP) fReqP.innerHTML = proyHtml;
   if (fOcP)  fOcP.innerHTML  = proyHtml;
 
@@ -2739,17 +2769,30 @@ function renderRequerimientos(){
     return;
   }
 
-  // Agrupar por proyecto
+  // Agrupar por proyecto. Lo que necesita revisión va primero: los que llegaron
+  // con un proyecto que no está en el catálogo, y los de una obra cerrada. Ni
+  // unos ni otros pueden pasar a OC hasta que alguien les asigne una obra
+  // abierta (Editar) o los anule.
+  const SIN_PROYECTO = '\u0000sin';
   const grupos = {};
   filtrados.forEach(r => {
-    const k = r.proyecto || 'Sin proyecto';
+    const k = r.proyecto || SIN_PROYECTO;
     (grupos[k] ||= []).push(r);
   });
+  const cerrada = (reqs) => reqs.some(r => r.proyectoActivo === false);
+  const prioridad = ([k, reqs]) => k === SIN_PROYECTO ? 0 : cerrada(reqs) ? 1 : 2;
+  const ordenados = Object.entries(grupos).sort((a, b) => prioridad(a) - prioridad(b));
 
-  cont.innerHTML = Object.entries(grupos).map(([proy, reqs]) => `
-    <div class="card">
+  cont.innerHTML = ordenados.map(([proy, reqs]) => `
+    <div class="card"${proy === SIN_PROYECTO ? ' style="border-color:#f59e0b"' : ''}>
       <div class="card-head">
-        <h3>${esc(proy)}</h3>
+        ${proy === SIN_PROYECTO
+          ? `<h3 style="color:#b45309">⚠ Sin proyecto — revisar</h3>
+             <span style="font-size:11px;color:var(--txt-2);margin-left:10px">El correo traía un proyecto que no está en el catálogo. Ábrelo y asígnale uno con <strong>Editar</strong>, o anúlalo.</span>`
+          : `<h3>${esc(proy)}</h3>${cerrada(reqs)
+              ? `<span style="font-size:9px;background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:3px;margin-left:8px">OBRA CERRADA</span>
+                 <span style="font-size:11px;color:var(--txt-2);margin-left:8px">Reasígnalo con <strong>Editar</strong> o reactiva la obra en KAOS.</span>`
+              : ''}`}
         <span class="tag tag-pendiente" style="margin-left:auto">${reqs.length} req.</span>
       </div>
       <div class="card-body" style="padding:0">
@@ -2768,7 +2811,8 @@ function renderRequerimientos(){
                 <tr style="cursor:pointer" onclick="verRequerimiento('${esc(r.id)}')">
                   <td class="mono">${r.consecutivoSistema
                     ? `<strong>${esc(r.consecutivoSistema)}</strong>${r.consecutivo ? `<br><span style="font-size:9px;color:var(--txt-2)">ref: ${esc(r.consecutivo)}</span>` : ''}`
-                    : esc(r.consecutivo || '—')}</td>
+                    : esc(r.consecutivo || '—')}${!r.proyecto && r.proyectoTexto
+                    ? `<br><span style="font-size:10px;color:#b45309">El correo decía: <strong>${esc(r.proyectoTexto)}</strong></span>` : ''}</td>
                   <td>${esc(fmtFecha(fecha))}</td>
                   <td>${esc(resp)}</td>
                   <td>${(() => { try { const its = JSON.parse(r.itemsJson || '[]'); const act = its.filter(x => !x.descartado).length; return act < its.length ? `${act}/${its.length}` : its.length; } catch { return 0; } })()}</td>
@@ -2803,19 +2847,36 @@ async function anularRequerimiento(id, consecutivo){
 
 // ── Editar requerimiento (descartar ítems / cambiar proyecto) ─────────────────
 
-function _poblarProyectosEditReq(proyectoActual) {
+// Sin proyecto actual, el desplegable NO puede arrancar en el primero de la
+// lista: guardar sin mirar le asignaría esa obra. Arranca en «— Elegir —» o en
+// la obra más parecida al texto del correo, marcada como sugerida.
+function _poblarProyectosEditReq(proyectoActual, textoCorreo = '') {
   const sel = $('#edit-req-proyecto');
   sel.innerHTML = '';
   const proyectos = ESTADO.proyectos || [];
   const todos = proyectoActual && !proyectos.includes(proyectoActual)
     ? [proyectoActual, ...proyectos] : proyectos;
+  const sugerido = proyectoActual ? '' : sugerirProyecto(textoCorreo, proyectos);
+  if (!proyectoActual) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '— Elegir proyecto —';
+    sel.appendChild(o);
+  }
   todos.forEach(p => {
     const o = document.createElement('option');
     o.value = p;
-    o.textContent = p;
-    if (p === proyectoActual) o.selected = true;
+    o.textContent = p === sugerido ? `${p}  (sugerido)` : p;
+    if (p === (proyectoActual || sugerido)) o.selected = true;
     sel.appendChild(o);
   });
+  const pista = $('#edit-req-pista');
+  if (pista) {
+    pista.innerHTML = proyectoActual ? '' : textoCorreo
+      ? `El correo decía: <strong>${esc(textoCorreo)}</strong>${sugerido ? ' — se preseleccionó la obra más parecida; verifícala.' : ' — ninguna obra se parece; elígela a mano.'}`
+      : 'Llegó sin proyecto: elígelo a mano.';
+    pista.style.display = proyectoActual ? 'none' : 'block';
+  }
 }
 
 function renderEditReqItems() {
@@ -2839,7 +2900,7 @@ async function abrirEditarRequerimiento(id) {
   _editReqId = id;
   try { _editReqItems = JSON.parse(r.itemsJson || '[]'); } catch { _editReqItems = []; }
   $('#edit-req-titulo').textContent = r.consecutivoSistema || r.consecutivo || id;
-  _poblarProyectosEditReq(r.proyecto || '');
+  _poblarProyectosEditReq(r.proyecto || '', r.proyectoTexto || '');
   renderEditReqItems();
   const conOCyDescartado = _editReqItems.filter(it => it.descartado);
   if (conOCyDescartado.length) {
@@ -3534,6 +3595,15 @@ function _verRequerimientoRender(r) {
   wrap.innerHTML = `
     <div class="modal-card" style="max-width:980px">
       <h3>${r.consecutivoSistema ? esc(r.consecutivoSistema) : esc(r.consecutivo || '—')} · ${esc(r.proyecto || '')}${r.consecutivoSistema && r.consecutivo ? `<span style="font-size:12px;font-weight:400;color:var(--txt-2);margin-left:8px">(ref. usuario: ${esc(r.consecutivo)})</span>` : ''}</h3>
+      ${!r.proyecto ? `
+        <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin:6px 0;font-size:12px;color:#92400e">
+          <strong>⚠ Sin proyecto.</strong>
+          ${r.proyectoTexto ? `El correo decía <strong>«${esc(r.proyectoTexto)}»</strong>, que no está en el catálogo.` : 'Llegó sin proyecto.'}
+          No se puede generar OC hasta asignarle uno: usa <strong>Editar</strong>, o <strong>Anular</strong> si no corresponde.
+        </div>` : r.proyectoActivo === false ? `
+        <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin:6px 0;font-size:12px;color:#92400e">
+          <strong>⚠ Obra cerrada.</strong> No se puede generar OC para ${esc(r.proyecto)}: reasígnalo con <strong>Editar</strong> o reactiva la obra en KAOS.
+        </div>` : ''}
       <p class="text-muted" style="margin:2px 0">
         ${esc(fmtFecha(r.fechaCorreo || r.fechaSolicitud))}
         ${r.solicitante ? ` · ${esc(r.solicitante)}` : ''}
@@ -3749,10 +3819,15 @@ function abrirCargaManual(){
   $('#msg-carga-req').style.color = '';
   $('#btn-carga-req').disabled = true;
 
-  // Poblar datalist de proyectos con los conocidos (ambos modos)
-  const opciones = (ESTADO.proyectos || []).map(p => `<option value="${esc(p)}">`).join('');
-  $('#lista-proyectos-carga').innerHTML  = opciones;
-  $('#lista-proyectos-manual').innerHTML = opciones;
+  // Los dos eran <input> con datalist, que sugiere pero no obliga: se podía
+  // escribir cualquier cosa y el requerimiento entraba con un proyecto que no
+  // existe. Eran la última puerta por donde el catálogo dejaba de ser único.
+  //
+  // Como <select> solo se puede elegir lo que hay, y lo que hay son los
+  // proyectos activos — que desde la conexión vienen todos de KAOS.
+  const opciones = (ESTADO.proyectos || []).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  $('#carga-proyecto').innerHTML = '<option value="">— Detectar del Excel —</option>' + opciones;
+  $('#man-proyecto').innerHTML   = '<option value="">— Selecciona el proyecto —</option>' + opciones;
 
   resetCapturaManual();
   cambiarModoCarga('archivo');
@@ -4656,12 +4731,13 @@ async function enviarATesoreria(id){
 
   const proyectos = ESTADO.tesoreria.proyectos || [];
   if (!proyectos.length) {
-    alert('No se pudieron cargar los proyectos de tesorería. Intenta refrescar.');
+    alert('No se pudieron cargar los proyectos de KAOS. Intenta refrescar; si sigue vacío, falta correr kaos:sync en el servidor.');
     return;
   }
 
-  // Sugerencia de proyecto: el par que un humano ya eligió para este proyecto.
-  // Los nombres de los dos sistemas no coinciden, así que nunca se adivina.
+  // El proyecto de la OC ya está atado a uno de KAOS, que es el mismo id que usa
+  // tesorería: ese viene elegido. Si no está atado, se elige a mano viendo el
+  // texto del proyecto de la OC. Nunca se adivina por nombre.
   let mapeo = null;
   try {
     const r = await fetch('/tesoreria/mapeo?proyecto=' + encodeURIComponent(o.proyecto || '')).then(r => r.json());
@@ -4682,8 +4758,9 @@ async function enviarATesoreria(id){
         <span style="color:var(--txt-2)">Proveedor</span><span>${esc(o.proveedorNombre || '—')}</span>
         <span style="color:var(--txt-2)">NIT</span><span class="mono">${esc(o.proveedorNit || '—')}</span>
         <span style="color:var(--txt-2)">Total</span><strong class="mono">${fmt$(o.total)}</strong>
+        <span style="color:var(--txt-2)">Proyecto en la OC</span><span>${esc(o.proyecto || '—')}</span>
       </div>
-      <label>Proyecto de tesorería *</label>
+      <label>Proyecto (KAOS) *</label>
       <input type="text" id="tes-proy-buscar" placeholder="Filtrar proyectos…" autocomplete="off">
       <!-- option:checked explícito: sin esto el navegador pinta la opción
            elegida en gris pálido al perder el foco y la elección parece
@@ -4694,9 +4771,7 @@ async function enviarATesoreria(id){
       </style>
       <select id="tes-proy" size="6" style="margin-top:6px;width:100%"></select>
       <div id="tes-proy-elegido" style="margin-top:6px;font-size:12px"></div>
-      <small class="text-muted" style="display:block;margin-top:4px" id="tes-proy-hint">
-        Los nombres no coinciden con los códigos del ERP (${esc(o.proyecto || 'sin proyecto')}); elígelo a mano.
-      </small>
+      <small class="text-muted" style="display:block;margin-top:4px" id="tes-proy-hint"></small>
       <label style="margin-top:12px">Concepto *</label>
       <textarea id="tes-concepto" rows="3" maxlength="1000">${esc(_conceptoSugerido(o))}</textarea>
       <small class="text-muted" style="display:block;margin-top:2px">
@@ -4744,23 +4819,25 @@ async function enviarATesoreria(id){
   // un proyecto que ya estaba elegido.
   const pintarElegido = () => {
     const p = proyectos.find(x => x.id === elegido);
+    const textoOC = o.proyecto || 'sin proyecto';
     if (p) {
       elegidoEl.innerHTML = `<span style="color:var(--success)">✓ Elegido:</span> <strong>${esc(p.name)}</strong>`;
-      hint.textContent = sugeridoId && elegido !== sugeridoId
-        ? 'Esta elección reemplaza la sugerida y se recordará para las próximas OC de ' + (o.proyecto || 'este proyecto') + '.'
-        : 'Se recordará para las próximas OC de ' + (o.proyecto || 'este proyecto') + '.';
+      if (!sugeridoId) {
+        hint.textContent = `«${textoOC}» no está atado a KAOS: confirma que este sea el proyecto.`;
+      } else if (elegido === sugeridoId) {
+        hint.textContent = `Es el proyecto de KAOS de «${textoOC}».`;
+      } else {
+        hint.innerHTML = `<span style="color:var(--warn)">Cambiaste el proyecto que tiene la OC en KAOS (${esc(proyectos.find(x => x.id === sugeridoId)?.name || '')}). Verifica que sea correcto.</span>`;
+      }
     } else {
       elegidoEl.innerHTML = '<span style="color:var(--warn)">Ningún proyecto elegido todavía</span>';
-      hint.textContent = `Los nombres no coinciden con los códigos del ERP (${o.proyecto || 'sin proyecto'}); elígelo a mano.`;
+      hint.innerHTML = `El proyecto de la OC, <strong>«${esc(textoOC)}»</strong>, no está atado a KAOS: elige a mano el que corresponda.`;
     }
     actualizarBotonOk();
   };
 
   pintarOpciones();
   pintarElegido();
-  if (sugeridoId) {
-    hint.innerHTML = `<span style="color:var(--warn)">Sugerido por envíos anteriores de ${esc(o.proyecto || '')} — verifica que sea el correcto.</span>`;
-  }
   buscar.addEventListener('input', () => pintarOpciones(buscar.value));
   sel.addEventListener('change', () => { elegido = sel.value; pintarElegido(); });
   conceptoEl.addEventListener('input', actualizarBotonOk);
@@ -4869,6 +4946,23 @@ function poblarDatalistInsumos(){
   const dedupe = [...new Set(lista)].sort();
   dl.innerHTML = dedupe.map(i => `<option value="${esc(i)}">`).join('');
 }
+// El proyecto de cada fila de la carga masiva: era un input libre, así que se
+// podía teclear cualquier cosa y la fila del historial de precios entraba sin
+// proyecto real. Cerrado a los activos, igual que el resto.
+//
+// Si la fila ya trae un proyecto que no está entre los activos —viene de un
+// documento viejo— se antepone para no perderlo en silencio; queda marcado.
+function opcionesProyectoFila(actual, idx) {
+  const valor = String(actual || '');
+  const activos = ESTADO.proyectos || [];
+  const fuera = valor && !activos.includes(valor);
+  const opts = ['<option value="">— Sin proyecto —</option>']
+    .concat(fuera ? [`<option value="${esc(valor)}" selected>${esc(valor)} (no activo)</option>`] : [])
+    .concat(activos.map(p => `<option value="${esc(p)}"${p === valor ? ' selected' : ''}>${esc(p)}</option>`))
+    .join('');
+  return `<select class="td-input" style="width:150px" onchange="actualizar(${idx},'proyecto',this.value)">${opts}</select>`;
+}
+
 function renderTabla(){
   const tbody = $('#tabla-cuerpo');
   tbody.innerHTML = '';
@@ -4885,7 +4979,7 @@ function renderTabla(){
       <td><input class="td-input" value="${esc(item.proveedor||'')}" oninput="actualizar(${idx},'proveedor',this.value)" style="width:180px"></td>
       <td><input class="td-input" value="${esc(item.nit||'')}" oninput="actualizar(${idx},'nit',this.value)" style="width:90px"></td>
       <td><input class="td-input" value="${esc(item.fechaVigencia||'')}" oninput="actualizar(${idx},'fechaVigencia',this.value)" placeholder="DD/MM/YYYY" style="width:100px"></td>
-      <td><input class="td-input" value="${esc(item.proyecto||'')}" oninput="actualizar(${idx},'proyecto',this.value)" style="width:150px"></td>
+      <td>${opcionesProyectoFila(item.proyecto, idx)}</td>
       <td>${nuevo ? '<span class="tag tag-pendiente">nuevo</span>' : '<span class="tag tag-cerrado">existente</span>'}</td>`;
     tbody.appendChild(tr);
   });
@@ -5155,6 +5249,9 @@ function reiniciarOC(){
 let _logoDataUrl = null;
 async function abrirConfig(){
   $('#modal-config').style.display = 'flex';
+  // El contador va antes que la lista: es lo que hace que alguien note que hay
+  // documentos esperando proyecto sin tener que abrir el panel.
+  refrescarContadorSinProyecto();
   cargarProyectosAdmin();
   cargarProveedoresAdmin();
   // Mostrar sección de usuarios solo a admins
@@ -5257,8 +5354,12 @@ async function cargarProyectosAdmin(){
             <div style="font-size:11px;color:var(--txt-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.nombre || '')}${p.zona ? ' · ' + esc(p.zona) : ''}</div>
           </div>
           <span class="tag ${activo ? 'tag-aprobada' : 'tag-anulada'}" style="font-size:10px">${activo ? 'Activo' : 'Inactivo'}</span>
-          <button class="btn btn-ghost btn-sm" onclick="editarProyecto('${esc(p.id)}')">Editar</button>
-          <button class="btn btn-ghost btn-sm" onclick="toggleProyecto('${esc(p.id)}', ${!activo})">${activo ? 'Inactivar' : 'Activar'}</button>
+          ${p.origen === 'kaos'
+            ? `<span style="font-size:10px;color:var(--txt-3)" title="${esc(p.kaosCode || '')}">Se administra en KAOS</span>`
+            // Los anteriores a la conexión son histórico: no se activan ni se
+            // inactivan desde acá porque nada nuevo debe colgarse de ellos. Lo
+            // que siga vivo se da de alta en KAOS.
+            : `<span style="font-size:10px;color:var(--txt-3)">Histórico</span>`}
         </div>`;
     }).join('');
   }catch(e){
@@ -5307,84 +5408,164 @@ async function buscarPrecios() {
   document.getElementById('bp-resultado').style.display = 'block';
 }
 
-async function crearProyecto(){
-  const codigo = $('#proy-codigo').value.trim();
-  const nombre = $('#proy-nombre').value.trim() || codigo;
-  const tipo   = $('#proy-tipo').value.trim();
-  const ciudad = $('#proy-ciudad').value.trim();
-  const zona   = $('#proy-zona').value;
-  const msg    = $('#msg-proy');
-  if (!codigo) { msg.textContent = 'Código requerido'; msg.style.color = '#c33'; return; }
 
-  if (_editandoProyectoId) {
-    msg.textContent = 'Guardando…'; msg.style.color = 'var(--txt-2)';
-    try {
-      const r = await fetch(`/proyectos/${encodeURIComponent(_editandoProyectoId)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ codigo, nombre, tipo, ciudad, zona }),
-      });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || 'Error');
-      msg.textContent = '✓ Proyecto actualizado'; msg.style.color = '#2a8';
-      _editandoProyectoId = null;
-      $('#btn-agregar-proy').textContent = 'Agregar';
-      $('#btn-agregar-proy').classList.replace('btn-secondary', 'btn-primary');
-      ['proy-codigo','proy-nombre','proy-tipo','proy-ciudad'].forEach(id => $('#'+id).value = '');
-      cargarProyectosAdmin();
-      cargarAutocompletes();
-    } catch(e) { msg.textContent = 'Error: ' + e.message; msg.style.color = '#c33'; }
-    return;
-  }
+// ── Bandeja de documentos sin proyecto ──────────────────────────────────────
+// Un documento entra sin proyecto cuando el texto que traía el correo no está
+// en el catálogo. El ERP ya no inventa el proyecto, así que alguien tiene que
+// asignarlo acá. `proyectoTexto` es lo que llegó: sin eso, no hay con qué
+// decidir cuál corresponde.
 
-  msg.textContent = 'Creando…'; msg.style.color = 'var(--txt-2)';
-  try{
-    const r = await fetch('/proyectos', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ codigo, nombre, tipo, ciudad, zona }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Error');
-    msg.textContent = '✓ Proyecto creado'; msg.style.color = '#2a8';
-    ['proy-codigo','proy-nombre','proy-tipo','proy-ciudad'].forEach(id => $('#'+id).value = '');
-    cargarProyectosAdmin();
-    cargarAutocompletes();
-  }catch(e){ msg.textContent = 'Error: ' + e.message; msg.style.color = '#c33'; }
-}
+const SP_ETIQUETAS = {
+  requerimiento:         'Requerimiento',
+  orden_compra:          'Orden de compra',
+  orden_servicio:        'Orden de servicio',
+  remision:              'Remisión',
+  movimiento_inventario: 'Movimiento de inventario',
+  historial_precio:      'Historial de precios',
+};
 
-async function editarProyecto(id) {
-  const msg = $('#msg-proy');
-  msg.textContent = 'Cargando…'; msg.style.color = 'var(--txt-2)';
+async function refrescarContadorSinProyecto(){
   try {
-    const f = await fetch(`/proyectos/${encodeURIComponent(id)}`).then(r => r.json());
-    if (f.error) throw new Error(f.error);
-    $('#proy-codigo').value = f.codigo || '';
-    $('#proy-nombre').value = f.nombre || '';
-    $('#proy-tipo').value   = f.tipo   || '';
-    $('#proy-ciudad').value = f.ciudad || '';
-    $('#proy-zona').value   = f.zona   || 'Centro';
-    _editandoProyectoId = id;
-    $('#btn-agregar-proy').textContent = 'Guardar cambios';
-    $('#btn-agregar-proy').classList.replace('btn-primary', 'btn-secondary');
-    msg.textContent = 'Editando proyecto — modifica los campos y haz clic en Guardar cambios';
-    msg.style.color = 'var(--txt-2)';
-    $('#proy-codigo').focus();
-  } catch(e) { msg.textContent = 'Error: ' + e.message; msg.style.color = '#c33'; }
+    const r = await fetch('/documentos/sin-proyecto?solo=conteo');
+    const j = await r.json();
+    const b = $('#sp-contador');
+    if (!b) return;
+    if (j.total > 0) { b.textContent = j.total; b.style.display = 'inline-block'; }
+    else { b.style.display = 'none'; }
+  } catch {}
 }
 
-async function toggleProyecto(id, activar){
-  try{
-    const r = await fetch(`/proyectos/${encodeURIComponent(id)}/toggle`, {
+async function cargarSinProyecto(){
+  const cont = $('#sp-lista');
+  if (!cont) return;
+  cont.innerHTML = '<div style="padding:10px;font-size:11px;color:var(--txt-3)">Cargando…</div>';
+
+  try {
+    const [docs, proyectos] = await Promise.all([
+      fetch('/documentos/sin-proyecto').then(r => r.json()),
+      fetch('/proyectos').then(r => r.json()),
+    ]);
+
+    const items = docs.items || [];
+    refrescarContadorSinProyecto();
+
+    if (!items.length) {
+      cont.innerHTML = '<div style="padding:12px;font-size:11px;color:var(--txt-3)">No hay documentos sin proyecto.</div>';
+      return;
+    }
+
+    const lista = Array.isArray(proyectos) ? proyectos : [];
+
+    cont.innerHTML = items.map((d, i) => {
+      // Se preselecciona el proyecto que más se parece al texto que traía el
+      // documento: elegir es confirmar o corregir, no buscar en toda la lista.
+      // Una obra cerrada no se sugiere a sí misma.
+      // Primero lo que se deduce del propio documento (el proyecto de la OC de
+      // la que salió); si no, el más parecido al texto que traía.
+      const sugerido = d.motivo === 'proyecto_inactivo' ? ''
+        : (lista.includes(d.proyectoDeducido) ? d.proyectoDeducido : sugerirProyecto(d.proyectoTexto, lista));
+      const opciones = ['<option value="">Elegir proyecto…</option>']
+        .concat(lista.map(c => `<option value="${esc(c)}" ${c === sugerido ? 'selected' : ''}>${esc(c)}${c === sugerido ? '  (sugerido)' : ''}</option>`))
+        .join('');
+      const control =
+        `<select id="sp-sel-${i}" class="td-input" style="border:1px solid var(--border);padding:5px 8px;font-size:11px;width:190px;flex:none">${opciones}</select>
+         <button class="btn btn-primary btn-sm" onclick="asignarProyectoDoc('${esc(d.tipo)}', '${esc(d.id)}', ${i})">${d.motivo === 'proyecto_inactivo' ? 'Reasignar' : 'Asignar'}</button>`;
+
+      // Dos motivos, dos acciones. Sin proyecto se asigna uno; con la obra
+      // cerrada el dato está bien y lo que falta es decidir entre reasignar o
+      // reabrir la obra en KAOS.
+      const motivo = d.motivo === 'proyecto_inactivo'
+        ? `<span style="color:#b45309">Proyecto <strong>${esc(d.proyecto)}</strong> inactivo</span> — reasignalo o reactivá la obra en KAOS`
+        : d.proyectoTexto
+          ? `El correo decía: <strong>${esc(d.proyectoTexto)}</strong>`
+          : 'Llegó sin proyecto y sin texto de origen';
+      const pista = d.proyectoDeducido && d.proyectoDeducido === sugerido
+        ? ` · <span style="color:var(--success)">sugerido por su OC</span>` : '';
+      const detalle = `${motivo}${pista}${d.detalle ? `<br><span style="color:var(--txt-2)">${esc(d.detalle)}</span>` : ''}`;
+
+      const etiqueta = d.motivo === 'proyecto_inactivo'
+        ? '<span style="font-size:9px;background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:3px;margin-left:6px">OBRA CERRADA</span>'
+        : '';
+
+      return `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:500">${esc(SP_ETIQUETAS[d.tipo] || d.tipo)} ${esc(d.numero || '')}${etiqueta}</div>
+            <div style="font-size:11px;color:var(--txt-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              ${detalle}
+            </div>
+          </div>
+          ${control}
+        </div>`;
+    }).join('');
+  } catch (e) {
+    cont.innerHTML = `<div style="padding:10px;color:#c33;font-size:11px">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// El proyecto del catálogo más parecido a un texto, o '' si ninguno se parece
+// lo suficiente. Compara palabras sin tildes ni mayúsculas, y pesa doble las
+// que llevan dígitos (CT26-026, 0380, 230KV): son las que identifican la obra.
+// Las genéricas no cuentan: sin esto «SIN_PROYECTO» sugería «0. Proyecto Tipo».
+const SP_PALABRAS_VACIAS = new Set(['proyecto', 'proyectos', 'sin', 'obra', 'de', 'del', 'la', 'el', 'los', 'las', 'en', 'y']);
+function sugerirProyecto(texto, lista){
+  const palabras = s => new Set(String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().split(/[^a-z0-9]+/).filter(p => p.length > 1 && !SP_PALABRAS_VACIAS.has(p)));
+  const buscadas = palabras(texto);
+  if (!buscadas.size) return '';
+  const peso = p => /\d/.test(p) ? 2 : 1;
+  const total = [...buscadas].reduce((a, p) => a + peso(p), 0);
+  let mejor = '', puntaje = 0;
+  for (const c of lista) {
+    const delProyecto = palabras(c);
+    const comunes = [...buscadas].filter(p => delProyecto.has(p)).reduce((a, p) => a + peso(p), 0);
+    const s = comunes / total;
+    if (s > puntaje) { mejor = c; puntaje = s; }
+  }
+  return puntaje >= 0.5 ? mejor : '';
+}
+
+async function asignarProyectoDoc(tipo, id, i){
+  const sel = $('#sp-sel-' + i);
+  const msg = $('#msg-sp');
+  const codigo = sel ? sel.value : '';
+  if (!codigo) { msg.textContent = 'Elegí un proyecto primero.'; msg.style.color = '#c33'; return; }
+
+  msg.textContent = 'Asignando…'; msg.style.color = 'var(--txt-2)';
+  try {
+    const r = await fetch('/documentos/sin-proyecto/asignar', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ activo: activar }),
+      body: JSON.stringify({ tipo, id, proyecto: codigo }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Error');
-    cargarProyectosAdmin();
-    cargarAutocompletes();
-  }catch(e){ alert('Error: ' + e.message); }
+    msg.textContent = '✓ Proyecto asignado'; msg.style.color = '#2a8';
+    cargarSinProyecto();
+  } catch (e) {
+    msg.textContent = 'Error: ' + e.message; msg.style.color = '#c33';
+  }
+}
+
+// El alta y la edición de proyectos salieron del ERP: el catálogo se administra
+// en KAOS. Se conservan como funciones que avisan, porque puede quedar algún
+// onclick viejo en caché del navegador y un "crearProyecto is not defined" no
+// le dice nada a quien lo ve.
+function crearProyecto(){
+  const msg = $('#msg-proy');
+  if (msg) { msg.textContent = 'Los proyectos se crean en KAOS, no en el ERP.'; msg.style.color = '#c33'; }
+}
+function editarProyecto(){
+  const msg = $('#msg-proy');
+  if (msg) { msg.textContent = 'Los proyectos se editan en KAOS, no en el ERP.'; msg.style.color = '#c33'; }
+}
+
+// El ERP ya no cambia el estado de ningún proyecto: los de KAOS los administra
+// KAOS, y los anteriores son histórico. Se conserva avisando, en vez de
+// borrarse, porque puede quedar un onclick viejo en el caché de algún navegador
+// y "toggleProyecto is not defined" no le dice nada a quien lo ve.
+function toggleProyecto(){
+  alert('El estado de los proyectos se administra en KAOS.');
 }
 
 // ── Gestión de proveedores (alta + activar/inactivar) ────────────────────────
@@ -6226,6 +6407,7 @@ function _invMsg(el, type, text) {
     <div>
       <label style="font-size:12px;color:var(--txt-2);display:block;margin-bottom:4px">PROYECTO</label>
       <select id="edit-req-proyecto" style="width:100%"></select>
+      <div id="edit-req-pista" style="display:none;margin-top:6px;font-size:12px;color:#b45309"></div>
     </div>
 
     <div id="edit-req-aviso" style="display:none;background:#7c3e0018;border:1px solid #7c3e0066;border-radius:6px;padding:8px 12px;font-size:12px;color:#f59e0b"></div>

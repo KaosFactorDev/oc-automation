@@ -17,6 +17,26 @@ Comandos, respaldos y los problemas con los que ya nos tropezamos.
 | `npm run corregir-listas` | Corrige en SharePoint lo que se puede corregir solo |
 | `npm run db:importar` | Carga las 11 listas en Postgres |
 
+### Catálogo de proyectos (viene de KAOS)
+
+| Comando | Qué hace |
+|---|---|
+| `npm run kaos:sync` | Trae de `kaos-api` lo modificado desde la última corrida |
+| `npm run kaos:sync -- --todo` | Reconciliación completa. **La única que detecta borrados** |
+| `npm run kaos:diff` | Solo el informe de diferencias, sin traer nada |
+| `npm run kaos:ligar` | Ata una fila del ERP a su proyecto de KAOS cuando el nombre es idéntico |
+| `npm run kaos:aplicar` | Vuelca el espejo sobre `erp.proyectos`. Acá KAOS pasa a mandar |
+| `npm run kaos:cerrar-legado` | Pone en histórico todo lo que no viene de KAOS |
+
+Los tres últimos **no aplican nada sin `-- --si`**: por defecto muestran qué
+harían. Y ninguno de los seis lo corre el deploy — igual que las migraciones,
+son manuales. El procedimiento del corte está en
+[conexion-kaos-proyectos.md](conexion-kaos-proyectos.md).
+
+Requieren `KAOS_API_URL` y `KAOS_API_KEY` en el `.env`, **sin prefijo público**:
+la API se llama servidor a servidor y cualquier prefijo tipo `VITE_` mandaría la
+clave al navegador.
+
 Banderas útiles:
 
 ```bash

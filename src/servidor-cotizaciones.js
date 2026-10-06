@@ -35,6 +35,8 @@ const repoRemisiones     = require('./repo/remisiones');
 const repoInventario     = require('./repo/inventario');
 const repoHistorial      = require('./repo/historialPrecios');
 const repoGastos         = require('./repo/gastos');
+const repoProyecto       = require('./repo/_proyecto');
+const repoProyectosKaos  = require('./repo/proyectosKaos');
 const localDb          = require('./db');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
@@ -946,7 +948,13 @@ async function obtenerProyectosSP({ soloActivos = true } = {}) {
   const rows = await repoCatalogos.getProyectos({ soloActivos });
   // El id ya no es el de SharePoint: los 23 proyectos que el import creó para
   // no perder referencias huérfanas no tienen sp_id y quedarían sin id.
-  return rows.map(r => ({ id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo }));
+  // `origen` y `kaosCode` viajan porque la pantalla de configuración decide con
+  // ellos si muestra el botón de activar/inactivar: un proyecto que administra
+  // KAOS no se toca desde acá.
+  return rows.map(r => ({
+    id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo,
+    origen: r.origen, kaosCode: r.kaosCode,
+  }));
 }
 
 // ── Servidor HTTP ─────────────────────────────────────────────────────────────
@@ -1354,6 +1362,57 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GET /documentos/sin-proyecto → la bandeja de pendientes ─────────────
+  // Documentos que entraron con un proyecto que no está en el catálogo. Se
+  // guardan igual y quedan acá hasta que alguien les asigne el proyecto: el
+  // ERP ya no lo inventa.
+  //
+  // `?solo=conteo` devuelve únicamente el número, para el indicador del menú
+  // sin traerse la lista entera.
+  if (req.method === 'GET' && url.startsWith('/documentos/sin-proyecto')) {
+    try {
+      const q = new URL(url, 'http://localhost').searchParams;
+      if (q.get('solo') === 'conteo') {
+        return json({ total: await repoProyecto.contarPendientes() });
+      }
+      const items = await repoProyecto.pendientes({ limite: Number(q.get('limite')) || 200 });
+      return json({ total: items.length, items });
+    } catch (err) { return json({ error: err.message }, 500); }
+  }
+
+  // ── POST /documentos/sin-proyecto/asignar → darle proyecto a uno ────────
+  // Cualquiera de los seis tipos de la bandeja. Los requerimientos van por
+  // repoRequerimientos.actualizar() porque al recibir proyecto hay que
+  // emitirles el consecutivo; los demás solo cambian de proyecto.
+  if (req.method === 'POST' && url === '/documentos/sin-proyecto/asignar') {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+        const tipo     = String(body.tipo || '').trim();
+        const id       = String(body.id || '').trim();
+        const proyecto = String(body.proyecto || '').trim();
+        if (!tipo || !id || !proyecto) {
+          return json({ error: 'Faltan tipo, id o proyecto' }, 400);
+        }
+
+        if (tipo === 'requerimiento') {
+          await repoRequerimientos.actualizar(id, { proyecto });
+          return json({ ok: true });
+        }
+        if (!repoProyecto.TABLA_POR_TIPO[tipo]) {
+          return json({ error: `Tipo de documento desconocido: ${tipo}` }, 400);
+        }
+        const hecho = await repoProyecto.asignar(tipo, id, proyecto);
+        return hecho ? json({ ok: true }) : json({ error: 'Documento no encontrado' }, 404);
+      } catch (err) {
+        return json({ error: err.message }, 400);
+      }
+    });
+    return;
+  }
+
   // ── GET /proyectos → lista de códigos activos (usado por selectores) ────
   if (req.method === 'GET' && url === '/proyectos') {
     try {
@@ -1404,34 +1463,13 @@ const servidor = http.createServer(async (req, res) => {
   }
 
   // ── POST /proyectos → crear nuevo proyecto ──────────────────────────────
+  // El ERP ya no da de alta proyectos. El catálogo se administra en KAOS y acá
+  // solo se consume, así que la ruta responde 405 en vez de desaparecer: un 404
+  // parecería que la escribieron mal, y esto es una decisión, no un error.
   if (req.method === 'POST' && url === '/proyectos') {
-    const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', async () => {
-      try {
-        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const codigo = String(body.codigo || '').trim();
-        if (!codigo) return json({ error: 'codigo requerido' }, 400);
-        // El duplicado lo detecta el índice único sobre erp.norm(codigo), que
-        // además compara sin tildes ni mayúsculas. Antes había que bajar la
-        // lista completa de SharePoint y compararla en memoria.
-        const yaExiste = await repoCatalogos.getProyectoPorCodigo(codigo);
-        if (yaExiste) return json({ error: `Proyecto "${codigo}" ya existe` }, 400);
-
-        const creado = await repoCatalogos.crearProyecto({
-          codigo,
-          descripcion:  String(body.nombre || codigo).trim(),
-          tipo:         String(body.tipo || '').trim(),
-          ciudad:       String(body.ciudad || '').trim(),
-          departamento: String(body.departamento || '').trim(),
-          zona:         String(body.zona || 'Centro').trim(),
-          activo:       true,
-          notas:        String(body.notas || '').trim(),
-        });
-        return json({ ok: true, id: creado.id });
-      } catch (err) { return json({ error: err.message }, 500); }
-    });
-    return;
+    return json({
+      error: 'El catálogo de proyectos se administra en KAOS. El ERP no crea proyectos.',
+    }, 405);
   }
 
   // ── POST /proyectos/:id/toggle → activar/inactivar ──────────────────────
@@ -1445,6 +1483,20 @@ const servidor = http.createServer(async (req, res) => {
         const activo = body.activo === undefined ? null : !!body.activo;
         const item = await repoCatalogos.getProyecto(mToggle[1]);
         if (!item) return json({ error: 'Proyecto no encontrado' }, 404);
+
+        // El ERP no cambia el estado de ningún proyecto.
+        //
+        // Los de KAOS porque su estado lo manda KAOS: un cambio acá lo desharía
+        // la siguiente sincronización, sin avisar. Y los anteriores a la
+        // conexión porque son histórico — se conservan por sus documentos, y
+        // nada nuevo debe colgarse de ellos. Lo que siga en uso se da de alta
+        // en KAOS, que es el punto de tener un solo administrador.
+        return json({
+          error: item.origen === 'kaos'
+            ? `"${item.codigo}" se administra en KAOS. Su estado se cambia allá y llega por la sincronización.`
+            : `"${item.codigo}" es un proyecto anterior a la conexión con KAOS: se conserva por su histórico y no se reactiva. Si la obra sigue en uso, dala de alta en KAOS.`,
+        }, 405);
+
         // Sin body.activo, alterna el estado actual.
         const nuevo = activo === null ? !item.activo : activo;
         await repoCatalogos.actualizarProyecto(mToggle[1], { activo: nuevo });
@@ -1692,6 +1744,33 @@ const servidor = http.createServer(async (req, res) => {
         const reqItem = await obtenerRequerimiento(mGenReq[1]);
         const reqF = reqItem.fields || {};
 
+        // La OC hereda el proyecto del requerimiento. Si el requerimiento entró
+        // sin proyecto —porque el asunto del correo traía un código que no está
+        // en el catálogo— la orden nacería sin él y el hueco avanzaría hasta un
+        // documento que sale hacia el proveedor y se imputa a una obra.
+        //
+        // Acá sí se bloquea, a diferencia del requerimiento, que se guarda igual.
+        // La diferencia es qué se pierde: un requerimiento rechazado pierde el
+        // trabajo de quien lo radicó; una OC sin obra es un gasto que después
+        // nadie puede atribuir, y corregirlo exige tocar un documento ya emitido.
+        const codigoProy = String(reqF.proyecto || '').trim();
+        if (!codigoProy) {
+          return json({
+            error: 'Este requerimiento no tiene proyecto asignado. Asígnaselo antes de generar la orden de compra: Configuración → Documentos sin proyecto.',
+          }, 400);
+        }
+
+        // Y el proyecto tiene que estar ABIERTO. Un requerimiento sí puede
+        // quedar atado a una obra cerrada —el correo la nombró y el dato es
+        // correcto, además así conserva su zona— pero no se le compra a una obra
+        // que ya terminó. Acá es donde se detiene.
+        const proyDelReq = await repoCatalogos.getProyectoPorCodigo(codigoProy);
+        if (proyDelReq && proyDelReq.activo === false) {
+          return json({
+            error: `El proyecto "${codigoProy}" está inactivo. Reasigná el requerimiento a un proyecto activo, o reactivá esa obra en KAOS antes de generar la orden de compra.`,
+          }, 400);
+        }
+
         // Parsear ítems del requerimiento para registrar homologaciones
         let itemsReq = [];
         try { itemsReq = JSON.parse(reqF.itemsJson || '[]'); } catch {}
@@ -1821,6 +1900,8 @@ const servidor = http.createServer(async (req, res) => {
             `SOLICITUD REQUERIMIENTO ${consecutivoManual || '0000'} ${fechaAsunto} ${proyectoParaAsunto}`;
 
           const { procesarCorreo } = require('./procesarCorreo');
+          // Todos: un requerimiento puede nombrar una obra cerrada y se ata a
+          // ella, conservando su zona. El bloqueo está en la OC, no acá.
           const proyectosSP = await obtenerProyectosSP({ soloActivos: false }).catch(() => []);
           const resultado = await procesarCorreo(asuntoSintetico, tmpPath, { proyectosExternos: proyectosSP });
 
@@ -1886,6 +1967,7 @@ const servidor = http.createServer(async (req, res) => {
 
         // Misma resolución de proyecto y consulta de precios que el flujo de correo
         const { procesarRequerimientoManual } = require('./procesarCorreo');
+        // Todos: ver la nota en /requerimientos/cargar-manual.
         const proyectosSP = await obtenerProyectosSP({ soloActivos: false }).catch(() => []);
         let resultado;
         try {
@@ -2304,10 +2386,14 @@ const servidor = http.createServer(async (req, res) => {
   // Un solo endpoint sirve para las dos cosas: la UI lo pide al cargar y así
   // sabe si mostrar la columna y el botón. Sin credenciales → habilitado:false
   // y la integración queda oculta en vez de dar errores.
+  //
+  // Los proyectos son los de KAOS, del espejo local: Cash_Flow ya no tiene
+  // catálogo propio y su proyecto_id es el UUID de KAOS. Leer el espejo no sale
+  // a la red, así que el envío no depende de que KAOS responda en ese momento.
   if (req.method === 'GET' && url === '/tesoreria/proyectos') {
     try {
       if (!tesoreria.habilitado()) return json({ habilitado: false, proyectos: [] });
-      const proyectos = await tesoreria.listarProyectos();
+      const proyectos = await repoProyectosKaos.paraTesoreria();
       return json({ habilitado: true, proyectos });
     } catch (err) {
       console.error('GET /tesoreria/proyectos:', err.message);
@@ -2330,13 +2416,16 @@ const servidor = http.createServer(async (req, res) => {
     }
   }
 
-  // ── GET /tesoreria/mapeo?proyecto=CT25-202… → última elección humana ──────
-  // Lee de SQLite, sin salir a la red. Solo es una sugerencia para preseleccionar
-  // el desplegable: el usuario puede cambiarla siempre.
+  // ── GET /tesoreria/mapeo?proyecto=CT25-202… → su proyecto en KAOS ─────────
+  // El proyecto de la OC ya está atado a KAOS (kaos_id), y ese es exactamente el
+  // proyecto_id que espera tesorería: se preselecciona sin que nadie empareje
+  // nombres. Si no está atado (origen local) devuelve null y la persona elige a
+  // mano, viendo el texto del proyecto de la OC.
   if (req.method === 'GET' && url === '/tesoreria/mapeo') {
     try {
       const qs = require('url').parse(req.url, true).query;
-      return json({ mapeo: localDb.getMapeoTesoreria(String(qs.proyecto || '').trim()) });
+      const k  = await repoProyectosKaos.deProyectoErp(String(qs.proyecto || '').trim());
+      return json({ mapeo: k ? { tesoreria_id: k.id, tesoreria_nombre: k.name } : null });
     } catch (err) {
       console.warn('GET /tesoreria/mapeo:', err.message);
       return json({ mapeo: null });
@@ -2344,8 +2433,9 @@ const servidor = http.createServer(async (req, res) => {
   }
 
   // ── POST /ordenes/:id/solicitud-tesoreria → crear solicitud de pago ──────
-  // El flujo no es automático a propósito: proyecto de tesorería y concepto los
-  // decide una persona, y queda registrada en solicitado_por.
+  // El flujo no es automático a propósito: una persona confirma el proyecto
+  // (preseleccionado con el de KAOS de la OC) y escribe el concepto, y queda
+  // registrada en solicitado_por.
   const mSolTes = url.match(/^\/ordenes\/([^\/]+)\/solicitud-tesoreria$/);
   if (req.method === 'POST' && mSolTes) {
     const chunks = [];
@@ -2379,7 +2469,7 @@ const servidor = http.createServer(async (req, res) => {
         const proyectoId = String(body.proyecto_id || '').trim();
         const concepto   = String(body.concepto    || '').trim();
         const detalles = [];
-        if (!proyectoId) detalles.push('Falta el proyecto de tesorería');
+        if (!proyectoId) detalles.push('Falta el proyecto');
         if (!concepto)   detalles.push('Falta el concepto');
         if (concepto.length > 1000) detalles.push('El concepto no puede pasar de 1000 caracteres');
         if (!(Number(oc.total) > 0)) detalles.push(`El total de la OC debe ser mayor a 0 (es ${oc.total})`);
@@ -2402,9 +2492,6 @@ const servidor = http.createServer(async (req, res) => {
         // debe tumbar la respuesta: perder el egreso_id de vista es menos grave
         // que hacer creer al usuario que el envío falló (y un reintento es
         // seguro, la Edge Function es idempotente).
-        //
-        // Los dos registros van en try/catch separados a propósito: si
-        // SharePoint no responde, la elección de proyecto igual se recuerda.
         try {
           await repoOrdenesCompra.actualizar(itemId, {
             solicitudTesoreriaId:    resultado.egreso_id || '',
@@ -2413,18 +2500,6 @@ const servidor = http.createServer(async (req, res) => {
           });
         } catch (e) {
           console.warn(`[OC ${numeroOC}] Solicitud ${resultado.egreso_id} creada, pero no se pudo marcar la OC:`, e.message);
-        }
-
-        // Recordar la elección humana de proyecto para preseleccionarla luego
-        try {
-          localDb.setMapeoTesoreria({
-            proyecto:        oc.proyecto || '',
-            tesoreriaId:     proyectoId,
-            tesoreriaNombre: String(body.proyecto_nombre || '').trim(),
-            actualizadoPor:  req._sesion?.email || '',
-          });
-        } catch (e) {
-          console.warn(`[OC ${numeroOC}] No se pudo recordar el mapeo de proyecto:`, e.message);
         }
 
         return json({
@@ -2812,6 +2887,16 @@ const servidor = http.createServer(async (req, res) => {
       try {
         const { proyecto, fecha, numCotizacion, proveedor, nit, items, requerimientoId: reqId } = JSON.parse(Buffer.concat(chunks).toString());
         if (!items?.length) return json({ error: 'No hay ítems' }, 400);
+        // Ninguna orden de compra sale sin obra abierta a la cual imputarse. El
+        // selector de la consola ya ofrece solo activos, pero esta ruta se
+        // alcanza por HTTP: la validación del formulario no es una validación.
+        if (!String(proyecto || '').trim()) {
+          return json({ error: 'La orden de compra necesita un proyecto.' }, 400);
+        }
+        const proyOC = await repoCatalogos.getProyectoPorCodigo(String(proyecto).trim());
+        if (proyOC && proyOC.activo === false) {
+          return json({ error: `El proyecto "${proyecto}" está inactivo. No se le pueden generar órdenes de compra.` }, 400);
+        }
 
         const ctx = await ctxSharePoint();
 
