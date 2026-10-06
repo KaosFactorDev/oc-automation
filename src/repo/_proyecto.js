@@ -29,26 +29,45 @@
 
 const pg = require('../pg');
 
+/** Se intentó usar para algo nuevo un proyecto que KAOS tiene inactivo. */
+class ProyectoInactivo extends Error {
+  constructor(codigo) {
+    super(`El proyecto "${codigo}" está inactivo en KAOS: solo se puede consultar como historial. ` +
+          'Para registrarle algo nuevo, reactívalo en KAOS.');
+    this.codigo = codigo;
+    this.status = 409;
+  }
+}
+
 /**
  * Resuelve el texto del proyecto contra el catálogo. No crea nada.
  *
  * @param {object} c        cliente dentro de la transacción del llamador
  * @param {string} texto    el proyecto tal como llegó
+ * @param {boolean} [opts.exigirActivo]  rechazar un proyecto inactivo. Va en
+ *          todo lo que USA la obra para algo nuevo (crear una OS, una remisión,
+ *          una salida de almacén, asignarle un documento). No va en lo que solo
+ *          deja constancia: un requerimiento que llega por correo nombrando una
+ *          obra cerrada se registra igual y queda marcado para reasignarlo.
  * @returns {Promise<{proyectoId: number|null, proyectoTexto: string|null}>}
  *          `proyectoTexto` solo viene cuando NO se pudo resolver: es lo que se
  *          guarda en el documento como pista para quien lo asigne.
  */
-async function resolver(c, texto) {
+async function resolver(c, texto, { exigirActivo = false } = {}) {
   const limpio = String(texto || '').trim();
   if (!limpio) return { proyectoId: null, proyectoTexto: null };
 
   const hallado = await c.query(
-    'SELECT id FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)',
+    'SELECT id, codigo, activo FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)',
     [limpio],
   );
 
   if (hallado.rowCount) {
-    return { proyectoId: hallado.rows[0].id, proyectoTexto: null };
+    const p = hallado.rows[0];
+    // Activo lo decide KAOS (kaos:aplicar). Un proyecto inactivo es historial:
+    // se consulta, pero no se le registra nada nuevo hasta reactivarlo allá.
+    if (exigirActivo && !p.activo) throw new ProyectoInactivo(p.codigo);
+    return { proyectoId: p.id, proyectoTexto: null };
   }
 
   return { proyectoId: null, proyectoTexto: limpio };
@@ -176,7 +195,7 @@ async function asignar(tipo, id, codigo) {
   if (!tabla) throw new Error(`Tipo de documento desconocido: ${tipo}`);
 
   return pg.tx(async (c) => {
-    const { proyectoId } = await resolver(c, codigo);
+    const { proyectoId } = await resolver(c, codigo, { exigirActivo: true });
     if (!proyectoId) throw new Error(`El proyecto "${codigo}" no está en el catálogo`);
 
     // proyecto_texto se limpia: era la pista para asignarlo, y ya se asignó.
@@ -187,4 +206,4 @@ async function asignar(tipo, id, codigo) {
   });
 }
 
-module.exports = { resolver, pendientes, contarPendientes, asignar, TABLA_POR_TIPO };
+module.exports = { resolver, pendientes, contarPendientes, asignar, TABLA_POR_TIPO, ProyectoInactivo };

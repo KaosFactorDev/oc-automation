@@ -4743,7 +4743,11 @@ async function enviarATesoreria(id){
     const r = await fetch('/tesoreria/mapeo?proyecto=' + encodeURIComponent(o.proyecto || '')).then(r => r.json());
     mapeo = r?.mapeo || null;
   } catch {}
+  // El desplegable trae solo proyectos ACTIVOS de KAOS. Si la obra de la OC está
+  // inactiva no se preselecciona: es historial, y para cargarle un pago hay que
+  // reactivarla en KAOS.
   const sugeridoId = proyectos.some(p => p.id === mapeo?.tesoreria_id) ? mapeo.tesoreria_id : '';
+  const obraInactiva = !!mapeo && !sugeridoId ? mapeo.tesoreria_nombre : '';
 
   const wrap = document.createElement('div');
   wrap.className = 'modal-backdrop';
@@ -4831,7 +4835,9 @@ async function enviarATesoreria(id){
       }
     } else {
       elegidoEl.innerHTML = '<span style="color:var(--warn)">Ningún proyecto elegido todavía</span>';
-      hint.innerHTML = `El proyecto de la OC, <strong>«${esc(textoOC)}»</strong>, no está atado a KAOS: elige a mano el que corresponda.`;
+      hint.innerHTML = obraInactiva
+        ? `<span style="color:var(--warn)">La obra de la OC, <strong>${esc(obraInactiva)}</strong>, está <strong>inactiva en KAOS</strong>: solo se puede consultar. Para cargarle este pago, reactívala en KAOS.</span>`
+        : `El proyecto de la OC, <strong>«${esc(textoOC)}»</strong>, no está atado a KAOS: elige a mano el que corresponda.`;
     }
     actualizarBotonOk();
   };

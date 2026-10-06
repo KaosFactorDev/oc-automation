@@ -224,12 +224,26 @@ class SimulacionTerminada extends Error {
 // desplegable de "Enviar a tesorería" sale de este espejo, sin salir a la red:
 // si KAOS no responde, el envío sigue funcionando con la última sincronización.
 
-/** Los proyectos de KAOS, ordenados por nombre. `id` es el kaos_id. */
+// Solo los ACTIVOS en KAOS se pueden usar para una solicitud nueva. Uno inactivo
+// es historial: se consulta en tesorería, pero para cargarle un pago nuevo hay
+// que reactivarlo en KAOS. Es la misma regla que aplica Cash_Flow.
+const ESTADO_ACTIVO = 'Activo';
+
+/** Los proyectos ACTIVOS de KAOS, ordenados por nombre. `id` es el kaos_id. */
 async function paraTesoreria() {
   return pg.rows(
     `SELECT kaos_id::text AS id, nombre AS name, project_code AS codigo, estado
        FROM erp.proyectos_kaos
-      ORDER BY nombre`);
+      WHERE estado = $1
+      ORDER BY nombre`, [ESTADO_ACTIVO]);
+}
+
+/** true si el kaos_id existe en el espejo y está activo en KAOS. */
+async function activoParaTesoreria(kaosId) {
+  const r = await pg.one(
+    `SELECT 1 FROM erp.proyectos_kaos WHERE kaos_id::text = $1 AND estado = $2`,
+    [String(kaosId || ''), ESTADO_ACTIVO]);
+  return !!r;
 }
 
 /**
@@ -240,7 +254,7 @@ async function deProyectoErp(codigo) {
   const limpio = String(codigo || '').trim();
   if (!limpio) return null;
   return pg.one(
-    `SELECT k.kaos_id::text AS id, k.nombre AS name
+    `SELECT k.kaos_id::text AS id, k.nombre AS name, k.estado
        FROM erp.proyectos p
        JOIN erp.proyectos_kaos k ON k.kaos_id = p.kaos_id
       WHERE erp.norm(p.codigo) = erp.norm($1)`, [limpio]);
@@ -248,5 +262,5 @@ async function deProyectoErp(codigo) {
 
 module.exports = {
   volcar, marcaGuardada, guardarMarca, discrepancias, aplicar, SimulacionTerminada,
-  paraTesoreria, deProyectoErp,
+  paraTesoreria, activoParaTesoreria, deProyectoErp,
 };

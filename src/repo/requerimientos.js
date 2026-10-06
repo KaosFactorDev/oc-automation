@@ -260,7 +260,14 @@ async function actualizar(id, cambios) {
         // Desasignar es legítimo: alguien se dio cuenta de que eligió mal.
         sets.push(`proyecto_id = NULL`);
       } else {
-        const { proyectoId } = await repoProyecto.resolver(c, texto);
+        // Asignarle una obra es usarla: tiene que estar activa en KAOS. Pero
+        // guardar sin cambiar el proyecto que ya tenía (p. ej. al descartar
+        // ítems de uno atado a una obra cerrada) no es asignar nada nuevo.
+        const mismoProyecto = await c.query(
+          `SELECT p.codigo FROM erp.requerimientos r
+             JOIN erp.proyectos p ON p.id = r.proyecto_id
+            WHERE r.id = $1 AND erp.norm(p.codigo) = erp.norm($2)`, [id, texto]);
+        const { proyectoId } = await repoProyecto.resolver(c, texto, { exigirActivo: !mismoProyecto.rowCount });
         if (!proyectoId) throw new Error(`El proyecto "${texto}" no está en el catálogo`);
         vals.push(proyectoId);
         sets.push(`proyecto_id = $${vals.length}`);

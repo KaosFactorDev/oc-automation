@@ -151,7 +151,7 @@ const COLUMNAS = {
 
 async function crear(datos, items = []) {
   return pg.tx(async (c) => {
-    const { proyectoId, proyectoTexto } = await resolverProyecto(c, datos.proyecto);
+    const { proyectoId, proyectoTexto } = await resolverProyecto(c, datos.proyecto, { exigirActivo: true });
     const nit        = await resolverProveedor(c, datos.proveedorNit, datos.proveedorNombre);
 
     const cab = await c.query(
