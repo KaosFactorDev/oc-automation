@@ -17,6 +17,26 @@ Comandos, respaldos y los problemas con los que ya nos tropezamos.
 | `npm run corregir-listas` | Corrige en SharePoint lo que se puede corregir solo |
 | `npm run db:importar` | Carga las 11 listas en Postgres |
 
+### Catálogo de proyectos (viene de KAOS)
+
+| Comando | Qué hace |
+|---|---|
+| `npm run kaos:sync` | Trae de `kaos-api` lo modificado desde la última corrida |
+| `npm run kaos:sync -- --todo` | Reconciliación completa. **La única que detecta borrados** |
+| `npm run kaos:diff` | Solo el informe de diferencias, sin traer nada |
+| `npm run kaos:ligar` | Ata una fila del ERP a su proyecto de KAOS cuando el nombre es idéntico |
+| `npm run kaos:aplicar` | Vuelca el espejo sobre `erp.proyectos`. Acá KAOS pasa a mandar |
+| `npm run kaos:cerrar-legado` | Pone en histórico todo lo que no viene de KAOS |
+
+Los tres últimos **no aplican nada sin `-- --si`**: por defecto muestran qué
+harían. Y ninguno de los seis lo corre el deploy — igual que las migraciones,
+son manuales. El procedimiento del corte está en
+[conexion-kaos-proyectos.md](conexion-kaos-proyectos.md).
+
+Requieren `KAOS_API_URL` y `KAOS_API_KEY` en el `.env`, **sin prefijo público**:
+la API se llama servidor a servidor y cualquier prefijo tipo `VITE_` mandaría la
+clave al navegador.
+
 Banderas útiles:
 
 ```bash
@@ -219,22 +239,26 @@ El import es idempotente: correrlo dos veces no duplica nada.
 
 ## El corte en el VPS
 
-Pendiente. Es la última etapa de la migración. La base **no publica puertos** y
-vive en la red interna de Docker, así que solo la alcanzan la app y el mailer;
-para llegar desde tu equipo, túnel SSH:
+**Hecho, a principios de septiembre de 2026.** Producción corre contra Postgres
+y las listas de SharePoint quedaron congeladas. Lo que sigue es el registro del
+procedimiento: sirve para entender cómo quedó montado y para rehacerlo en un
+servidor nuevo, no como algo por ejecutar.
+
+La base **no publica puertos** y vive en la red interna de Docker, así que solo
+la alcanzan la app y el mailer; para llegar desde tu equipo, túnel SSH:
 
 ```bash
 ssh -L 55432:localhost:5432 usuario@vps
 ```
 
-### El orden importa
+### El orden importó, y sigue importando en un servidor nuevo
 
-**Importar primero, desplegar después.** La versión desplegada hoy lee de
-SharePoint; la nueva lee de Postgres. Si se despliega antes de importar, la
-aplicación arranca contra una base vacía y la gente ve un ERP sin datos. Al
-revés no pasa nada: una base ya cargada esperando el despliegue es inofensiva.
+**Importar primero, desplegar después.** La versión que estaba desplegada leía
+de SharePoint; la nueva lee de Postgres. Desplegar antes de importar habría
+dejado la aplicación contra una base vacía y a la gente viendo un ERP sin datos.
+Al revés no pasa nada: una base ya cargada esperando el despliegue es inofensiva.
 
-Conviene hacerlo fuera de horario laboral y no un viernes.
+Conviene hacerlo fuera de horario laboral, y no un viernes.
 
 ### Antes de empezar
 
@@ -244,7 +268,7 @@ Conviene hacerlo fuera de horario laboral y no un viernes.
 #    queda en SharePoint, que ya nadie va a leer.
 ```
 
-No hace falta respaldar SharePoint: el import solo lee, las listas quedan
+No hizo falta respaldar SharePoint: el import solo lee, las listas quedaron
 intactas y son el respaldo del corte.
 
 Ese último punto es la parte delicada del corte, y no la resuelve ningún script:
@@ -293,11 +317,16 @@ docker exec oc-automation-db psql -U postgres -d erp   -c "SELECT * FROM erp.sin
 crontab -e     # ver la sección "Respaldos"
 ```
 
-### Si algo sale mal
+### La reversa que había, y por qué ya no existe
 
-El plan de reversa es corto porque SharePoint queda intacto: el import solo
-**lee** de las listas. Revertir el despliegue a la versión anterior devuelve un
-ERP que funciona, leyendo de SharePoint como hasta ahora.
+Durante el corte el plan de reversa era corto porque SharePoint quedaba intacto:
+el import solo **lee** de las listas. Revertir el despliegue devolvía un ERP que
+funcionaba, leyendo de SharePoint.
+
+**Eso ya no aplica.** Cada documento aprobado desde el corte existe solo en
+Postgres, y las listas se quedaron en la foto de ese día. Volver a la versión
+anterior hoy no es una reversa: es publicar datos viejos y perder todo lo
+escrito desde entonces. La red de seguridad ahora es el respaldo nocturno.
 
 Eso deja de ser cierto en cuanto alguien apruebe un documento contra Postgres:
 desde ahí, revertir pierde ese documento. Conviene confirmar que la consola

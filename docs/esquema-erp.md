@@ -134,6 +134,13 @@ Los documentos referencian proyectos y proveedores por llave foránea real. Como
 los crea con `activo = false` y `requiere_revision = true` en vez de fallar o de
 perder la referencia.
 
+> **Eso fue el import, y no se repite.** Los seis módulos de documentos hacían lo
+> mismo en caliente: si el proyecto no resolvía, lo creaban. Ya no. Desde que el
+> catálogo viene de KAOS, un documento con proyecto desconocido se guarda con
+> `proyecto_id` en NULL y el texto en `proyecto_texto`, y queda en
+> `erp.vw_documentos_sin_proyecto` hasta que alguien se lo asigne. Ver
+> [conexion-kaos-proyectos.md](conexion-kaos-proyectos.md).
+
 ### Zonas como tabla
 
 Era un campo `choice` en tres listas. Como tabla se amplía sin tocar el esquema
@@ -268,9 +275,86 @@ proyecto que nadie dio de alta». Con 23 filas aceptadas dentro, la marca era
 ruido que nadie miraba. `npm run revisar-proyectos` dejó de ser una lista de
 pendientes y pasó a ser un monitor.
 
+> **Y hoy es un monitor que no se mueve**, porque nada crea proyectos: la marca
+> solo la llevan las 23 filas históricas, distinguidas además por
+> `origen = 'huerfano'`. Lo que hay que mirar ahora es la bandeja de documentos
+> sin proyecto, no el catálogo.
+
 Por eso la migración limpia una **lista escrita**, no todas las filas marcadas:
 al aplicarse en el VPS sobre datos reimportados puede haber variantes nuevas, y
 limpiarlas también escondería justo lo que hay que ver.
+
+## El catálogo viene de KAOS
+
+Desde la conexión, `erp.proyectos` deja de ser un catálogo propio y pasa a ser
+una copia administrada. El procedimiento y la operación están en
+[conexion-kaos-proyectos.md](conexion-kaos-proyectos.md); acá queda el esquema.
+
+### Columnas nuevas en `erp.proyectos`
+
+| Columna | Para qué |
+|---|---|
+| `kaos_id` | UUID del proyecto en KAOS. Único, y es lo que evita que una obra entre dos veces |
+| `kaos_code` | El código corto e inmutable (`KP-XXXXXX`). **La llave de cruce entre los dos sistemas** |
+| `origen` | `kaos` \| `local` \| `huerfano`. Quién manda sobre la fila |
+
+`codigo` **no cambia nunca** en una fila que ya existía. Es lo que imprimen los
+PDF y lo que `erp.vw_gastos` muestra por JOIN, así que pisarlo reescribiría cómo
+se ve el pasado de esa obra en el control de costos. Los proyectos que entran
+nuevos desde KAOS toman su **nombre** como `codigo`, no el `KP-XXXXXX`: el código
+corto es una llave, no una etiqueta, y en el desplegable del comprador o en la
+orden que recibe el proveedor no diría nada.
+
+`origen` decide quién puede tocar la fila:
+
+- **`kaos`** — la administra KAOS. El sincronizador le pisa nombre, ciudad,
+  departamento, zona y estado. El ERP no la activa ni la inactiva.
+- **`local`** — de la empresa y no existe en KAOS: centros de costo como
+  `BODEGA CIVILTECH`. Tras el corte quedan inactivos: son histórico.
+- **`huerfano`** — la creó un documento cuando eso todavía se podía.
+
+### El espejo
+
+| Tabla | Qué guarda |
+|---|---|
+| `erp.proyectos_kaos` | Copia cruda de lo que entrega `kaos-api`. Fuente de verdad: KAOS |
+| `erp.kaos_sync_estado` | Una fila: la marca del último `updated_at` procesado |
+
+El espejo **no tiene llave foránea a `erp.zonas`**, a propósito: refleja lo que
+KAOS dijo, aunque algún día diga una zona que acá no existe. La validación va al
+copiar al catálogo, no al recibir — un espejo que rechaza datos esconde justo la
+discrepancia que hay que ver.
+
+`visto_en` se refresca en cada sincronización. Es lo que permite detectar bajas
+después de una reconciliación completa: **la API no emite borrados**, así que lo
+que no se vio en esa corrida es lo que se fue.
+
+### La bandeja
+
+`erp.vw_documentos_sin_proyecto` junta lo que no puede convertirse en orden de
+compra, con `motivo` diciendo cuál de los dos casos es:
+
+| `motivo` | Qué pasó | Qué hacer |
+|---|---|---|
+| `sin_proyecto` | El texto no resolvió contra el catálogo | Asignarle uno |
+| `proyecto_inactivo` | El proyecto es correcto pero la obra está cerrada | Reasignar, o reabrirla en KAOS |
+
+El primero cubre los seis tipos de documento; el segundo solo requerimientos
+**pendientes o parciales**, que son los únicos que avanzan a orden de compra.
+Uno cerrado o anulado ya no va a avanzar, así que listarlo sería ruido
+permanente.
+
+`proyecto_texto` guarda el texto que llegó cuando no resolvió. Es la única pista
+que tiene quien lo asigne después: sin él se ve un requerimiento sin proyecto y
+nada con qué decidir.
+
+### Lo que la base hace cumplir
+
+- Un proyecto de KAOS no puede estar dos veces: índices únicos parciales sobre
+  `kaos_id` y `kaos_code`.
+- `origen` solo admite los tres valores, por CHECK.
+- Las seis llaves foráneas siguen en `RESTRICT`: **un proyecto con documentos no
+  se puede borrar**, ni por accidente ni a propósito.
 
 ## Reglas que la base hace cumplir
 

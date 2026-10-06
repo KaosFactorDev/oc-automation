@@ -114,7 +114,7 @@ Postgres funcione no hay razón para seguir escribiendo en SharePoint.
 Eso quita la etapa de convivencia, el script de comparación y el código de
 escritura espejo. A cambio no hay vuelta atrás gradual, y eso se cubre así:
 
-- Producción sigue en SharePoint mientras se desarrolla, así que hay una
+- Producción siguió en SharePoint mientras se desarrollaba, así que hubo una
   referencia viva contra la cual comparar pantalla por pantalla.
 - El import es idempotente y tarda segundos. El día del corte: importar y
   desplegar, en ese orden. La ventana en que SharePoint podría recibir algo que
@@ -149,9 +149,9 @@ ediciones sobre SharePoint, ninguna destructiva. Los números de documentos
 anulados pasaron a `0036-A`, `0072-B`; la remisión duplicada se marcó anulada
 con el motivo en vez de borrarse; y las fechas de `OS-0095` se intercambiaron.
 
-Se corrigió el origen y no el import a propósito: SharePoint sigue siendo la
-fuente de verdad hasta el corte, y un parche que viviera solo en el import haría
-que cada reimportación lo volviera a aplicar mientras las dos bases divergen.
+Se corrigió el origen y no el import a propósito: SharePoint era la fuente de
+verdad hasta el corte, y un parche que viviera solo en el import habría vuelto a
+aplicarse en cada reimportación mientras las dos bases divergían.
 
 ### Una orden de servicio que terminaba antes de empezar
 
@@ -369,15 +369,21 @@ de texto; la diferencia con el código muerto es que estos no se ejecutan.
 | `proveedores_depurados_final.csv`, `tabla_proyectos.csv` | Archivados |
 | `data/local.db` (SQLite) | Solo sesiones y mapeo de tesorería |
 
-## Qué falta
+## El corte
 
-### Postgres en el VPS y el corte
+Hecho a principios de septiembre de 2026. La base quedó levantada en el VPS
+(servicio `db` de `docker-compose.yml`), se importaron las once listas y se
+desplegó: en ese orden, porque desplegar antes de importar habría dejado a la
+gente con un ERP en blanco.
 
-Es la única etapa que queda, y la única que no se puede ensayar en local porque
-necesita el servidor. El servicio `db` ya está definido en `docker-compose.yml`.
-
-**El orden importa: importar primero, desplegar después.** Si se despliega antes
-de importar, la aplicación arranca contra una base vacía y la gente ve un ERP en
-blanco. El procedimiento paso a paso, con los puntos de verificación y el plan de
-reversa, está en
+Desde entonces la fuente de verdad es el Postgres del VPS y las listas de
+SharePoint están congeladas —son el respaldo del corte y nadie las lee—. El
+procedimiento que se siguió, los puntos de verificación y por qué la reversa
+ya no existe están en
 [operacion-base-de-datos.md](operacion-base-de-datos.md#el-corte-en-el-vps).
+
+Lo que apareció después, auditando producción: el respaldo nocturno no corría
+por el bit de ejecución que el deploy no preserva, y dos migraciones de datos
+quedaron en no-op porque en un entorno nuevo las migraciones corren antes de que
+haya datos. Las dos cosas están corregidas; la segunda dejó una lección en la
+cabecera de `20260904120000_reaceptar_proyectos_tras_import.sql`.

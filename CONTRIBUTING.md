@@ -192,5 +192,7 @@ Cosas que ya costaron un incidente. Consérvalas:
 
 - **`data/` en el VPS pertenece al UID 10001** (el usuario del contenedor). El deploy hace dos llamadas a rsync por esto, y la segunda no lleva `--delete` a propósito. Ver los comentarios en [deploy.yml](.github/workflows/deploy.yml) antes de tocarlo.
 - **`.env` y `data/local.db` están excluidos del deploy.** Nunca los subas al repositorio.
-- **SharePoint es la fuente de verdad**, SQLite es solo caché de lectura. Toda escritura va primero a SharePoint y después actualiza SQLite.
+- **Postgres es la fuente de verdad.** Todo el SQL vive en `src/repo/`: fuera de ahí no se escribe SQL, y ahí adentro no se toman decisiones de negocio. El SQLite de `data/local.db` ya no es un caché — solo guarda las sesiones y el mapeo de tesorería.
+- **SharePoint quedó para archivos, correo y login.** Los PDF de respaldo van a su Drive; las once listas están congeladas desde el corte y ninguna operación de datos sale por Microsoft Graph. No vuelvas a leer de ellas.
+- **En desarrollo, `MODO_PRUEBA=1`.** La base es local, pero el buzón, el Drive y tesorería son los de producción: sin esta variable, probar el flujo completo sube archivos y responde correos de verdad.
 - **No hay pruebas automatizadas.** `npm test` es el stub por defecto. Prueba a mano el flujo que tocaste y descríbelo en el PR.

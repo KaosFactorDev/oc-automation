@@ -48,27 +48,20 @@ async function main() {
     process.exit(1);
   }
 
-  console.log('\n=== 2. Login y lectura de proyectos ===');
-  let proyectos;
+  // Los proyectos ya no se leen de tesorería: Cash_Flow no tiene catálogo propio
+  // y el desplegable sale del espejo de KAOS. Acá solo se prueba el login.
+  console.log('\n=== 2. Login ===');
   try {
-    proyectos = await tesoreria.listarProyectos();
+    await tesoreria.probarLogin();
   } catch (e) {
     console.log('  ✗ Falló:', e.message);
     console.log('\n  Pistas según el mensaje:');
     console.log('   • "email_not_confirmed" → el usuario quedó sin confirmar en Supabase.');
     console.log('     Studio → Authentication → Users → el usuario → confirmar.');
     console.log('   • "Invalid login credentials" → contraseña o correo distintos.');
-    console.log('   • HTTP 401 al leer proyectos → el usuario no tiene el rol del módulo.');
-    console.log("     Revisar: select role from public.user_roles where user_id = (select id from auth.users where email='" + (process.env.TESORERIA_EMAIL || '') + "');");
     process.exit(1);
   }
-  console.log(`  ✓ Login correcto y ${proyectos.length} proyecto(s) legibles`);
-  if (!proyectos.length) {
-    console.log('  ⚠ La lista salió vacía. El login funcionó, así que casi seguro es el rol:');
-    console.log('    la RLS permite la lectura solo a roles del módulo de tesorería.');
-  }
-  proyectos.slice(0, 15).forEach(p => console.log(`      ${p.id}  ${p.name}`));
-  if (proyectos.length > 15) console.log(`      … y ${proyectos.length - 15} más`);
+  console.log('  ✓ Login correcto');
 
   if (ocsArg) {
     console.log('\n=== 3. Solicitudes ya existentes para esas OC ===');
