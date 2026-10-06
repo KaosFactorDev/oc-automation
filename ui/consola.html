@@ -1188,11 +1188,11 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         </summary>
         <div style="margin-top:16px">
           <div style="font-size:11px;color:var(--txt-3);margin-bottom:10px;line-height:1.5">
-            Lo que no puede convertirse en orden de compra, por dos motivos distintos.
-            <strong>Sin proyecto</strong>: el asunto del correo traía un nombre que no está en el
-            catálogo — el documento se guardó completo y su gasto se suma bajo «(sin proyecto)»,
-            fuera de todo informe por obra. <strong>Obra cerrada</strong>: el proyecto es correcto
-            pero está inactivo, así que hay que reasignarlo o reabrir la obra en KAOS.
+            Órdenes, remisiones y movimientos de inventario que quedaron sin proyecto —casi
+            siempre de la importación de SharePoint—. Su gasto se suma bajo «(sin proyecto)»,
+            fuera de todo informe por obra, hasta que se les asigne uno.
+            Los <strong>requerimientos</strong> sin proyecto o de obra cerrada no están aquí: se
+            revisan en la pestaña <strong>Requerimientos</strong>, arriba de todo.
           </div>
           <div id="sp-lista" style="margin-top:12px;max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:4px"></div>
           <div id="msg-sp" style="font-size:11px;margin-top:6px;min-height:16px"></div>
@@ -2769,17 +2769,30 @@ function renderRequerimientos(){
     return;
   }
 
-  // Agrupar por proyecto
+  // Agrupar por proyecto. Lo que necesita revisión va primero: los que llegaron
+  // con un proyecto que no está en el catálogo, y los de una obra cerrada. Ni
+  // unos ni otros pueden pasar a OC hasta que alguien les asigne una obra
+  // abierta (Editar) o los anule.
+  const SIN_PROYECTO = '\u0000sin';
   const grupos = {};
   filtrados.forEach(r => {
-    const k = r.proyecto || 'Sin proyecto';
+    const k = r.proyecto || SIN_PROYECTO;
     (grupos[k] ||= []).push(r);
   });
+  const cerrada = (reqs) => reqs.some(r => r.proyectoActivo === false);
+  const prioridad = ([k, reqs]) => k === SIN_PROYECTO ? 0 : cerrada(reqs) ? 1 : 2;
+  const ordenados = Object.entries(grupos).sort((a, b) => prioridad(a) - prioridad(b));
 
-  cont.innerHTML = Object.entries(grupos).map(([proy, reqs]) => `
-    <div class="card">
+  cont.innerHTML = ordenados.map(([proy, reqs]) => `
+    <div class="card"${proy === SIN_PROYECTO ? ' style="border-color:#f59e0b"' : ''}>
       <div class="card-head">
-        <h3>${esc(proy)}</h3>
+        ${proy === SIN_PROYECTO
+          ? `<h3 style="color:#b45309">⚠ Sin proyecto — revisar</h3>
+             <span style="font-size:11px;color:var(--txt-2);margin-left:10px">El correo traía un proyecto que no está en el catálogo. Ábrelo y asígnale uno con <strong>Editar</strong>, o anúlalo.</span>`
+          : `<h3>${esc(proy)}</h3>${cerrada(reqs)
+              ? `<span style="font-size:9px;background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:3px;margin-left:8px">OBRA CERRADA</span>
+                 <span style="font-size:11px;color:var(--txt-2);margin-left:8px">Reasígnalo con <strong>Editar</strong> o reactiva la obra en KAOS.</span>`
+              : ''}`}
         <span class="tag tag-pendiente" style="margin-left:auto">${reqs.length} req.</span>
       </div>
       <div class="card-body" style="padding:0">
@@ -2798,7 +2811,8 @@ function renderRequerimientos(){
                 <tr style="cursor:pointer" onclick="verRequerimiento('${esc(r.id)}')">
                   <td class="mono">${r.consecutivoSistema
                     ? `<strong>${esc(r.consecutivoSistema)}</strong>${r.consecutivo ? `<br><span style="font-size:9px;color:var(--txt-2)">ref: ${esc(r.consecutivo)}</span>` : ''}`
-                    : esc(r.consecutivo || '—')}</td>
+                    : esc(r.consecutivo || '—')}${!r.proyecto && r.proyectoTexto
+                    ? `<br><span style="font-size:10px;color:#b45309">El correo decía: <strong>${esc(r.proyectoTexto)}</strong></span>` : ''}</td>
                   <td>${esc(fmtFecha(fecha))}</td>
                   <td>${esc(resp)}</td>
                   <td>${(() => { try { const its = JSON.parse(r.itemsJson || '[]'); const act = its.filter(x => !x.descartado).length; return act < its.length ? `${act}/${its.length}` : its.length; } catch { return 0; } })()}</td>
@@ -2833,19 +2847,36 @@ async function anularRequerimiento(id, consecutivo){
 
 // ── Editar requerimiento (descartar ítems / cambiar proyecto) ─────────────────
 
-function _poblarProyectosEditReq(proyectoActual) {
+// Sin proyecto actual, el desplegable NO puede arrancar en el primero de la
+// lista: guardar sin mirar le asignaría esa obra. Arranca en «— Elegir —» o en
+// la obra más parecida al texto del correo, marcada como sugerida.
+function _poblarProyectosEditReq(proyectoActual, textoCorreo = '') {
   const sel = $('#edit-req-proyecto');
   sel.innerHTML = '';
   const proyectos = ESTADO.proyectos || [];
   const todos = proyectoActual && !proyectos.includes(proyectoActual)
     ? [proyectoActual, ...proyectos] : proyectos;
+  const sugerido = proyectoActual ? '' : sugerirProyecto(textoCorreo, proyectos);
+  if (!proyectoActual) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '— Elegir proyecto —';
+    sel.appendChild(o);
+  }
   todos.forEach(p => {
     const o = document.createElement('option');
     o.value = p;
-    o.textContent = p;
-    if (p === proyectoActual) o.selected = true;
+    o.textContent = p === sugerido ? `${p}  (sugerido)` : p;
+    if (p === (proyectoActual || sugerido)) o.selected = true;
     sel.appendChild(o);
   });
+  const pista = $('#edit-req-pista');
+  if (pista) {
+    pista.innerHTML = proyectoActual ? '' : textoCorreo
+      ? `El correo decía: <strong>${esc(textoCorreo)}</strong>${sugerido ? ' — se preseleccionó la obra más parecida; verifícala.' : ' — ninguna obra se parece; elígela a mano.'}`
+      : 'Llegó sin proyecto: elígelo a mano.';
+    pista.style.display = proyectoActual ? 'none' : 'block';
+  }
 }
 
 function renderEditReqItems() {
@@ -2869,7 +2900,7 @@ async function abrirEditarRequerimiento(id) {
   _editReqId = id;
   try { _editReqItems = JSON.parse(r.itemsJson || '[]'); } catch { _editReqItems = []; }
   $('#edit-req-titulo').textContent = r.consecutivoSistema || r.consecutivo || id;
-  _poblarProyectosEditReq(r.proyecto || '');
+  _poblarProyectosEditReq(r.proyecto || '', r.proyectoTexto || '');
   renderEditReqItems();
   const conOCyDescartado = _editReqItems.filter(it => it.descartado);
   if (conOCyDescartado.length) {
@@ -3564,6 +3595,15 @@ function _verRequerimientoRender(r) {
   wrap.innerHTML = `
     <div class="modal-card" style="max-width:980px">
       <h3>${r.consecutivoSistema ? esc(r.consecutivoSistema) : esc(r.consecutivo || '—')} · ${esc(r.proyecto || '')}${r.consecutivoSistema && r.consecutivo ? `<span style="font-size:12px;font-weight:400;color:var(--txt-2);margin-left:8px">(ref. usuario: ${esc(r.consecutivo)})</span>` : ''}</h3>
+      ${!r.proyecto ? `
+        <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin:6px 0;font-size:12px;color:#92400e">
+          <strong>⚠ Sin proyecto.</strong>
+          ${r.proyectoTexto ? `El correo decía <strong>«${esc(r.proyectoTexto)}»</strong>, que no está en el catálogo.` : 'Llegó sin proyecto.'}
+          No se puede generar OC hasta asignarle uno: usa <strong>Editar</strong>, o <strong>Anular</strong> si no corresponde.
+        </div>` : r.proyectoActivo === false ? `
+        <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin:6px 0;font-size:12px;color:#92400e">
+          <strong>⚠ Obra cerrada.</strong> No se puede generar OC para ${esc(r.proyecto)}: reasígnalo con <strong>Editar</strong> o reactiva la obra en KAOS.
+        </div>` : ''}
       <p class="text-muted" style="margin:2px 0">
         ${esc(fmtFecha(r.fechaCorreo || r.fechaSolicitud))}
         ${r.solicitante ? ` · ${esc(r.solicitante)}` : ''}
@@ -6367,6 +6407,7 @@ function _invMsg(el, type, text) {
     <div>
       <label style="font-size:12px;color:var(--txt-2);display:block;margin-bottom:4px">PROYECTO</label>
       <select id="edit-req-proyecto" style="width:100%"></select>
+      <div id="edit-req-pista" style="display:none;margin-top:6px;font-size:12px;color:#b45309"></div>
     </div>
 
     <div id="edit-req-aviso" style="display:none;background:#7c3e0018;border:1px solid #7c3e0066;border-radius:6px;padding:8px 12px;font-size:12px;color:#f59e0b"></div>

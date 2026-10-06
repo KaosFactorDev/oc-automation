@@ -29,7 +29,7 @@ const CABECERA = `
   r.id, r.consecutivo, r.consecutivo_sistema, r.proyecto_id, r.fecha_solicitud,
   r.solicitante, r.estado, r.origen_correo_id, r.adjunto_url, r.bloqueado_por,
   r.bloqueado_hasta, r.notas, r.sp_id, r.created_at, r.updated_at,
-  p.codigo AS proyecto`;
+  r.proyecto_texto, p.codigo AS proyecto, p.activo AS proyecto_activo`;
 
 /**
  * Devuelve el requerimiento con la forma que espera el resto del sistema: los
@@ -44,6 +44,10 @@ function mapear(r, items = []) {
     consecutivoSistema: r.consecutivo_sistema || '',
     proyecto:           r.proyecto || '',
     proyectoId:         r.proyecto_id,
+    // Sin proyecto: el texto que traía el correo, la pista para asignarlo.
+    proyectoTexto:      r.proyecto_texto || '',
+    // false = la obra está cerrada en KAOS y no se le pueden generar OC.
+    proyectoActivo:     r.proyecto_id == null ? null : r.proyecto_activo !== false,
     fechaSolicitud:     r.fecha_solicitud ? r.fecha_solicitud.toISOString() : '',
     solicitante:        r.solicitante || '',
     estado:             r.estado,
