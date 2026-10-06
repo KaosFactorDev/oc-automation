@@ -23,6 +23,12 @@ const { htmlAPdf } = require('../pdfGenerator');
 const CONFIRM = process.argv.includes('--confirm');
 const TODOS   = process.argv.includes('--todos');
 
+function fechaLocal(v) {
+  if (!v) return '';
+  const iso = typeof v === 'string' ? v : new Date(v).toISOString();
+  return new Date(iso.slice(0, 10) + 'T12:00:00').toLocaleDateString('es-CO');
+}
+
 function ocDesdeFields(f) {
   let itemsRaw = [];
   try { itemsRaw = JSON.parse(f.itemsJson || '[]'); } catch { itemsRaw = []; }
@@ -36,15 +42,15 @@ function ocDesdeFields(f) {
   }));
   return {
     numeroOC: f.numeroOC || '',
-    fecha: f.fechaCreacion ? new Date(f.fechaCreacion).toLocaleDateString('es-CO') : '',
+    fecha: fechaLocal(f.fechaCreacion),
     proyecto: f.proyecto || '',
     proveedor: {
       nombre: f.proveedorNombre || '', nit: f.proveedorNit || '',
       direccion: '', municipio: '', telefono: '', correo: '',
     },
     lugarEntrega:           f.lugarEntrega || '',
-    fechaEntregaPrevista:   f.fechaEntregaPrevista ? new Date(f.fechaEntregaPrevista).toLocaleDateString('es-CO') : '',
-    fechaEntrega:           f.fechaEntrega ? new Date(f.fechaEntrega).toLocaleDateString('es-CO') : '',
+    fechaEntregaPrevista:   fechaLocal(f.fechaEntregaPrevista),
+    fechaEntrega:           fechaLocal(f.fechaEntrega),
     requerimientoOrigen:    f.requerimientoOrigen || '',
     condicionesComerciales: f.condicionesComerciales || '',
     observaciones:          f.observaciones || '',

@@ -6,12 +6,15 @@
  * para que el resto del pipeline (procesarCorreo) no cambie.
  */
 
-const fs    = require('fs');
-const https = require('https');
+const fs = require('fs');
+
+// El transporte (modelo, timeout, reintentos y salto al modelo de respaldo) vive en
+// geminiClient.js, compartido con el servidor web. Antes este archivo tenia su propia
+// copia de postGemini, que ya discrepaba con la del servidor en el default de
+// reintentos.
+const geminiClient = require('./geminiClient');
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
-// Saneado y validado en geminiConfig.js (compartido con el servidor web).
-const MODELO     = require('./geminiConfig').MODELO;
 
 const PROMPT = `Este PDF es el formato oficial de SOLICITUD DE REQUERIMIENTO (CT-ADMIN-FO-002) de Civiltech.
 Extrae la información y devuelve SOLO un JSON (sin markdown, sin comentarios) con esta estructura EXACTA:
@@ -43,61 +46,6 @@ Reglas:
 - Si un campo no aparece en el PDF, déjalo como cadena vacía "".
 - Devuelve al menos 1 ítem si el formato está diligenciado. Si no hay ítems, devuelve items: [].`;
 
-// POST a Gemini con timeout y reintento ante 503/UNAVAILABLE o cortes de red.
-// Espejo del helper en servidor-cotizaciones.js (este módulo corre en el pipeline
-// de correos, fuera del servidor web).
-async function postGemini(url, bodyStr, { timeoutMs = 60000, reintentos = 2 } = {}) {
-  let ultimoError;
-  for (let intento = 0; intento <= reintentos; intento++) {
-    try {
-      const resp = await new Promise((resolve, reject) => {
-        const req = https.request(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, (res) => {
-          const chunks = [];
-          res.on('data', c => chunks.push(c));
-          res.on('end', () => {
-            try { resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) }); }
-            catch (e) { reject(new Error(`Respuesta de Gemini ilegible (HTTP ${res.statusCode})`)); }
-          });
-        });
-        req.setTimeout(timeoutMs, () => {
-          req.destroy();
-          // Ver la nota en servidor-cotizaciones.js: este timeout es un techo al
-          // tiempo de generacion, y la generacion ya ocurrio del lado de Google.
-          const err = new Error(`Gemini timeout tras ${Math.round(timeoutMs / 1000)}s`);
-          err.generacionEnVuelo = true;
-          reject(err);
-        });
-        req.on('error', reject);
-        req.write(bodyStr);
-        req.end();
-      });
-      const err = resp.body?.error;
-      const esTransitorio = resp.status === 503 || err?.status === 'UNAVAILABLE' || err?.code === 503;
-      if (esTransitorio && intento < reintentos) {
-        const espera = 1000 * Math.pow(2, intento);
-        console.warn(`[leerRequerimientoPDF] Gemini ${err?.status || resp.status} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
-        ultimoError = new Error(`Gemini no disponible (HTTP ${err?.code || resp.status}): ${err?.message || 'UNAVAILABLE'}`);
-        await new Promise(r => setTimeout(r, espera));
-        continue;
-      }
-      if (err) throw new Error(`Gemini error (HTTP ${err.code || resp.status}): ${err.message}`);
-      return resp.body;
-    } catch (e) {
-      ultimoError = e;
-      const reintentable = !e.generacionEnVuelo &&
-        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
-      if (reintentable && intento < reintentos) {
-        const espera = 1000 * Math.pow(2, intento);
-        console.warn(`[leerRequerimientoPDF] ${e.message} — reintento ${intento + 1}/${reintentos} en ${espera}ms`);
-        await new Promise(r => setTimeout(r, espera));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw ultimoError || new Error('Gemini: fallo desconocido');
-}
-
 async function leerRequerimientoPDF(rutaPDF) {
   if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
   if (!fs.existsSync(rutaPDF)) throw new Error(`No existe el archivo: ${rutaPDF}`);
@@ -123,11 +71,14 @@ async function leerRequerimientoPDF(rutaPDF) {
     },
   });
 
-  const resp = await postGemini(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODELO}:generateContent?key=${GEMINI_KEY}`,
-    body,
-    { timeoutMs: 120000, reintentos: 2 },
-  );
+  // Presupuesto mas alto que en la consola a proposito: esto corre headless en el
+  // ciclo de correos, no hay nadie esperando en pantalla y un fallo aca se convierte
+  // en una respuesta automatica de "PDF sin items" al solicitante.
+  const resp = await geminiClient.pedir(body, {
+    timeoutMs: 120000,
+    presupuestoMs: 300000,
+    etiqueta: 'leerRequerimientoPDF',
+  });
 
   const texto = resp.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
   const limpio = texto.replace(/```json|```/g, '').trim();
