@@ -5406,19 +5406,19 @@ async function cargarSinProyecto(){
       return;
     }
 
-    const opciones = ['<option value="">Elegir proyecto…</option>']
-      .concat((Array.isArray(proyectos) ? proyectos : []).map(c => `<option value="${esc(c)}">${esc(c)}</option>`))
-      .join('');
+    const lista = Array.isArray(proyectos) ? proyectos : [];
 
     cont.innerHTML = items.map((d, i) => {
-      // Solo los requerimientos tienen ruta de asignación. Los demás hoy nacen
-      // con proyecto desde la consola, así que el caso es teórico — pero si
-      // aparece, hay que decirlo en vez de mostrar un control que no hace nada.
-      const asignable = d.tipo === 'requerimiento';
-      const control = asignable
-        ? `<select id="sp-sel-${i}" class="td-input" style="border:1px solid var(--border);padding:5px 8px;font-size:11px;width:190px;flex:none">${opciones}</select>
-           <button class="btn btn-primary btn-sm" onclick="asignarProyectoDoc('${esc(d.id)}', ${i})">${d.motivo === 'proyecto_inactivo' ? 'Reasignar' : 'Asignar'}</button>`
-        : `<span style="font-size:10px;color:var(--txt-3)">Asignar desde su ficha</span>`;
+      // Se preselecciona el proyecto que más se parece al texto que traía el
+      // documento: elegir es confirmar o corregir, no buscar en toda la lista.
+      // Una obra cerrada no se sugiere a sí misma.
+      const sugerido = d.motivo === 'proyecto_inactivo' ? '' : sugerirProyecto(d.proyectoTexto, lista);
+      const opciones = ['<option value="">Elegir proyecto…</option>']
+        .concat(lista.map(c => `<option value="${esc(c)}" ${c === sugerido ? 'selected' : ''}>${esc(c)}${c === sugerido ? '  (sugerido)' : ''}</option>`))
+        .join('');
+      const control =
+        `<select id="sp-sel-${i}" class="td-input" style="border:1px solid var(--border);padding:5px 8px;font-size:11px;width:190px;flex:none">${opciones}</select>
+         <button class="btn btn-primary btn-sm" onclick="asignarProyectoDoc('${esc(d.tipo)}', '${esc(d.id)}', ${i})">${d.motivo === 'proyecto_inactivo' ? 'Reasignar' : 'Asignar'}</button>`;
 
       // Dos motivos, dos acciones. Sin proyecto se asigna uno; con la obra
       // cerrada el dato está bien y lo que falta es decidir entre reasignar o
@@ -5447,7 +5447,29 @@ async function cargarSinProyecto(){
   }
 }
 
-async function asignarProyectoDoc(id, i){
+// El proyecto del catálogo más parecido a un texto, o '' si ninguno se parece
+// lo suficiente. Compara palabras sin tildes ni mayúsculas, y pesa doble las
+// que llevan dígitos (CT26-026, 0380, 230KV): son las que identifican la obra.
+// Las genéricas no cuentan: sin esto «SIN_PROYECTO» sugería «0. Proyecto Tipo».
+const SP_PALABRAS_VACIAS = new Set(['proyecto', 'proyectos', 'sin', 'obra', 'de', 'del', 'la', 'el', 'los', 'las', 'en', 'y']);
+function sugerirProyecto(texto, lista){
+  const palabras = s => new Set(String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().split(/[^a-z0-9]+/).filter(p => p.length > 1 && !SP_PALABRAS_VACIAS.has(p)));
+  const buscadas = palabras(texto);
+  if (!buscadas.size) return '';
+  const peso = p => /\d/.test(p) ? 2 : 1;
+  const total = [...buscadas].reduce((a, p) => a + peso(p), 0);
+  let mejor = '', puntaje = 0;
+  for (const c of lista) {
+    const delProyecto = palabras(c);
+    const comunes = [...buscadas].filter(p => delProyecto.has(p)).reduce((a, p) => a + peso(p), 0);
+    const s = comunes / total;
+    if (s > puntaje) { mejor = c; puntaje = s; }
+  }
+  return puntaje >= 0.5 ? mejor : '';
+}
+
+async function asignarProyectoDoc(tipo, id, i){
   const sel = $('#sp-sel-' + i);
   const msg = $('#msg-sp');
   const codigo = sel ? sel.value : '';
@@ -5455,10 +5477,10 @@ async function asignarProyectoDoc(id, i){
 
   msg.textContent = 'Asignando…'; msg.style.color = 'var(--txt-2)';
   try {
-    const r = await fetch(`/requerimientos/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
+    const r = await fetch('/documentos/sin-proyecto/asignar', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proyecto: codigo }),
+      body: JSON.stringify({ tipo, id, proyecto: codigo }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Error');

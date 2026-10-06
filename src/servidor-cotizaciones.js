@@ -1380,6 +1380,39 @@ const servidor = http.createServer(async (req, res) => {
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
+  // ── POST /documentos/sin-proyecto/asignar → darle proyecto a uno ────────
+  // Cualquiera de los seis tipos de la bandeja. Los requerimientos van por
+  // repoRequerimientos.actualizar() porque al recibir proyecto hay que
+  // emitirles el consecutivo; los demás solo cambian de proyecto.
+  if (req.method === 'POST' && url === '/documentos/sin-proyecto/asignar') {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+        const tipo     = String(body.tipo || '').trim();
+        const id       = String(body.id || '').trim();
+        const proyecto = String(body.proyecto || '').trim();
+        if (!tipo || !id || !proyecto) {
+          return json({ error: 'Faltan tipo, id o proyecto' }, 400);
+        }
+
+        if (tipo === 'requerimiento') {
+          await repoRequerimientos.actualizar(id, { proyecto });
+          return json({ ok: true });
+        }
+        if (!repoProyecto.TABLA_POR_TIPO[tipo]) {
+          return json({ error: `Tipo de documento desconocido: ${tipo}` }, 400);
+        }
+        const hecho = await repoProyecto.asignar(tipo, id, proyecto);
+        return hecho ? json({ ok: true }) : json({ error: 'Documento no encontrado' }, 404);
+      } catch (err) {
+        return json({ error: err.message }, 400);
+      }
+    });
+    return;
+  }
+
   // ── GET /proyectos → lista de códigos activos (usado por selectores) ────
   if (req.method === 'GET' && url === '/proyectos') {
     try {

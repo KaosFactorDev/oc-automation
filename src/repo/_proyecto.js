@@ -84,4 +84,39 @@ async function contarPendientes() {
   return r ? r.n : 0;
 }
 
-module.exports = { resolver, pendientes, contarPendientes };
+// Las tablas que se asignan acá, por el `tipo` de la bandeja. Los
+// requerimientos NO: al asignarles proyecto hay que emitirles el consecutivo,
+// y eso lo hace repo/requerimientos.actualizar().
+const TABLA_POR_TIPO = {
+  orden_compra:          'ordenes_compra',
+  orden_servicio:        'ordenes_servicio',
+  remision:              'remisiones',
+  movimiento_inventario: 'movimientos_inventario',
+  historial_precio:      'historial_precios',
+};
+
+/**
+ * Asigna (o reasigna) el proyecto de un documento de la bandeja.
+ *
+ * @param {string} tipo    uno de TABLA_POR_TIPO
+ * @param {string} id      id del documento
+ * @param {string} codigo  el proyecto elegido, como lo lista /proyectos
+ * @returns {Promise<boolean>} false si el documento no existe
+ */
+async function asignar(tipo, id, codigo) {
+  const tabla = TABLA_POR_TIPO[tipo];
+  if (!tabla) throw new Error(`Tipo de documento desconocido: ${tipo}`);
+
+  return pg.tx(async (c) => {
+    const { proyectoId } = await resolver(c, codigo);
+    if (!proyectoId) throw new Error(`El proyecto "${codigo}" no está en el catálogo`);
+
+    // proyecto_texto se limpia: era la pista para asignarlo, y ya se asignó.
+    const r = await c.query(
+      `UPDATE erp.${tabla} SET proyecto_id = $1, proyecto_texto = NULL WHERE id = $2`,
+      [proyectoId, id]);
+    return r.rowCount > 0;
+  });
+}
+
+module.exports = { resolver, pendientes, contarPendientes, asignar, TABLA_POR_TIPO };
