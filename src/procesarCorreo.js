@@ -34,9 +34,10 @@ async function leerRequerimientoAuto(rutaArchivo) {
 
 const NOMBRE_FORMATO = 'CT-ADMIN-FO-002_FORMATO_SOLICITUD_DE_REQUERIMIENTO_V3_0.xlsx';
 
+// El formato ya no es el archivo fijo: se arma con la lista de obras activas de
+// KAOS (ver formatoRequerimiento.js). Si aún no se generó, cae a la plantilla.
 function rutaFormatoRequerimiento() {
-  return process.env.PATH_FORMATO_REQUERIMIENTO ||
-         path.join(__dirname, '../data', NOMBRE_FORMATO);
+  return require('./formatoRequerimiento').rutaFormato();
 }
 
 // ── Respuesta automática cuando el asunto no matchea el formato esperado ─────
@@ -156,7 +157,14 @@ async function construirResultado(infoAsunto, requerimiento, opts = {}) {
   for (const p of await repoCatalogos.getProyectos({ soloActivos: false })) {
     const codigo = String(p.nombre || '').trim();
     const key    = codigo.toUpperCase();
-    if (key) proyPorCodigo[key] = { zona: p.zona || '', codigo, activo: p.activo !== false };
+    if (!key) continue;
+    const entrada = { zona: p.zona || '', codigo, activo: p.activo !== false };
+    proyPorCodigo[key] = entrada;
+    // También por su nombre de KAOS («CT26-026 MICROPILOTES RSO - JE JAIMES
+    // (0380)»): es el que trae la lista del formato y el que la gente ve en KAOS
+    // y Cash_Flow. Apunta al mismo código, que es lo que se guarda.
+    const nombreKaos = p.origen === 'kaos' ? String(p.descripcion || '').trim().toUpperCase() : '';
+    if (nombreKaos && !proyPorCodigo[nombreKaos]) proyPorCodigo[nombreKaos] = entrada;
   }
   // Añadir proyectos externos pasados explícitamente (carga manual)
   for (const p of (opts.proyectosExternos || [])) {
@@ -309,6 +317,9 @@ async function procesarRequerimientoManual(datos = {}, opts = {}) {
  * @returns {object}    Resultado con accion, datos de OC o instrucción de respuesta
  */
 async function procesarCorreo(asunto, rutaAdjunto, opts = {}) {
+  // Antes de que alguna respuesta adjunte el formato: que tenga la lista de
+  // obras al día. No lanza; si falla, se adjunta la plantilla fija.
+  await require('./formatoRequerimiento').asegurarFormato();
   const infoAsunto = parsearAsunto(asunto);
 
   if (!infoAsunto.valido) {

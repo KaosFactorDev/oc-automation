@@ -2178,8 +2178,9 @@ const servidor = http.createServer(async (req, res) => {
   // ── GET /requerimientos/formato → descarga el formato oficial en blanco ─────
   // Misma copia que adjunta la respuesta automática por correo.
   if (req.method === 'GET' && url === '/requerimientos/formato') {
-    const { rutaFormatoRequerimiento, NOMBRE_FORMATO } = require('./procesarCorreo');
-    const ruta = rutaFormatoRequerimiento();
+    const { NOMBRE_FORMATO } = require('./procesarCorreo');
+    // Con la lista de obras activas de KAOS al día (formatoRequerimiento.js).
+    const ruta = await require('./formatoRequerimiento').asegurarFormato();
     if (!fs.existsSync(ruta)) {
       console.error('GET /requerimientos/formato: no existe', ruta);
       return json({ error: 'El formato oficial no está disponible en el servidor.' }, 404);
