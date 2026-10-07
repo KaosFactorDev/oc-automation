@@ -256,6 +256,9 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
   <button class="nav-tab" data-tab="inv" onclick="tab('inv')">
     <span class="tab-num">1.6</span> Inventarios
   </button>
+  <button class="nav-tab" data-tab="costos" onclick="tab('costos')">
+    <span class="tab-num">1.7</span> Control de Costos
+  </button>
 </nav>
 
 <main>
@@ -918,6 +921,67 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
     </div>
   </section>
 
+  <!-- ══════════════════════════════════════════════════
+       1.7 CONTROL DE COSTOS
+       Lo que se ha gastado, por obra: órdenes de compra y de servicio aprobadas
+       y salidas de almacén. Solo lectura, calculado desde los documentos.
+       ══════════════════════════════════════════════════ -->
+  <section class="panel" id="panel-costos">
+    <div class="panel-head">
+      <div>
+        <h2>Control de costos</h2>
+        <div class="desc">Lo gastado por obra: OC y OS aprobadas y salidas de almacén. Se calcula desde los documentos; las obras van con su nombre de KAOS.</div>
+      </div>
+      <div class="tools">
+        <button class="btn btn-ghost btn-sm" onclick="cargarControlCostos(true)" title="Volver a leer los gastos">↻ Actualizar</button>
+        <button class="btn btn-primary btn-sm" onclick="descargarControlCostos()" title="Descargar en Excel lo que se ve con los filtros aplicados">⤓ Descargar Excel</button>
+      </div>
+    </div>
+
+    <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
+      <select id="cc-obra" onchange="renderControlCostos()" style="min-width:240px"><option value="">Todas las obras</option></select>
+      <label style="font-size:11px;color:var(--txt-2);display:flex;align-items:center;gap:4px">Desde <input type="date" id="cc-desde" onchange="renderControlCostos()"></label>
+      <label style="font-size:11px;color:var(--txt-2);display:flex;align-items:center;gap:4px">Hasta <input type="date" id="cc-hasta" onchange="renderControlCostos()"></label>
+      <select id="cc-proveedor" onchange="renderControlCostos()" style="min-width:180px"><option value="">Todos los proveedores</option></select>
+      <select id="cc-tipo" onchange="renderControlCostos()"><option value="">Todos los tipos</option></select>
+      <select id="cc-origen" onchange="renderControlCostos()">
+        <option value="">OC, OS y salidas</option>
+        <option value="orden_compra">Solo órdenes de compra</option>
+        <option value="orden_servicio">Solo órdenes de servicio</option>
+        <option value="salida_almacen">Solo salidas de almacén</option>
+      </select>
+      <select id="cc-zona" onchange="renderControlCostos()"><option value="">Todas las zonas</option></select>
+      <select id="cc-pago" onchange="renderControlCostos()">
+        <option value="">Pagado y pendiente</option>
+        <option value="pagado">Solo pagado</option>
+        <option value="pendiente">Solo pendiente de pago</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" onclick="limpiarFiltrosCostos()">Limpiar filtros</button>
+    </div>
+
+    <div id="cc-totales" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:12px 0"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>Por obra</h3>
+        <span style="font-size:11px;color:var(--txt-2);margin-left:10px">Toca una obra para ver solo sus gastos.</span>
+      </div>
+      <div class="card-body" style="padding:0">
+        <div class="tabla-wrap" style="border:none;border-radius:0" id="cc-por-obra"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <div class="card-head">
+        <h3>Detalle</h3>
+        <span id="cc-detalle-nota" style="font-size:11px;color:var(--txt-2);margin-left:10px"></span>
+      </div>
+      <div class="card-body" style="padding:0">
+        <div class="tabla-wrap" style="border:none;border-radius:0;max-height:520px;overflow:auto" id="cc-detalle"></div>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <!-- Modal VER documento de inventario -->
@@ -1475,6 +1539,170 @@ function fmtFechaLarga(str){ if(!str) return '—'; const d = new Date(str); if(
 function capFirst(s){ return s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : s; }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 1.7 Control de Costos
+// ─────────────────────────────────────────────────────────────────────────────
+// Se trae todo el histórico una vez (/gastos/control) y se filtra acá: son a lo
+// sumo unos miles de documentos. La descarga pide el Excel al servidor con los
+// MISMOS filtros, así el archivo dice exactamente lo que se ve.
+
+// 'YYYY-MM-DD' → 'D/M/AAAA' sin pasar por Date: new Date('2026-10-01') es
+// medianoche UTC y en Bogotá se ve como el día anterior.
+function ccDia(s){ if(!s) return ''; const [a,m,d] = String(s).slice(0,10).split('-'); return d ? `${+d}/${+m}/${a}` : s; }
+
+async function cargarControlCostos(forzar = false){
+  if (ESTADO.gastos && !forzar) { renderControlCostos(); return; }
+  const cont = $('#cc-por-obra');
+  if (cont) cont.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><div class="empty-txt">Cargando gastos...</div></div>';
+  try {
+    const r = await fetch('/gastos/control');
+    const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || 'Error');
+    ESTADO.gastos = data;
+    poblarFiltrosCostos();
+    renderControlCostos();
+  } catch (e) {
+    if (cont) cont.innerHTML = `<div style="padding:12px;color:#c33;font-size:12px">No se pudieron cargar los gastos: ${esc(e.message)}</div>`;
+  }
+}
+
+function poblarFiltrosCostos(){
+  const g = ESTADO.gastos || [];
+  const llenar = (sel, pares) => {
+    const el = $(sel); if (!el) return;
+    const actual = el.value;
+    const primera = el.options[0].outerHTML;
+    el.innerHTML = primera + pares.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+    el.value = actual;
+  };
+  // Obras: activas primero; las inactivas aparte, como historial.
+  const obras = new Map();
+  for (const f of g) if (f.proyectoId) obras.set(f.proyectoId, f);
+  const orden = (a, b) => a.obra.localeCompare(b.obra, 'es');
+  const activas   = [...obras.values()].filter(f => f.obraActiva).sort(orden);
+  const inactivas = [...obras.values()].filter(f => !f.obraActiva).sort(orden);
+  const sel = $('#cc-obra');
+  if (sel) {
+    const actual = sel.value;
+    const op = f => `<option value="${esc(f.proyectoId)}">${esc(f.obra)}</option>`;
+    sel.innerHTML = '<option value="">Todas las obras</option>'
+      + (activas.length ? `<optgroup label="Activas">${activas.map(op).join('')}</optgroup>` : '')
+      + (inactivas.length ? `<optgroup label="Inactivas en KAOS (historial)">${inactivas.map(op).join('')}</optgroup>` : '')
+      + (g.some(f => !f.proyectoId) ? '<option value="__sin">(sin proyecto)</option>' : '');
+    sel.value = actual;
+  }
+  const unicos = (fn) => [...new Map(g.map(f => fn(f)).filter(([v]) => v).map(p => [p[0], p])).values()]
+    .sort((a, b) => String(a[1]).localeCompare(String(b[1]), 'es'));
+  llenar('#cc-proveedor', unicos(f => [f.proveedorNit, f.proveedorNombre || f.proveedorNit]));
+  llenar('#cc-tipo',      unicos(f => [f.tipoGasto, f.tipoGasto]));
+  llenar('#cc-zona',      unicos(f => [f.zona, f.zona]));
+}
+
+function filtrosCostos(){
+  const v = id => ($(id)?.value || '').trim();
+  return { obra: v('#cc-obra'), desde: v('#cc-desde'), hasta: v('#cc-hasta'), proveedor: v('#cc-proveedor'),
+           tipo: v('#cc-tipo'), origen: v('#cc-origen'), zona: v('#cc-zona'), pago: v('#cc-pago') };
+}
+
+function gastosFiltrados(){
+  const f = filtrosCostos();
+  return (ESTADO.gastos || []).filter(g =>
+    (!f.obra || (f.obra === '__sin' ? !g.proyectoId : g.proyectoId === f.obra)) &&
+    (!f.desde || (g.fechaOC && g.fechaOC >= f.desde)) &&
+    (!f.hasta || (g.fechaOC && g.fechaOC <= f.hasta)) &&
+    (!f.proveedor || g.proveedorNit === f.proveedor) &&
+    (!f.tipo || g.tipoGasto === f.tipo) &&
+    (!f.origen || g.origen === f.origen) &&
+    (!f.zona || g.zona === f.zona) &&
+    (!f.pago || g.pago === f.pago));
+}
+
+function renderControlCostos(){
+  if (!ESTADO.gastos) return;
+  const filas = gastosFiltrados();
+  const suma = (arr, k) => arr.reduce((a, g) => a + (Number(g[k]) || 0), 0);
+  const total = suma(filas, 'total');
+  const pagado = suma(filas.filter(g => g.pago === 'pagado'), 'total');
+  const pendiente = suma(filas.filter(g => g.pago === 'pendiente'), 'total');
+  const kpi = (t, v, sub = '') => `<div class="card" style="padding:10px 12px;margin:0">
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--txt-2)">${t}</div>
+      <div style="font-size:18px;font-weight:600;margin-top:2px" class="mono">${v}</div>
+      ${sub ? `<div style="font-size:10px;color:var(--txt-3)">${sub}</div>` : ''}</div>`;
+  $('#cc-totales').innerHTML =
+      kpi('Total gastado', fmt$(total), `${filas.length} documento(s)`)
+    + kpi('Subtotal', fmt$(suma(filas, 'subtotal')))
+    + kpi('IVA', fmt$(suma(filas, 'iva')))
+    + kpi('Pagado', fmt$(pagado), 'OC y OS con fecha de pago')
+    + kpi('Pendiente de pago', fmt$(pendiente), 'OC y OS sin fecha de pago');
+
+  // Por obra
+  const grupos = new Map();
+  for (const g of filas) {
+    const k = g.proyectoId || '__sin';
+    const a = grupos.get(k) || { k, obra: g.obra, kp: g.kaosCode, codigo: g.codigoErp, activa: g.obraActiva, sinProy: !g.proyectoId, docs: 0, sub: 0, iva: 0, tot: 0 };
+    a.docs++; a.sub += g.subtotal; a.iva += g.iva; a.tot += g.total;
+    grupos.set(k, a);
+  }
+  const obras = [...grupos.values()].sort((a, b) => b.tot - a.tot);
+  $('#cc-por-obra').innerHTML = obras.length ? `<table>
+      <thead><tr><th>Obra</th><th>KP</th><th style="text-align:right">Docs</th><th style="text-align:right">Subtotal</th><th style="text-align:right">IVA</th><th style="text-align:right">Total</th><th style="text-align:right">% del total</th></tr></thead>
+      <tbody>${obras.map(o => `
+        <tr style="cursor:pointer" onclick="$('#cc-obra').value='${esc(o.k)}';renderControlCostos()" title="Ver solo esta obra">
+          <td><strong>${esc(o.obra)}</strong>${!o.sinProy && !o.activa ? ' <span class="tag" style="font-size:9px;background:#fef3c7;color:#92400e">INACTIVA</span>' : ''}
+              ${o.codigo && o.codigo !== o.obra ? `<br><span style="font-size:10px;color:var(--txt-3)">ERP: ${esc(o.codigo)}</span>` : ''}</td>
+          <td class="mono" style="font-size:11px">${esc(o.kp || '—')}</td>
+          <td class="mono" style="text-align:right">${o.docs}</td>
+          <td class="mono" style="text-align:right">${fmt$(o.sub)}</td>
+          <td class="mono" style="text-align:right">${fmt$(o.iva)}</td>
+          <td class="mono" style="text-align:right"><strong>${fmt$(o.tot)}</strong></td>
+          <td class="mono" style="text-align:right">${total ? (o.tot / total * 100).toFixed(1) + '%' : '—'}</td>
+        </tr>`).join('')}</tbody></table>`
+    : '<div class="empty"><div class="empty-icon">📭</div><div class="empty-txt">No hay gastos con estos filtros</div></div>';
+
+  // Detalle: los primeros 500 en pantalla; el Excel trae todos.
+  const LIM = 500;
+  const vis = filas.slice(0, LIM);
+  $('#cc-detalle-nota').textContent = filas.length > LIM
+    ? `Mostrando ${LIM} de ${filas.length}. El Excel trae todos.` : `${filas.length} documento(s)`;
+  $('#cc-detalle').innerHTML = vis.length ? `<table>
+      <thead><tr><th>Fecha</th><th>Origen</th><th>Número</th><th>Obra</th><th>Proveedor</th><th>Tipo</th><th style="text-align:right">Total</th><th>Estado</th><th>Pago</th></tr></thead>
+      <tbody>${vis.map(g => `<tr>
+          <td>${esc(ccDia(g.fechaOC))}</td>
+          <td style="font-size:11px">${esc(g.origenNombre)}</td>
+          <td class="mono">${esc(g.numero || '—')}</td>
+          <td style="font-size:11px">${esc(g.obra)}</td>
+          <td style="font-size:11px">${esc(g.proveedorNombre || '—')}</td>
+          <td style="font-size:11px">${esc(g.tipoGasto)}</td>
+          <td class="mono" style="text-align:right">${fmt$(g.total)}</td>
+          <td><span class="tag tag-${esc(g.estado)}">${esc(capFirst(g.estado))}</span></td>
+          <td style="font-size:11px;color:${g.pago === 'pendiente' ? '#b45309' : 'var(--txt-2)'}">${esc(capFirst(g.pago))}</td>
+        </tr>`).join('')}</tbody></table>` : '';
+}
+
+function limpiarFiltrosCostos(){
+  ['#cc-obra','#cc-desde','#cc-hasta','#cc-proveedor','#cc-tipo','#cc-origen','#cc-zona','#cc-pago'].forEach(id => { const el = $(id); if (el) el.value = ''; });
+  renderControlCostos();
+}
+
+function descargarControlCostos(){
+  const f = filtrosCostos();
+  if (f.obra === '__sin') { alert('El Excel no filtra por "(sin proyecto)". Quita ese filtro de obra para descargar.'); return; }
+  const qs = new URLSearchParams();
+  const desc = [];
+  const texto = id => $(id)?.selectedOptions?.[0]?.textContent || '';
+  if (f.obra)      { qs.set('proyecto', f.obra); desc.push('Obra: ' + texto('#cc-obra')); }
+  if (f.desde)     { qs.set('desde', f.desde); desc.push('Desde ' + ccDia(f.desde)); }
+  if (f.hasta)     { qs.set('hasta', f.hasta); desc.push('Hasta ' + ccDia(f.hasta)); }
+  if (f.proveedor) { qs.set('proveedor', f.proveedor); desc.push('Proveedor: ' + texto('#cc-proveedor')); }
+  if (f.tipo)      { qs.set('tipo', f.tipo); desc.push('Tipo: ' + f.tipo); }
+  if (f.origen)    { qs.set('origen', f.origen); desc.push(texto('#cc-origen')); }
+  if (f.zona)      { qs.set('zona', f.zona); desc.push('Zona: ' + f.zona); }
+  if (f.pago)      { qs.set('pago', f.pago); desc.push(texto('#cc-pago')); }
+  if (desc.length) qs.set('desc', JSON.stringify(desc));
+  window.location.href = '/gastos/control-costos.xlsx' + (qs.toString() ? '?' + qs.toString() : '');
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST con progreso en vivo (NDJSON)
 // ─────────────────────────────────────────────────────────────────────────────
 // Los endpoints de extraccion con IA tardan entre 20 y 120 segundos. Con ?stream=1
@@ -1659,6 +1887,7 @@ function tab(name){
   if (name === 'os') _precargarCondicionesOS();
   if (name === 'reg-os') cargarOrdenesServicio();
   if (name === 'inv') cargarInventario();
+  if (name === 'costos') cargarControlCostos();
 }
 async function _precargarCondicionesOS() {
   const el = $('#os-observaciones');

@@ -3960,6 +3960,36 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
           origen:   qs.origen   || null,
         }));
       }
+
+      // ── Pantalla 1.7 Control de Costos ──────────────────────────────────
+      // /gastos/control devuelve todo el histórico con los datos de la obra y
+      // la pantalla filtra en el navegador (son pocos miles de filas a lo sumo).
+      // /gastos/control-costos.xlsx arma el Excel con los MISMOS filtros y lo
+      // baja al equipo; no pasa por SharePoint.
+      const filtrosCostos = () => ({
+        proyectoId:   qs.proyecto  || null,
+        desde:        qs.desde     || null,
+        hasta:        qs.hasta     || null,
+        proveedorNit: qs.proveedor || null,
+        tipoGasto:    qs.tipo      || null,
+        origen:       qs.origen    || null,
+        zona:         qs.zona      || null,
+        pago:         ['pagado', 'pendiente'].includes(qs.pago) ? qs.pago : null,
+      });
+      if (url === "/gastos/control") {
+        return json(await repoGastos.controlCostos(filtrosCostos()));
+      }
+      if (url === "/gastos/control-costos.xlsx") {
+        let descripcion = [];
+        try { descripcion = JSON.parse(qs.desc || '[]').map(String).slice(0, 12); } catch {}
+        const buffer = await cc.generarXlsxControl(filtrosCostos(), descripcion);
+        const hoy = new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Bogota' });
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': `attachment; filename="Control_Costos_${hoy}.xlsx"`,
+        });
+        return res.end(Buffer.from(buffer));
+      }
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
