@@ -954,6 +954,10 @@ async function obtenerProyectosSP({ soloActivos = true } = {}) {
   return rows.map(r => ({
     id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo,
     origen: r.origen, kaosCode: r.kaosCode,
+    // Lo que se MUESTRA en las listas: el nombre de KAOS («CT26-026 MICROPILOTES
+    // RSO - JE JAIMES (0380)»), que es como la obra se llama en KAOS y Cash_Flow.
+    // `codigo` sigue siendo el valor que se guarda y se imprime en los PDF.
+    etiqueta: r.origen === 'kaos' && r.descripcion ? r.descripcion : r.codigo,
   }));
 }
 
