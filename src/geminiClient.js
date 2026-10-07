@@ -124,7 +124,7 @@ function decidir(err) {
  * Recorre los modelos y los reintentos dentro del presupuesto. `correr(modelo, ms)`
  * hace UN intento y lanza si falla.
  */
-async function ejecutar(correr, { timeoutMs, presupuestoMs, etiqueta }) {
+async function ejecutar(correr, { timeoutMs, presupuestoMs, etiqueta, esStream = false }) {
   const t0 = Date.now();
   const restante = () => presupuestoMs - (Date.now() - t0);
   const modelos = await geminiModelos.candidatos();
@@ -153,8 +153,10 @@ async function ejecutar(correr, { timeoutMs, presupuestoMs, etiqueta }) {
 
     for (let intento = 0; ; intento++) {
       try {
+        const tIntento = Date.now();
         const resultado = await correr(modelo, msIntento);
-        geminiModelos.exito(modelo);
+        // En un stream el timeout es de silencio: su duracion total no dice si fue lento.
+        geminiModelos.exito(modelo, esStream ? {} : { ms: Date.now() - tIntento, timeoutMs: msIntento });
         if (m > 0) console.warn(`[geminiClient] ${etiqueta}: respondio "${modelo}" (fallaron: ${fallos.join(', ')})`);
         return resultado;
       } catch (e) {
@@ -329,7 +331,7 @@ async function pedirStream(bodyStr, { timeoutMs = 120000, presupuestoMs, onTexto
   if (!clave()) throw new Error('GEMINI_API_KEY no configurada en .env');
   return ejecutar(
     (modelo, ms) => intentoStream(modelo, bodyStr, ms, onTexto),
-    { timeoutMs, presupuestoMs: presupuestoMs ?? timeoutMs, etiqueta },
+    { timeoutMs, presupuestoMs: presupuestoMs ?? timeoutMs, etiqueta, esStream: true },
   );
 }
 

@@ -354,7 +354,8 @@ TZ=America/Bogota
 ```
 
 > No hay `GEMINI_MODEL`: el ERP pide a Google la lista de modelos cada 30 min y usa los
-> `gemini-X.Y-flash` estables (≥ 3), del más nuevo al más viejo. Si uno falla (timeout,
+> `gemini-X.Y-flash` estables (≥ 3), del más nuevo al más viejo; de primero, el más nuevo
+> que ya respondió bien (uno recién publicado entra de segundo hasta que responde). Si uno falla (timeout,
 > cuota, retirado, saturado) pasa al siguiente y deja al que falló unos minutos al final
 > de la fila. El log dice qué modelos hay y cuál respondió.
 

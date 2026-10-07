@@ -14,6 +14,7 @@ node_modules/
 data/local.db
 data/local.db-shm
 data/local.db-wal
+data/gemini-modelos.json
 
 # Archivos temporales y logs
 logs/
