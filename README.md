@@ -312,7 +312,7 @@ AUTH_REDIRECT_URI=http://localhost:3001/auth/callback
 
 # ── IA (extracción de cotizaciones) ──────────────────────────────────────────
 GEMINI_API_KEY=<api-key>
-GEMINI_MODEL=gemini-flash-latest   # alias que Google mantiene apuntando al flash GA vigente
+# El modelo NO se configura: se elige de la lista que publica Google (src/geminiModelos.js)
 
 # ── Numeración de documentos ──────────────────────────────────────────────────
 OC_PREFIX=OC-
@@ -353,9 +353,10 @@ TESORERIA_PASSWORD=<contraseña>
 TZ=America/Bogota
 ```
 
-> `GEMINI_MODEL` existe para no tener que tocar código cuando Google retira una versión
-> (ya pasó con `gemini-2.5-flash` y `gemini-3.5-flash`). Dejar el alias salvo que se
-> necesite comportamiento determinista, en cuyo caso se fija una versión concreta.
+> No hay `GEMINI_MODEL`: el ERP pide a Google la lista de modelos cada 30 min y usa los
+> `gemini-X.Y-flash` estables (≥ 3), del más nuevo al más viejo. Si uno falla (timeout,
+> cuota, retirado, saturado) pasa al siguiente y deja al que falló unos minutos al final
+> de la fila. El log dice qué modelos hay y cuál respondió.
 
 ---
 
@@ -739,7 +740,7 @@ Postgres intacto.
 | Tailscale Funnel no funciona | Tailscale servicio no activo | Instalar Tailscale o reiniciar el servicio |
 | URL de Tailscale cambia | Hostname cambió | Actualizar Azure AD y .env con nueva URL |
 | No aparece la columna "Tesorería" en 1.3 | Falta alguna variable `TESORERIA_*` | Completar el `.env` y verificar con `node src/scripts/verificar-tesoreria.js` |
-| Falla la extracción con IA | Modelo de Gemini retirado por Google | Dejar `GEMINI_MODEL=gemini-flash-latest` o fijar una versión vigente |
+| Falla la extracción con IA | Todos los modelos de Gemini fallaron (cuota del día, key inválida, Google caído) | Buscar `[geminiClient]` y `[geminiModelos]` en el log: dice qué modelo falló y por qué. El modelo no se elige en el `.env` |
 | Una salida de almacén no descuenta stock | El documento sigue en borrador | Aprobar el documento en 1.6 Inventarios |
 
 ---
