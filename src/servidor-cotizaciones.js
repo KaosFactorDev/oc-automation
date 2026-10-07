@@ -41,7 +41,7 @@ const localDb          = require('./db');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
-const geminiConfig     = require('./geminiConfig');
+const geminiModelos    = require('./geminiModelos');
 const geminiClient     = require('./geminiClient');
 
 // ── Requerimientos: adaptadores a la forma de SharePoint ─────────────────────
@@ -703,7 +703,10 @@ ${PROMPT}` }
   // numero cambia: son ~45 avisos en vez de los ~190 chunks que manda Gemini.
   let ultimoN = 0;
   const texto = await geminiClient.pedirStream(body, {
-    timeoutMs: 120000,
+    // Es un timeout de silencio (se reinicia con cada trozo que llega), no del total.
+    // 75s y no 120s: si un modelo no empieza a responder, el siguiente de la lista
+    // todavia tiene otros 75s dentro del presupuesto.
+    timeoutMs: 75000,
     // La consola aborta a los 180s: pasarse de ahi le muestra al usuario un timeout
     // generico en vez del error real.
     presupuestoMs: 150000,
@@ -3126,7 +3129,8 @@ Reglas para el clausulado (CRÍTICO — aplica todos sin excepción):
 
         try {
           const raw = await geminiClient.pedirStream(gBody, {
-            timeoutMs: 120000,
+            // Igual que /extraer: 75s de silencio, para que quepan dos modelos.
+            timeoutMs: 75000,
             // Igual que /extraer: la consola aborta a los 180s.
             presupuestoMs: 150000,
             etiqueta: '/os/extraer',
@@ -4021,11 +4025,11 @@ servidor.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT}`);
   console.log('  Abre esa URL en tu navegador para cargar cotizaciones.\n');
   require('./modoPrueba').avisar();
-  // Comprueba que GEMINI_MODEL apunte a un modelo que existe. No bloquea el
-  // arranque: solo deja el diagnostico en el log, para que un .env mal escrito se
-  // vea aqui y no cuando un usuario intente extraer una cotizacion.
-  geminiConfig.verificarModelo(GEMINI_KEY)
-    .catch(e => console.warn('[geminiConfig] Verificación falló:', e.message));
+  // Carga la lista de modelos de Gemini que publica Google y la deja en el log.
+  // No bloquea el arranque y nunca lanza: si Google no contesta, la primera
+  // peticion a Gemini vuelve a intentarlo.
+  geminiModelos.iniciar()
+    .catch(e => console.warn('[geminiModelos] No se pudo cargar la lista:', e.message));
   // Crear admin inicial si la base de usuarios está vacía
   bootstrapAdmin()
     .catch(e => console.warn('[bootstrap]', e.message));
