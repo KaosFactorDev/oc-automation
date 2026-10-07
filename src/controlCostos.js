@@ -158,4 +158,123 @@ async function exportarXlsx() {
   return item.webUrl;
 }
 
-module.exports = { generarXlsx, exportarXlsx, NOMBRE_ARCHIVO };
+// ── Descarga desde la pantalla de Control de Costos ─────────────────────────
+//
+// Lo que se está viendo, con los filtros aplicados, como archivo que se baja al
+// equipo. No pasa por SharePoint. La obra va con su nombre de KAOS, y el código
+// del ERP en una columna aparte, igual que en pantalla.
+
+const COLUMNAS_PANTALLA = [
+  { header: 'Fecha',            key: 'fechaOC',         width: 12 },
+  { header: 'Origen',           key: 'origenNombre',    width: 17 },
+  { header: 'Número',           key: 'numero',          width: 13 },
+  { header: 'Obra (KAOS)',      key: 'obra',            width: 46 },
+  { header: 'KP',               key: 'kaosCode',        width: 12 },
+  { header: 'Código ERP',       key: 'codigoErp',       width: 34 },
+  { header: 'Zona',             key: 'zona',            width: 12 },
+  { header: 'NIT Proveedor',    key: 'proveedorNit',    width: 15 },
+  { header: 'Proveedor',        key: 'proveedorNombre', width: 32 },
+  { header: 'Tipo de gasto',    key: 'tipoGasto',       width: 18 },
+  { header: 'Subtotal',         key: 'subtotal',        width: 16 },
+  { header: 'IVA',              key: 'iva',             width: 14 },
+  { header: 'Total',            key: 'total',           width: 16 },
+  { header: 'Estado',           key: 'estado',          width: 12 },
+  { header: 'Pago',             key: 'pago',            width: 11 },
+  { header: 'Fecha aprobación', key: 'fechaAprobacion', width: 15 },
+  { header: 'Fecha pago',       key: 'fechaPago',       width: 12 },
+  { header: 'Fecha entrega',    key: 'fechaEntrega',    width: 13 },
+  { header: 'Creado por',       key: 'creadoPor',       width: 26 },
+];
+
+/** Agrupa filas por una clave y suma subtotal, IVA y total. */
+function agrupar(filas, clave, extra = () => ({})) {
+  const m = new Map();
+  for (const f of filas) {
+    const k = clave(f);
+    const a = m.get(k) || { ...extra(f), documentos: 0, subtotal: 0, iva: 0, total: 0 };
+    a.documentos += 1; a.subtotal += f.subtotal; a.iva += f.iva; a.total += f.total;
+    m.set(k, a);
+  }
+  return [...m.values()].sort((x, y) => y.total - x.total);
+}
+
+/**
+ * @param {object} filtros     los de repoGastos.controlCostos()
+ * @param {string[]} descripcion  los filtros en palabras, para la hoja Resumen
+ * @returns {Promise<Buffer>}
+ */
+async function generarXlsxControl(filtros = {}, descripcion = []) {
+  const filas = await repoGastos.controlCostos(filtros);
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'oc-automation';
+  wb.created = new Date();
+
+  const hg = wb.addWorksheet('Gastos');
+  hg.columns = COLUMNAS_PANTALLA;
+  for (const row of filas) hg.addRow(row);
+  encabezado(hg);
+  for (const key of ['subtotal', 'iva', 'total']) hg.getColumn(key).numFmt = MONEDA;
+  hg.autoFilter = { from: 'A1', to: { row: 1, column: COLUMNAS_PANTALLA.length } };
+
+  const hp = wb.addWorksheet('Por Obra');
+  hp.columns = [
+    { header: 'Obra (KAOS)', key: 'obra',       width: 46 },
+    { header: 'KP',          key: 'kaosCode',   width: 12 },
+    { header: 'Código ERP',  key: 'codigoErp',  width: 34 },
+    { header: 'Estado obra', key: 'estadoObra', width: 12 },
+    { header: 'Documentos',  key: 'documentos', width: 12 },
+    { header: 'Subtotal',    key: 'subtotal',   width: 16 },
+    { header: 'IVA',         key: 'iva',        width: 14 },
+    { header: 'Total',       key: 'total',      width: 16 },
+  ];
+  for (const row of agrupar(filas, f => f.proyectoId || f.codigoErp, f => ({
+    obra: f.obra, kaosCode: f.kaosCode, codigoErp: f.codigoErp,
+    estadoObra: f.proyectoId ? (f.obraActiva ? 'Activa' : 'Inactiva') : '',
+  }))) hp.addRow(row);
+  encabezado(hp);
+  for (const key of ['subtotal', 'iva', 'total']) hp.getColumn(key).numFmt = MONEDA;
+
+  const hpr = wb.addWorksheet('Por Proveedor');
+  hpr.columns = [
+    { header: 'Proveedor',  key: 'proveedor',    width: 40 },
+    { header: 'NIT',        key: 'proveedorNit', width: 16 },
+    { header: 'Documentos', key: 'documentos',   width: 12 },
+    { header: 'Total',      key: 'total',        width: 16 },
+  ];
+  for (const row of agrupar(filas, f => f.proveedorNit || '(sin proveedor)', f => ({
+    proveedor: f.proveedorNombre || (f.origen === 'salida_almacen' ? '(salida de almacén)' : '(sin proveedor)'),
+    proveedorNit: f.proveedorNit,
+  }))) hpr.addRow(row);
+  encabezado(hpr);
+  hpr.getColumn('total').numFmt = MONEDA;
+
+  const ht = wb.addWorksheet('Por Tipo de Gasto');
+  ht.columns = [
+    { header: 'Tipo de gasto', key: 'tipoGasto',  width: 24 },
+    { header: 'Documentos',    key: 'documentos', width: 12 },
+    { header: 'Total',         key: 'total',      width: 16 },
+  ];
+  for (const row of agrupar(filas, f => f.tipoGasto, f => ({ tipoGasto: f.tipoGasto }))) ht.addRow(row);
+  encabezado(ht);
+  ht.getColumn('total').numFmt = MONEDA;
+
+  const tot = agrupar(filas, () => 'todo')[0] || { documentos: 0, subtotal: 0, iva: 0, total: 0 };
+  const hr = wb.addWorksheet('Resumen');
+  hr.columns = [
+    { header: 'Concepto', key: 'concepto', width: 30 },
+    { header: 'Valor',    key: 'valor',    width: 48 },
+  ];
+  hr.addRow({ concepto: 'Documentos de gasto', valor: tot.documentos });
+  hr.addRow({ concepto: 'Subtotal',            valor: tot.subtotal });
+  hr.addRow({ concepto: 'IVA',                 valor: tot.iva });
+  hr.addRow({ concepto: 'Total',               valor: tot.total });
+  hr.addRow({ concepto: 'Filtros',             valor: descripcion.length ? descripcion.join(' · ') : 'Ninguno (todo el histórico)' });
+  hr.addRow({ concepto: 'Generado',            valor: new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' }) });
+  encabezado(hr);
+  for (let i = 3; i <= 5; i++) hr.getRow(i).getCell('valor').numFmt = MONEDA;
+
+  return wb.xlsx.writeBuffer();
+}
+
+module.exports = { generarXlsx, exportarXlsx, generarXlsxControl, NOMBRE_ARCHIVO };
