@@ -261,6 +261,14 @@ async function procesarRequerimientoManual(datos = {}, opts = {}) {
   const proyecto = String(datos.proyecto || '').trim();
   if (!proyecto) throw new Error('El proyecto es obligatorio al crear un requerimiento manualmente.');
 
+  // A mano, alguien ELIGE la obra: tiene que estar activa en KAOS. Distinto del
+  // correo, que solo deja constancia de lo que pidieron en obra y por eso sí se
+  // registra aunque la obra esté cerrada (queda marcado para reasignarlo).
+  const pg = require('./pg');
+  const p = await pg.one(
+    'SELECT codigo, activo FROM erp.proyectos WHERE erp.norm(codigo) = erp.norm($1)', [proyecto]);
+  if (p && !p.activo) throw new (require('./repo/_proyecto').ProyectoInactivo)(p.codigo);
+
   const items = (datos.items || []).map((it, i) => ({
     item:             String(it.item || i + 1),
     insumo:           String(it.insumo || '').trim(),

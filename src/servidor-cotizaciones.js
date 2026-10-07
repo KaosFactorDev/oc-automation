@@ -1438,28 +1438,15 @@ const servidor = http.createServer(async (req, res) => {
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
-  // ── PATCH /proyectos/:id → actualizar datos del proyecto ────────────────
+  // ── PATCH /proyectos/:id → ya no se editan desde el ERP ─────────────────
+  // Nombre, ciudad, departamento y zona los trae KAOS (kaos:aplicar), así que un
+  // cambio acá lo desharía la siguiente sincronización sin avisar. Y `codigo` es
+  // lo que va impreso en los PDF de toda la historia de la obra. La pantalla ya
+  // no lo ofrece; la ruta responde 405 para que tampoco se pueda por la API.
   if (req.method === 'PATCH' && mProyId) {
-    const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', async () => {
-      try {
-        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const campos = {};
-        if (body.codigo       !== undefined) campos.codigo       = String(body.codigo).trim();
-        // En SharePoint "nombre" era el descriptivo, aparte del código.
-        if (body.nombre       !== undefined) campos.descripcion  = String(body.nombre).trim();
-        if (body.tipo         !== undefined) campos.tipo         = String(body.tipo).trim();
-        if (body.ciudad       !== undefined) campos.ciudad       = String(body.ciudad).trim();
-        if (body.zona         !== undefined) campos.zona         = String(body.zona).trim();
-        if (body.departamento !== undefined) campos.departamento = String(body.departamento).trim();
-
-        const actualizado = await repoCatalogos.actualizarProyecto(mProyId[1], campos);
-        if (!actualizado) return json({ error: 'Proyecto no encontrado' }, 404);
-        return json({ ok: true });
-      } catch (err) { return json({ error: err.message }, 500); }
-    });
-    return;
+    return json({
+      error: 'Los proyectos se editan en KAOS y llegan al ERP por la sincronización.',
+    }, 405);
   }
 
   // ── POST /proyectos → crear nuevo proyecto ──────────────────────────────

@@ -206,4 +206,29 @@ async function asignar(tipo, id, codigo) {
   });
 }
 
-module.exports = { resolver, pendientes, contarPendientes, asignar, TABLA_POR_TIPO, ProyectoInactivo };
+/**
+ * Rechaza seguir con un documento cuya obra está inactiva en KAOS.
+ *
+ * Para los pasos que dan efecto a un documento ya creado —aprobar una OC o una
+ * OS—: el borrador pudo nacer con la obra activa y KAOS cerrarla después.
+ * Aprobarlo emitiría una orden para una obra cerrada.
+ *
+ * @param {object} c      cliente dentro de la transacción del llamador
+ * @param {string} tabla  'ordenes_compra' | 'ordenes_servicio'
+ * @param {string} id     id del documento
+ */
+async function exigirObraActiva(c, tabla, id) {
+  if (!['ordenes_compra', 'ordenes_servicio'].includes(tabla)) {
+    throw new Error(`exigirObraActiva: tabla no soportada ${tabla}`);
+  }
+  const r = await c.query(
+    `SELECT p.codigo, p.activo FROM erp.${tabla} d
+       JOIN erp.proyectos p ON p.id = d.proyecto_id
+      WHERE d.id = $1`, [id]);
+  if (r.rowCount && !r.rows[0].activo) throw new ProyectoInactivo(r.rows[0].codigo);
+}
+
+module.exports = {
+  resolver, pendientes, contarPendientes, asignar, exigirObraActiva,
+  TABLA_POR_TIPO, ProyectoInactivo,
+};
