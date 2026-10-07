@@ -954,6 +954,10 @@ async function obtenerProyectosSP({ soloActivos = true } = {}) {
   return rows.map(r => ({
     id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo,
     origen: r.origen, kaosCode: r.kaosCode,
+    // Lo que se MUESTRA en las listas: el nombre de KAOS («CT26-026 MICROPILOTES
+    // RSO - JE JAIMES (0380)»), que es como la obra se llama en KAOS y Cash_Flow.
+    // `codigo` sigue siendo el valor que se guarda y se imprime en los PDF.
+    etiqueta: r.origen === 'kaos' && r.descripcion ? r.descripcion : r.codigo,
   }));
 }
 
@@ -2174,8 +2178,9 @@ const servidor = http.createServer(async (req, res) => {
   // ── GET /requerimientos/formato → descarga el formato oficial en blanco ─────
   // Misma copia que adjunta la respuesta automática por correo.
   if (req.method === 'GET' && url === '/requerimientos/formato') {
-    const { rutaFormatoRequerimiento, NOMBRE_FORMATO } = require('./procesarCorreo');
-    const ruta = rutaFormatoRequerimiento();
+    const { NOMBRE_FORMATO } = require('./procesarCorreo');
+    // Con la lista de obras activas de KAOS al día (formatoRequerimiento.js).
+    const ruta = await require('./formatoRequerimiento').asegurarFormato();
     if (!fs.existsSync(ruta)) {
       console.error('GET /requerimientos/formato: no existe', ruta);
       return json({ error: 'El formato oficial no está disponible en el servidor.' }, 404);
