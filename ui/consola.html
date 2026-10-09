@@ -1215,6 +1215,14 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         </div>
       </div>
 
+      <div>
+        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:500">Tope de aprobación automática · OS de RRHH (COP)</label>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+          <input type="number" id="cfg-tope-rrhh" min="0" step="1000" placeholder="500000" style="width:140px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:8px 10px;color:var(--txt);font-family:var(--sans);font-size:12px">
+          <span style="font-size:11px;color:var(--txt-3)">Las órdenes de servicio que crea RRHH (exámenes médicos) entran aprobadas si su total con IVA no supera este valor; por encima, en borrador. Vacío: ninguna se aprueba sola.</span>
+        </div>
+      </div>
+
       <div style="display:flex;gap:10px;align-items:center">
         <button class="btn btn-success" onclick="guardarConfig()" id="btn-guardar-cfg">
           <div class="spinner" id="spinner-cfg"></div>
@@ -5529,6 +5537,7 @@ async function abrirConfig(){
     $('#cfg-correo').value     = e.correo || '';
     $('#cfg-condiciones').value = cfg.observacionesDefault || '';
     $('#cfg-iva').value = (cfg.ivaDefault != null ? cfg.ivaDefault : 19);
+    $('#cfg-tope-rrhh').value = (cfg.rrhhTopeAprobacionOS != null ? cfg.rrhhTopeAprobacionOS : '');
     window.IVA_DEFAULT = Number(cfg.ivaDefault) || 19;
   }catch(e){
     $('#msg-cfg').textContent = 'No se pudo cargar configuración: ' + e.message;
@@ -6001,9 +6010,15 @@ async function guardarConfig(){
     const ivaNum = parseFloat($('#cfg-iva').value);
     const iva    = Number.isFinite(ivaNum) && ivaNum >= 0 ? ivaNum : 19;
     window.IVA_DEFAULT = iva;
+    // Vacío = sin tope: falla cerrado, ninguna OS de RRHH se aprueba sola.
+    const topeTxt = $('#cfg-tope-rrhh').value.trim();
+    const topeNum = parseFloat(topeTxt);
+    const tope    = topeTxt === '' ? '' : (Number.isFinite(topeNum) && topeNum >= 0 ? topeNum : null);
+    if (tope === null) throw new Error('El tope de RRHH debe ser un número mayor o igual a 0, o quedar vacío.');
     const body = (valor) => JSON.stringify({ valor });
     const hdr  = { 'Content-Type':'application/json' };
     await Promise.all([
+      fetch('/config/rrhhTopeAprobacionOS', { method:'POST', headers:hdr, body: body(tope) }),
       fetch('/config/logo',      { method:'POST', headers:hdr, body: body(_logoDataUrl || '') }),
       fetch('/config/emisor',    { method:'POST', headers:hdr, body: body(emisor) }),
       fetch('/config/observacionesDefault', { method:'POST', headers:hdr, body: body(condiciones) }),

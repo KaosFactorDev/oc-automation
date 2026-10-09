@@ -36,7 +36,7 @@ async function siteId() {
 
 // ── Mapeo del resultado de procesarCorreo → fields del item ──────────────────
 
-function mapearFields(resultado, { messageId = '', adjuntoUrl = '', consecutivoSistema = '' } = {}) {
+function mapearFields(resultado, { messageId = '', adjuntoUrl = '', consecutivoSistema = '', notas = '' } = {}) {
   const s = resultado.solicitud || {};
   const items = (resultado.items || []).map(it => ({
     insumo:    it.insumo,
@@ -63,7 +63,9 @@ function mapearFields(resultado, { messageId = '', adjuntoUrl = '', consecutivoS
     origenCorreoId:      messageId,
     adjuntoUrl:          adjuntoUrl,
     itemsJson:           JSON.stringify(items),
-    notas:               (resultado.alertasGlobales || []).join(' | '),
+    // `notas` del llamador (la procedencia, en la API de RRHH) va primero; las
+    // alertas de la consulta de precios, después.
+    notas:               [notas, ...(resultado.alertasGlobales || [])].filter(Boolean).join(' | '),
     ocsGeneradas:        '',
   };
 }

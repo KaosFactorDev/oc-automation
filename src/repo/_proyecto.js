@@ -74,6 +74,30 @@ async function resolver(c, texto, { exigirActivo = false } = {}) {
 }
 
 /**
+ * El proyecto del ERP que corresponde a un id de KAOS, o null si no está.
+ *
+ * Para quien manda el uuid de KAOS en vez del texto (la API de RRHH): no hay
+ * emparejamiento por nombre, y un id que no está NO se guarda sin asignar,
+ * a diferencia de resolver(). No lanza por inactivo: eso lo decide el llamador.
+ *
+ * @param {string} kaosId
+ * @param {object} [c]  cliente de una transacción; sin él, consulta suelta
+ * @returns {Promise<{id: number, codigo: string, activo: boolean, etiqueta: string}|null>}
+ */
+async function porKaosId(kaosId, c = null) {
+  const sql = `SELECT id, codigo, nombre, origen, activo FROM erp.proyectos WHERE kaos_id = $1`;
+  const r = c ? (await c.query(sql, [kaosId])).rows[0] : await pg.one(sql, [kaosId]);
+  if (!r) return null;
+  return {
+    id:       r.id,
+    codigo:   r.codigo,
+    activo:   r.activo,
+    // Igual que en las listas: el nombre de KAOS si la obra viene de allá.
+    etiqueta: r.origen === 'kaos' && r.nombre ? r.nombre : r.codigo,
+  };
+}
+
+/**
  * Los documentos que quedaron sin proyecto, de los seis tipos, en una sola
  * lista. Sale de `erp.vw_documentos_sin_proyecto`.
  *
@@ -229,6 +253,6 @@ async function exigirObraActiva(c, tabla, id) {
 }
 
 module.exports = {
-  resolver, pendientes, contarPendientes, asignar, exigirObraActiva,
+  resolver, porKaosId, pendientes, contarPendientes, asignar, exigirObraActiva,
   TABLA_POR_TIPO, ProyectoInactivo,
 };
