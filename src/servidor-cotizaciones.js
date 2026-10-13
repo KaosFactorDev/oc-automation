@@ -41,6 +41,7 @@ const localDb          = require('./db');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
+const apiRrhh          = require('./apiRrhh');
 const geminiModelos    = require('./geminiModelos');
 const geminiClient     = require('./geminiClient');
 
@@ -1001,6 +1002,26 @@ const servidor = http.createServer(async (req, res) => {
       cerrar: () => { try { res.end(); } catch {} },
     };
   };
+
+  // ── /api/* → rutas de máquina, con llave en vez de cookie de sesión ──────
+  // Las usa RRHH (KAOS) desde su servidor. Es un tercer camino, no una
+  // excepción a RUTAS_PUBLICAS: /api/* no es pública, exige la llave.
+  // Si RRHH_API_KEY no está en el .env, /api/* simplemente no existe (404):
+  // es el interruptor, como tesoreriaClient.habilitado(). Ver src/apiRrhh.js.
+  if (url === '/api' || url.startsWith('/api/')) {
+    const esperada = String(process.env.RRHH_API_KEY || '').trim();
+    if (!esperada) return json({ error: 'not_found' }, 404);
+
+    // timingSafeEqual y no ===: comparar strings filtra información por el
+    // tiempo de respuesta. Las longitudes primero, porque si difieren lanza.
+    const a = Buffer.from(String(req.headers['x-api-key'] || ''));
+    const b = Buffer.from(esperada);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      console.warn('[api]', JSON.stringify({ metodo: req.method, ruta: url, status: 401 }));
+      return json({ error: 'unauthorized' }, 401);
+    }
+    return apiRrhh.atender(req, res, url);
+  }
 
   // ── Middleware de autenticación ──────────────────────────────────────────
   const esPublica = RUTAS_PUBLICAS.includes(url);
@@ -2363,7 +2384,7 @@ const servidor = http.createServer(async (req, res) => {
   }
 
   // ── POST /config/:clave → actualizar (body = JSON { valor }) ────────────
-  const mConf = url.match(/^\/config\/(logo|emisor|firmante|observacionesDefault|ivaDefault)$/);
+  const mConf = url.match(/^\/config\/(logo|emisor|firmante|observacionesDefault|ivaDefault|rrhhTopeAprobacionOS)$/);
   if (req.method === 'POST' && mConf) {
     const chunks = [];
     req.on('data', c => chunks.push(c));
