@@ -188,26 +188,104 @@ async function crear(datos, items = []) {
 
 /** Aprueba y asigna el número, en una sola transacción. */
 async function aprobar(id, { usuario, formatear, cambios = {} }) {
-  return pg.tx(async (c) => {
-    const n = await c.query('SELECT erp.siguiente_numero_os() AS n');
-    const numero = formatear(Number(n.rows[0].n));
+  return pg.tx((c) => aprobarEn(c, id, { usuario, formatear, cambios }));
+}
 
-    const sets = ['numero_os = $1', "estado = 'aprobada'", 'aprobado_por = $2',
-                  'fecha_aprobacion = now()'];
-    const vals = [numero, usuario || null];
-    for (const [clave, valor] of Object.entries(cambios)) {
-      const col = COLUMNAS[clave];
-      if (!col) continue;
-      vals.push(valor);
-      sets.push(`${col} = $${vals.length}`);
-    }
-    vals.push(id);
-    const r = await c.query(
-      `UPDATE erp.ordenes_servicio SET ${sets.join(', ')}
-        WHERE id = $${vals.length} RETURNING id`, vals);
-    if (!r.rowCount) throw new Error(`Orden de servicio ${id} no existe`);
-    return numero;
+/** El cuerpo de aprobar(), dentro de la transacción del llamador. */
+async function aprobarEn(c, id, { usuario, formatear, cambios = {} }) {
+  // Antes de consumir el número: el borrador pudo crearse con la obra activa
+  // y KAOS cerrarla después.
+  await repoProyecto.exigirObraActiva(c, 'ordenes_servicio', id);
+  const n = await c.query('SELECT erp.siguiente_numero_os() AS n');
+  const numero = formatear(Number(n.rows[0].n));
+
+  const sets = ['numero_os = $1', "estado = 'aprobada'", 'aprobado_por = $2',
+                'fecha_aprobacion = now()'];
+  const vals = [numero, usuario || null];
+  for (const [clave, valor] of Object.entries(cambios)) {
+    const col = COLUMNAS[clave];
+    if (!col) continue;
+    vals.push(valor);
+    sets.push(`${col} = $${vals.length}`);
+  }
+  vals.push(id);
+  const r = await c.query(
+    `UPDATE erp.ordenes_servicio SET ${sets.join(', ')}
+      WHERE id = $${vals.length} RETURNING id`, vals);
+  if (!r.rowCount) throw new Error(`Orden de servicio ${id} no existe`);
+  return numero;
+}
+
+// ── Órdenes que crea RRHH por la API ────────────────────────────────────────
+
+/** El id de KAOS no está en erp.proyectos. */
+class ProyectoNoEncontrado extends Error {
+  constructor(kaosId) {
+    super(`El proyecto ${kaosId} no está en el catálogo del ERP. ` +
+          'Si se creó en KAOS hace poco, la sincronización tarda hasta 15 minutos.');
+    this.kaosId = kaosId;
+    this.status = 422;
+  }
+}
+
+/**
+ * Crea la orden de servicio de RRHH y, si `aprobar`, la aprueba en la MISMA
+ * transacción: si algo falla no queda ni un borrador huérfano ni un número
+ * consumido. La aprobación pasa por aprobarEn(), con sus mismas verificaciones.
+ *
+ * Los totales, el estado y quién aprueba los decide el llamador
+ * (src/apiRrhh.js); acá solo se escriben.
+ *
+ * Si ya existe una orden con ese origen_solicitud_id, el INSERT falla con
+ * 23505 sobre ordenes_servicio_origen_solicitud_key y el error sube tal cual.
+ *
+ * @returns {Promise<{id: string, numeroOS: string|null}>}
+ */
+async function crearDesdeApi(datos, items, { aprobar: aprobarla, formatear }) {
+  return pg.tx(async (c) => {
+    const proyecto = await repoProyecto.porKaosId(datos.proyectoKaosId, c);
+    if (!proyecto) throw new ProyectoNoEncontrado(datos.proyectoKaosId);
+    if (!proyecto.activo) throw new repoProyecto.ProyectoInactivo(proyecto.codigo);
+
+    const nit = await resolverProveedor(c, datos.proveedorNit, datos.proveedorNombre);
+
+    const cab = await c.query(
+      `INSERT INTO erp.ordenes_servicio
+         (proyecto_id, proveedor_nit, tipo_servicio, oferta_economica_ref,
+          valor, iva, total, tipo_contrato, estado, tipo_gasto, lugar_prestacion,
+          observaciones, creado_por,
+          origen_sistema, origen_solicitud_id, origen_solicitado_por,
+          origen_solicitado_por_nombre)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'IVA_PLENO', 'borrador', $8, $9, $10, $11,
+               $12, $13, $14, $15)
+       RETURNING id`,
+      [
+        proyecto.id, nit, datos.tipoServicio, datos.cotizacionReferencia,
+        datos.valor, datos.iva, datos.total, datos.tipoGasto || null,
+        datos.lugarPrestacion || null, datos.observaciones || null, datos.creadoPor,
+        datos.origenSistema, datos.origenSolicitudId, datos.creadoPor,
+        datos.origenSolicitadoPorNombre,
+      ]);
+    const id = cab.rows[0].id;
+    await insertarItems(c, id, items);
+
+    const numeroOS = aprobarla
+      ? await aprobarEn(c, id, { usuario: datos.creadoPor, formatear })
+      : null;
+    return { id: String(id), numeroOS };
   });
+}
+
+/** Las órdenes de servicio con ese origen_solicitud_id (cero o una). */
+async function porOrigenSolicitud(origenSolicitudId) {
+  return pg.rows(
+    `SELECT o.id, o.numero_os, o.estado, o.pagado, o.cumplido,
+            o.valor, o.iva, o.total, o.fecha_creacion,
+            CASE WHEN p.origen = 'kaos' AND p.nombre <> '' THEN p.nombre ELSE p.codigo END AS proyecto
+       FROM erp.ordenes_servicio o
+       LEFT JOIN erp.proyectos p ON p.id = o.proyecto_id
+      WHERE o.origen_solicitud_id = $1
+      ORDER BY o.id`, [origenSolicitudId]);
 }
 
 async function actualizar(id, cambios) {
@@ -278,4 +356,7 @@ async function resolverProveedor(c, nit, nombre) {
   return clave;
 }
 
-module.exports = { listar, obtener, crear, aprobar, actualizar };
+module.exports = {
+  listar, obtener, crear, aprobar, actualizar,
+  crearDesdeApi, porOrigenSolicitud, ProyectoNoEncontrado,
+};

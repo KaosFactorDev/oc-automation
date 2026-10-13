@@ -1,8 +1,8 @@
 'use strict';
 /**
  * geminiClient.js
- * Transporte unico contra la API de Gemini: arma la URL, reintenta y, si el modelo
- * principal no responde, pasa al de respaldo.
+ * Transporte unico contra la API de Gemini: arma la URL, reintenta y, si un modelo
+ * no responde, pasa al siguiente de la lista de Google.
  *
  * Por que existe este archivo
  * ---------------------------
@@ -32,21 +32,33 @@
  * request y degradan a coincidencia por tokens, asi que alargarlas seria peor que
  * fallar. Quien quiera reintentos pide un presupuesto mayor que el timeout.
  *
- * Lo que NUNCA se apaga es el salto al modelo de respaldo, porque es barato y es la
- * unica salida cuando al principal se le acaba la cuota del dia.
+ * Lo que NUNCA se apaga es el salto a otro modelo ante un error rapido (cuota,
+ * modelo retirado, rechazo), porque es barato y es la unica salida cuando a un
+ * modelo se le acaba la cuota del dia.
+ *
+ * De donde salen los modelos
+ * --------------------------
+ * Ya no del .env: de la lista que publica Google (src/geminiModelos.js), refrescada
+ * cada 30 minutos y ordenada del flash mas nuevo al mas viejo. Un modelo que falla
+ * queda castigado unos minutos al final de la fila, asi que la peticion siguiente
+ * arranca directo con uno sano en vez de volver a esperar al que fallo.
  */
 
 const https = require('https');
-const { MODELOS } = require('./geminiConfig');
+const geminiModelos = require('./geminiModelos');
 
-// Espera entre reintentos contra el MISMO modelo. Tres reintentos y se pasa al
-// siguiente modelo: un 503 que sobrevive a ~19s de espera no es un pico, es una
-// saturacion, y ahi lo que sirve es cambiar de modelo, no seguir insistiendo.
-const BACKOFF_MS = [2000, 5000, 12000];
+// Espera entre reintentos contra el MISMO modelo. Con varios modelos en la fila,
+// un 503 que sobrevive a ~7s de espera no es un pico, es una saturacion, y ahi lo
+// que sirve es cambiar de modelo, no seguir insistiendo.
+const BACKOFF_MS = [2000, 5000];
 
 // Margen que se reserva para el intento siguiente antes de dormir un backoff: sin
 // esto se gasta el presupuesto esperando y no queda tiempo para usarlo.
 const MARGEN_INTENTO_MS = 2000;
+
+// Tras un timeout solo se prueba otro modelo si queda al menos esto del
+// presupuesto. Menos que eso no alcanza para una respuesta util.
+const MINIMO_TRAS_TIMEOUT_MS = 15000;
 
 const clave = () => process.env.GEMINI_API_KEY || '';
 
@@ -64,69 +76,92 @@ function errorApi(status, apiErr) {
 }
 
 /**
- * Que hacer ante un error concreto. Es el corazon del modulo.
- *
- * Antes solo se reconocia 503/UNAVAILABLE como transitorio, asi que un modelo
- * retirado por Google (404) reventaba sin un solo reintento — justo el escenario
- * que un modelo de respaldo resuelve.
+ * Que hacer ante un error concreto. Es el corazon del modulo. Devuelve
+ * { accion, motivo }: accion es 'reintentar' | 'siguiente-modelo' | 'abortar', y
+ * motivo es la clave de castigo de geminiModelos.CASTIGO_MS.
  */
 function decidir(err) {
-  // Nunca se repite: la generacion ya ocurrio del lado de Google y ya se cobro
-  // cuota, o el stream ya entrego texto que un reintento tiraria a la basura.
-  // Vale igual para el salto de modelo, que tambien paga una generacion entera.
-  if (err.generacionEnVuelo || err.huboDatos) return 'abortar';
+  // El stream ya entrego texto: repetir (con este modelo o con otro) lo duplicaria
+  // en pantalla.
+  if (err.huboDatos) return { accion: 'abortar' };
 
   const http = err.httpStatus || 0;
   const api  = err.apiStatus  || '';
 
-  // Transitorio de verdad: el mismo modelo puede contestar en el proximo intento.
-  if (http === 503 || api === 'UNAVAILABLE') return 'reintentar';
-  if (/ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|socket hang up/i.test(err.message)) return 'reintentar';
+  // Timeout. Antes abortaba sin mas; ahora pasa al siguiente si queda tiempo
+  // (ejecutar() lo comprueba). Ojo: Google probablemente cobro esa generacion.
+  if (err.generacionEnVuelo) return { accion: 'siguiente-modelo', motivo: 'lento' };
 
-  // La cuota del free tier se cuenta POR MODELO, asi que el respaldo llega con su
+  // Transitorio de verdad: el mismo modelo puede contestar en el proximo intento.
+  if (http === 503 || api === 'UNAVAILABLE') return { accion: 'reintentar', motivo: 'saturado' };
+  if (/ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|socket hang up/i.test(err.message)) {
+    return { accion: 'reintentar', motivo: 'saturado' };
+  }
+
+  // La cuota del free tier se cuenta POR MODELO, asi que el siguiente llega con su
   // propio cupo diario. Insistir contra este modelo no sirve de nada.
-  if (http === 429 || api === 'RESOURCE_EXHAUSTED') return 'siguiente-modelo';
+  if (http === 429 || api === 'RESOURCE_EXHAUSTED') return { accion: 'siguiente-modelo', motivo: 'cuota' };
 
   // Modelo retirado o renombrado. Paso el 25-08-2026 con un alias movil.
-  if (http === 404 || api === 'NOT_FOUND') return 'siguiente-modelo';
+  if (http === 404 || api === 'NOT_FOUND') return { accion: 'siguiente-modelo', motivo: 'retirado' };
 
-  // 400 (prompt mal armado), 403 (key invalida) y cualquier otra cosa: cambiar de
-  // modelo no arregla nada y solo retrasa el mensaje de error.
-  return 'abortar';
+  // 400: con la lista viniendo de Google, un modelo recien publicado puede no
+  // aceptar algun parametro que si aceptan los demas (thinkingLevel, por ejemplo).
+  // Si el prompt estuviera mal armado fallarian todos, pero rapido.
+  if (http === 400 || api === 'INVALID_ARGUMENT' || api === 'FAILED_PRECONDITION') {
+    return { accion: 'siguiente-modelo', motivo: 'rechazo' };
+  }
+
+  // Otros 5xx (500, 504): problema del lado de Google con ese modelo.
+  if (http >= 500) return { accion: 'siguiente-modelo', motivo: 'saturado' };
+
+  // 401/403 (key invalida o sin permiso) y cualquier otra cosa: cambiar de modelo
+  // no arregla nada y solo retrasa el mensaje de error.
+  return { accion: 'abortar' };
 }
 
 /**
  * Recorre los modelos y los reintentos dentro del presupuesto. `correr(modelo, ms)`
  * hace UN intento y lanza si falla.
  */
-async function ejecutar(correr, { timeoutMs, presupuestoMs, etiqueta }) {
+async function ejecutar(correr, { timeoutMs, presupuestoMs, etiqueta, esStream = false }) {
   const t0 = Date.now();
   const restante = () => presupuestoMs - (Date.now() - t0);
+  const modelos = await geminiModelos.candidatos();
+  const fallos = [];
   let ultimoError;
 
-  // El presupuesto gobierna los REINTENTOS —que son los que hacen esperar—, no el
-  // salto al modelo de respaldo. Un failover solo ocurre ante errores que vuelven
-  // rapido (429 de cuota, 404 de modelo retirado, o un 503 con los reintentos ya
-  // agotados); un intento que expira marca generacionEnVuelo y aborta sin failover,
-  // asi que esto nunca puede encadenar dos timeouts completos.
+  // El presupuesto gobierna lo que hace ESPERAR: reintentos y timeouts. Un error
+  // rapido (429, 404, 400) no gasta casi nada, asi que cada modelo tiene derecho a
+  // su primer intento aunque el presupuesto este justo: si uno se queda sin cuota,
+  // negarle el turno al siguiente seria dejar caer la peticion teniendo a mano un
+  // modelo con cupo propio.
   //
-  // Por eso cada modelo tiene derecho a su primer intento aunque el presupuesto este
-  // justo: si el principal se queda sin cuota, negarle el turno al respaldo seria
-  // dejar caer la peticion teniendo a mano un modelo con cupo propio.
+  // Un timeout si gasta: despues de uno, el siguiente modelo solo entra si quedan al
+  // menos MINIMO_TRAS_TIMEOUT_MS, y con el timeout recortado a lo que reste. Asi no
+  // se encadenan dos esperas completas.
   const permiteReintentos = presupuestoMs > timeoutMs;
+  let huboTimeout = false;
 
-  for (let m = 0; m < MODELOS.length; m++) {
-    const modelo    = MODELOS[m];
-    const quedaOtro = m < MODELOS.length - 1;
+  for (let m = 0; m < modelos.length; m++) {
+    const modelo = modelos[m];
+
+    // Presupuesto gastado (reintentos largos): mejor devolver el error real.
+    if (m > 0 && restante() <= 0) break;
+    if (huboTimeout && restante() < MINIMO_TRAS_TIMEOUT_MS) break;
+    const msIntento = huboTimeout ? Math.min(timeoutMs, restante()) : timeoutMs;
 
     for (let intento = 0; ; intento++) {
       try {
-        const resultado = await correr(modelo, timeoutMs);
-        if (m > 0) console.warn(`[geminiClient] ${etiqueta}: respondio el modelo de respaldo "${modelo}"`);
+        const tIntento = Date.now();
+        const resultado = await correr(modelo, msIntento);
+        // En un stream el timeout es de silencio: su duracion total no dice si fue lento.
+        geminiModelos.exito(modelo, esStream ? {} : { ms: Date.now() - tIntento, timeoutMs: msIntento });
+        if (m > 0) console.warn(`[geminiClient] ${etiqueta}: respondio "${modelo}" (fallaron: ${fallos.join(', ')})`);
         return resultado;
       } catch (e) {
         ultimoError = e;
-        const accion = decidir(e);
+        const { accion, motivo } = decidir(e);
 
         if (accion === 'abortar') throw e;
 
@@ -140,18 +175,20 @@ async function ejecutar(correr, { timeoutMs, presupuestoMs, etiqueta }) {
           }
         }
 
-        // Se agotaron los reintentos de este modelo (o el error pide saltar ya).
-        if (quedaOtro) {
-          console.warn(`[geminiClient] ${etiqueta}: "${modelo}" no sirve (${e.message}) — pasando a "${MODELOS[m + 1]}"`);
-        }
+        // Este modelo no sirve ahora: se castiga y se pasa al siguiente.
+        geminiModelos.fallo(modelo, motivo);
+        fallos.push(`${modelo} (${motivo})`);
+        if (motivo === 'lento') huboTimeout = true;
+        const sigue = m < modelos.length - 1
+          && (!huboTimeout || restante() >= MINIMO_TRAS_TIMEOUT_MS);
+        console.warn(`[geminiClient] ${etiqueta}: "${modelo}" no sirve (${e.message})`
+          + (sigue ? ` — pasando a "${modelos[m + 1]}"` : ''));
         break;
       }
     }
-
-    // Presupuesto gastado: mejor devolver el error real que arrastrar la espera.
-    if (restante() <= 0) break;
   }
 
+  if (fallos.length > 1) console.error(`[geminiClient] ${etiqueta}: ningun modelo respondio: ${fallos.join(', ')}`);
   throw ultimoError || new Error('Gemini: fallo desconocido');
 }
 
@@ -294,8 +331,8 @@ async function pedirStream(bodyStr, { timeoutMs = 120000, presupuestoMs, onTexto
   if (!clave()) throw new Error('GEMINI_API_KEY no configurada en .env');
   return ejecutar(
     (modelo, ms) => intentoStream(modelo, bodyStr, ms, onTexto),
-    { timeoutMs, presupuestoMs: presupuestoMs ?? timeoutMs, etiqueta },
+    { timeoutMs, presupuestoMs: presupuestoMs ?? timeoutMs, etiqueta, esStream: true },
   );
 }
 
-module.exports = { pedir, pedirStream, decidir };
+module.exports = { pedir, pedirStream, decidir, ejecutar };

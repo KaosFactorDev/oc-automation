@@ -90,27 +90,32 @@ function resolverProyecto(fragmento, proyPorCodigo) {
   // 1. El fragmento es el código.
   if (proyPorCodigo[norm]) return { ...proyPorCodigo[norm], confianza: 'exacta' };
 
+  // El mapa puede tener varias llaves para la MISMA obra (su código del ERP y su
+  // nombre de KAOS). Se cuentan obras, no llaves: «MISTRAL» está en las dos de
+  // CT25-134 y eso no la hace ambigua.
+  const unaPorObra = (entradas) => [...new Map(entradas.map(e => [e[1].codigo, e])).values()];
+
   // 2. El fragmento está contenido en algún código. Solo sirve si es en uno.
-  const dentro = Object.entries(proyPorCodigo).filter(([codigo]) => codigo.includes(norm));
+  const dentro = unaPorObra(Object.entries(proyPorCodigo).filter(([codigo]) => codigo.includes(norm)));
   if (dentro.length === 1) return { ...dentro[0][1], confianza: 'contenido' };
   if (dentro.length > 1) {
     return {
       ...dentro[0][1],
       confianza: 'ambigua',
-      candidatos: dentro.map(([codigo]) => codigo),
+      candidatos: dentro.map(([, v]) => v.codigo),
     };
   }
 
   // 3. Comparten alguna palabra. Nunca alcanza para decidir.
-  const porPalabra = Object.entries(proyPorCodigo).filter(([codigo]) => {
+  const porPalabra = unaPorObra(Object.entries(proyPorCodigo).filter(([codigo]) => {
     const palabras = codigo.split(/[\s\-]+/).filter(p => p.length > 3);
     return palabras.some(p => norm.includes(p));
-  });
+  }));
   if (porPalabra.length) {
     return {
       ...porPalabra[0][1],
       confianza: 'palabra',
-      candidatos: porPalabra.map(([codigo]) => codigo),
+      candidatos: porPalabra.map(([, v]) => v.codigo),
     };
   }
 

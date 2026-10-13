@@ -348,13 +348,18 @@ function cambiarTab(tab) {
   try { insumosBD = await fetch('/insumos').then(r=>r.json()); } catch {}
 
   try {
-    const proyectos = await fetch('/proyectos').then(r=>r.json());
-    const s1 = document.getElementById('proy-manual');
-    const s2 = document.getElementById('oc-proyecto');
-    proyectos.forEach(p => {
-      s1.innerHTML += `<option value="${esc(p)}">${esc(p)}</option>`;
-      s2.innerHTML += `<option value="${esc(p)}">${esc(p)}</option>`;
-    });
+    // Solo activos (/proyectos). El valor es el código del ERP; lo que se ve es el
+    // nombre de KAOS, que es como la obra se llama en KAOS y Cash_Flow.
+    const [proyectos, todos] = await Promise.all([
+      fetch('/proyectos').then(r=>r.json()),
+      fetch('/proyectos/admin').then(r=>r.json()).catch(() => []),
+    ]);
+    const etiqueta = new Map((Array.isArray(todos) ? todos : []).map(p => [p.codigo, p.etiqueta || p.codigo]));
+    const nombre = p => etiqueta.get(p) || p;
+    const opciones = [...proyectos].sort((a, b) => nombre(a).localeCompare(nombre(b), 'es'))
+      .map(p => `<option value="${esc(p)}">${esc(nombre(p))}</option>`).join('');
+    document.getElementById('proy-manual').innerHTML += opciones;
+    document.getElementById('oc-proyecto').innerHTML += opciones;
   } catch {}
 })();
 

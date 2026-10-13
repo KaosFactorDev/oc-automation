@@ -256,6 +256,9 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
   <button class="nav-tab" data-tab="inv" onclick="tab('inv')">
     <span class="tab-num">1.6</span> Inventarios
   </button>
+  <button class="nav-tab" data-tab="costos" onclick="tab('costos')">
+    <span class="tab-num">1.7</span> Control de Costos
+  </button>
 </nav>
 
 <main>
@@ -918,6 +921,67 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
     </div>
   </section>
 
+  <!-- ══════════════════════════════════════════════════
+       1.7 CONTROL DE COSTOS
+       Lo que se ha gastado, por obra: órdenes de compra y de servicio aprobadas
+       y salidas de almacén. Solo lectura, calculado desde los documentos.
+       ══════════════════════════════════════════════════ -->
+  <section class="panel" id="panel-costos">
+    <div class="panel-head">
+      <div>
+        <h2>Control de costos</h2>
+        <div class="desc">Lo gastado por obra: OC y OS aprobadas y salidas de almacén. Se calcula desde los documentos; las obras van con su nombre de KAOS.</div>
+      </div>
+      <div class="tools">
+        <button class="btn btn-ghost btn-sm" onclick="cargarControlCostos(true)" title="Volver a leer los gastos">↻ Actualizar</button>
+        <button class="btn btn-primary btn-sm" onclick="descargarControlCostos()" title="Descargar en Excel lo que se ve con los filtros aplicados">⤓ Descargar Excel</button>
+      </div>
+    </div>
+
+    <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
+      <select id="cc-obra" onchange="renderControlCostos()" style="min-width:240px"><option value="">Todas las obras</option></select>
+      <label style="font-size:11px;color:var(--txt-2);display:flex;align-items:center;gap:4px">Desde <input type="date" id="cc-desde" onchange="renderControlCostos()"></label>
+      <label style="font-size:11px;color:var(--txt-2);display:flex;align-items:center;gap:4px">Hasta <input type="date" id="cc-hasta" onchange="renderControlCostos()"></label>
+      <select id="cc-proveedor" onchange="renderControlCostos()" style="min-width:180px"><option value="">Todos los proveedores</option></select>
+      <select id="cc-tipo" onchange="renderControlCostos()"><option value="">Todos los tipos</option></select>
+      <select id="cc-origen" onchange="renderControlCostos()">
+        <option value="">OC, OS y salidas</option>
+        <option value="orden_compra">Solo órdenes de compra</option>
+        <option value="orden_servicio">Solo órdenes de servicio</option>
+        <option value="salida_almacen">Solo salidas de almacén</option>
+      </select>
+      <select id="cc-zona" onchange="renderControlCostos()"><option value="">Todas las zonas</option></select>
+      <select id="cc-pago" onchange="renderControlCostos()">
+        <option value="">Pagado y pendiente</option>
+        <option value="pagado">Solo pagado</option>
+        <option value="pendiente">Solo pendiente de pago</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" onclick="limpiarFiltrosCostos()">Limpiar filtros</button>
+    </div>
+
+    <div id="cc-totales" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:12px 0"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>Por obra</h3>
+        <span style="font-size:11px;color:var(--txt-2);margin-left:10px">Toca una obra para ver solo sus gastos.</span>
+      </div>
+      <div class="card-body" style="padding:0">
+        <div class="tabla-wrap" style="border:none;border-radius:0" id="cc-por-obra"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <div class="card-head">
+        <h3>Detalle</h3>
+        <span id="cc-detalle-nota" style="font-size:11px;color:var(--txt-2);margin-left:10px"></span>
+      </div>
+      <div class="card-body" style="padding:0">
+        <div class="tabla-wrap" style="border:none;border-radius:0;max-height:520px;overflow:auto" id="cc-detalle"></div>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <!-- Modal VER documento de inventario -->
@@ -1148,6 +1212,14 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
           <input type="number" id="cfg-iva" min="0" max="100" step="0.01" placeholder="19" style="width:120px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:8px 10px;color:var(--txt);font-family:var(--sans);font-size:12px">
           <span style="font-size:11px;color:var(--txt-3)">Se aplicará como sugerencia en ítems nuevos de OC. Cada ítem se puede editar al generar la OC.</span>
+        </div>
+      </div>
+
+      <div>
+        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:500">Tope de aprobación automática · OS de RRHH (COP)</label>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+          <input type="number" id="cfg-tope-rrhh" min="0" step="1000" placeholder="500000" style="width:140px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:8px 10px;color:var(--txt);font-family:var(--sans);font-size:12px">
+          <span style="font-size:11px;color:var(--txt-3)">Las órdenes de servicio que crea RRHH (exámenes médicos) entran aprobadas si su total con IVA no supera este valor; por encima, en borrador. Vacío: ninguna se aprueba sola.</span>
         </div>
       </div>
 
@@ -1474,6 +1546,192 @@ function fmtFecha(iso){ if(!iso) return ''; const d = new Date(iso); return isNa
 function fmtFechaLarga(str){ if(!str) return '—'; const d = new Date(str); if(isNaN(d)) return str; const m=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre']; return `${m[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`; }
 function capFirst(s){ return s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : s; }
 
+// ── Proyectos: lo que se muestra vs lo que se guarda ──────────────────────────
+// El valor de cada proyecto es su CÓDIGO del ERP: es lo que guardan los
+// documentos, lo que reconoce el asunto de los correos y lo que imprimen los
+// PDF. Lo que se MUESTRA es el nombre de KAOS («CT26-026 MICROPILOTES RSO - JE
+// JAIMES (0380)»), que es como la obra se llama en KAOS y en Cash_Flow. Sin esto
+// la gente veía «EQUIPOS GT 2026» y creía que era un proyecto viejo.
+function etiquetaProyecto(codigo){
+  if (!codigo) return '';
+  return (ESTADO.etiquetasProyecto && ESTADO.etiquetasProyecto.get(codigo)) || codigo;
+}
+// Opciones de <select> ordenadas por lo que se ve. Con agrupar, para los filtros
+// de historial: activas primero y las inactivas en KAOS aparte.
+function opcionesProyecto(codigos, { agrupar = false } = {}){
+  const orden = [...(codigos || [])].sort((a, b) => etiquetaProyecto(a).localeCompare(etiquetaProyecto(b), 'es'));
+  const op = c => `<option value="${esc(c)}">${esc(etiquetaProyecto(c))}</option>`;
+  const activos = ESTADO.proyectosActivosSet;
+  if (!agrupar || !activos) return orden.map(op).join('');
+  const a = orden.filter(c => activos.has(c)), i = orden.filter(c => !activos.has(c));
+  return (a.length ? `<optgroup label="Activas">${a.map(op).join('')}</optgroup>` : '')
+       + (i.length ? `<optgroup label="Inactivas en KAOS (historial)">${i.map(op).join('')}</optgroup>` : '');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1.7 Control de Costos
+// ─────────────────────────────────────────────────────────────────────────────
+// Se trae todo el histórico una vez (/gastos/control) y se filtra acá: son a lo
+// sumo unos miles de documentos. La descarga pide el Excel al servidor con los
+// MISMOS filtros, así el archivo dice exactamente lo que se ve.
+
+// 'YYYY-MM-DD' → 'D/M/AAAA' sin pasar por Date: new Date('2026-10-01') es
+// medianoche UTC y en Bogotá se ve como el día anterior.
+function ccDia(s){ if(!s) return ''; const [a,m,d] = String(s).slice(0,10).split('-'); return d ? `${+d}/${+m}/${a}` : s; }
+
+async function cargarControlCostos(forzar = false){
+  if (ESTADO.gastos && !forzar) { renderControlCostos(); return; }
+  const cont = $('#cc-por-obra');
+  if (cont) cont.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><div class="empty-txt">Cargando gastos...</div></div>';
+  try {
+    const r = await fetch('/gastos/control');
+    const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || 'Error');
+    ESTADO.gastos = data;
+    poblarFiltrosCostos();
+    renderControlCostos();
+  } catch (e) {
+    if (cont) cont.innerHTML = `<div style="padding:12px;color:#c33;font-size:12px">No se pudieron cargar los gastos: ${esc(e.message)}</div>`;
+  }
+}
+
+function poblarFiltrosCostos(){
+  const g = ESTADO.gastos || [];
+  const llenar = (sel, pares) => {
+    const el = $(sel); if (!el) return;
+    const actual = el.value;
+    const primera = el.options[0].outerHTML;
+    el.innerHTML = primera + pares.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+    el.value = actual;
+  };
+  // Obras: activas primero; las inactivas aparte, como historial.
+  const obras = new Map();
+  for (const f of g) if (f.proyectoId) obras.set(f.proyectoId, f);
+  const orden = (a, b) => a.obra.localeCompare(b.obra, 'es');
+  const activas   = [...obras.values()].filter(f => f.obraActiva).sort(orden);
+  const inactivas = [...obras.values()].filter(f => !f.obraActiva).sort(orden);
+  const sel = $('#cc-obra');
+  if (sel) {
+    const actual = sel.value;
+    const op = f => `<option value="${esc(f.proyectoId)}">${esc(f.obra)}</option>`;
+    sel.innerHTML = '<option value="">Todas las obras</option>'
+      + (activas.length ? `<optgroup label="Activas">${activas.map(op).join('')}</optgroup>` : '')
+      + (inactivas.length ? `<optgroup label="Inactivas en KAOS (historial)">${inactivas.map(op).join('')}</optgroup>` : '')
+      + (g.some(f => !f.proyectoId) ? '<option value="__sin">(sin proyecto)</option>' : '');
+    sel.value = actual;
+  }
+  const unicos = (fn) => [...new Map(g.map(f => fn(f)).filter(([v]) => v).map(p => [p[0], p])).values()]
+    .sort((a, b) => String(a[1]).localeCompare(String(b[1]), 'es'));
+  llenar('#cc-proveedor', unicos(f => [f.proveedorNit, f.proveedorNombre || f.proveedorNit]));
+  llenar('#cc-tipo',      unicos(f => [f.tipoGasto, f.tipoGasto]));
+  llenar('#cc-zona',      unicos(f => [f.zona, f.zona]));
+}
+
+function filtrosCostos(){
+  const v = id => ($(id)?.value || '').trim();
+  return { obra: v('#cc-obra'), desde: v('#cc-desde'), hasta: v('#cc-hasta'), proveedor: v('#cc-proveedor'),
+           tipo: v('#cc-tipo'), origen: v('#cc-origen'), zona: v('#cc-zona'), pago: v('#cc-pago') };
+}
+
+function gastosFiltrados(){
+  const f = filtrosCostos();
+  return (ESTADO.gastos || []).filter(g =>
+    (!f.obra || (f.obra === '__sin' ? !g.proyectoId : g.proyectoId === f.obra)) &&
+    (!f.desde || (g.fechaOC && g.fechaOC >= f.desde)) &&
+    (!f.hasta || (g.fechaOC && g.fechaOC <= f.hasta)) &&
+    (!f.proveedor || g.proveedorNit === f.proveedor) &&
+    (!f.tipo || g.tipoGasto === f.tipo) &&
+    (!f.origen || g.origen === f.origen) &&
+    (!f.zona || g.zona === f.zona) &&
+    (!f.pago || g.pago === f.pago));
+}
+
+function renderControlCostos(){
+  if (!ESTADO.gastos) return;
+  const filas = gastosFiltrados();
+  const suma = (arr, k) => arr.reduce((a, g) => a + (Number(g[k]) || 0), 0);
+  const total = suma(filas, 'total');
+  const pagado = suma(filas.filter(g => g.pago === 'pagado'), 'total');
+  const pendiente = suma(filas.filter(g => g.pago === 'pendiente'), 'total');
+  const kpi = (t, v, sub = '') => `<div class="card" style="padding:10px 12px;margin:0">
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--txt-2)">${t}</div>
+      <div style="font-size:18px;font-weight:600;margin-top:2px" class="mono">${v}</div>
+      ${sub ? `<div style="font-size:10px;color:var(--txt-3)">${sub}</div>` : ''}</div>`;
+  $('#cc-totales').innerHTML =
+      kpi('Total gastado', fmt$(total), `${filas.length} documento(s)`)
+    + kpi('Subtotal', fmt$(suma(filas, 'subtotal')))
+    + kpi('IVA', fmt$(suma(filas, 'iva')))
+    + kpi('Pagado', fmt$(pagado), 'OC y OS con fecha de pago')
+    + kpi('Pendiente de pago', fmt$(pendiente), 'OC y OS sin fecha de pago');
+
+  // Por obra
+  const grupos = new Map();
+  for (const g of filas) {
+    const k = g.proyectoId || '__sin';
+    const a = grupos.get(k) || { k, obra: g.obra, kp: g.kaosCode, codigo: g.codigoErp, activa: g.obraActiva, sinProy: !g.proyectoId, docs: 0, sub: 0, iva: 0, tot: 0 };
+    a.docs++; a.sub += g.subtotal; a.iva += g.iva; a.tot += g.total;
+    grupos.set(k, a);
+  }
+  const obras = [...grupos.values()].sort((a, b) => b.tot - a.tot);
+  $('#cc-por-obra').innerHTML = obras.length ? `<table>
+      <thead><tr><th>Obra</th><th>KP</th><th style="text-align:right">Docs</th><th style="text-align:right">Subtotal</th><th style="text-align:right">IVA</th><th style="text-align:right">Total</th><th style="text-align:right">% del total</th></tr></thead>
+      <tbody>${obras.map(o => `
+        <tr style="cursor:pointer" onclick="$('#cc-obra').value='${esc(o.k)}';renderControlCostos()" title="Ver solo esta obra">
+          <td><strong>${esc(o.obra)}</strong>${!o.sinProy && !o.activa ? ' <span class="tag" style="font-size:9px;background:#fef3c7;color:#92400e">INACTIVA</span>' : ''}
+              ${o.codigo && o.codigo !== o.obra ? `<br><span style="font-size:10px;color:var(--txt-3)">ERP: ${esc(o.codigo)}</span>` : ''}</td>
+          <td class="mono" style="font-size:11px">${esc(o.kp || '—')}</td>
+          <td class="mono" style="text-align:right">${o.docs}</td>
+          <td class="mono" style="text-align:right">${fmt$(o.sub)}</td>
+          <td class="mono" style="text-align:right">${fmt$(o.iva)}</td>
+          <td class="mono" style="text-align:right"><strong>${fmt$(o.tot)}</strong></td>
+          <td class="mono" style="text-align:right">${total ? (o.tot / total * 100).toFixed(1) + '%' : '—'}</td>
+        </tr>`).join('')}</tbody></table>`
+    : '<div class="empty"><div class="empty-icon">📭</div><div class="empty-txt">No hay gastos con estos filtros</div></div>';
+
+  // Detalle: los primeros 500 en pantalla; el Excel trae todos.
+  const LIM = 500;
+  const vis = filas.slice(0, LIM);
+  $('#cc-detalle-nota').textContent = filas.length > LIM
+    ? `Mostrando ${LIM} de ${filas.length}. El Excel trae todos.` : `${filas.length} documento(s)`;
+  $('#cc-detalle').innerHTML = vis.length ? `<table>
+      <thead><tr><th>Fecha</th><th>Origen</th><th>Número</th><th>Obra</th><th>Proveedor</th><th>Tipo</th><th style="text-align:right">Total</th><th>Estado</th><th>Pago</th></tr></thead>
+      <tbody>${vis.map(g => `<tr>
+          <td>${esc(ccDia(g.fechaOC))}</td>
+          <td style="font-size:11px">${esc(g.origenNombre)}</td>
+          <td class="mono">${esc(g.numero || '—')}</td>
+          <td style="font-size:11px">${esc(g.obra)}</td>
+          <td style="font-size:11px">${esc(g.proveedorNombre || '—')}</td>
+          <td style="font-size:11px">${esc(g.tipoGasto)}</td>
+          <td class="mono" style="text-align:right">${fmt$(g.total)}</td>
+          <td><span class="tag tag-${esc(g.estado)}">${esc(capFirst(g.estado))}</span></td>
+          <td style="font-size:11px;color:${g.pago === 'pendiente' ? '#b45309' : 'var(--txt-2)'}">${esc(capFirst(g.pago))}</td>
+        </tr>`).join('')}</tbody></table>` : '';
+}
+
+function limpiarFiltrosCostos(){
+  ['#cc-obra','#cc-desde','#cc-hasta','#cc-proveedor','#cc-tipo','#cc-origen','#cc-zona','#cc-pago'].forEach(id => { const el = $(id); if (el) el.value = ''; });
+  renderControlCostos();
+}
+
+function descargarControlCostos(){
+  const f = filtrosCostos();
+  if (f.obra === '__sin') { alert('El Excel no filtra por "(sin proyecto)". Quita ese filtro de obra para descargar.'); return; }
+  const qs = new URLSearchParams();
+  const desc = [];
+  const texto = id => $(id)?.selectedOptions?.[0]?.textContent || '';
+  if (f.obra)      { qs.set('proyecto', f.obra); desc.push('Obra: ' + texto('#cc-obra')); }
+  if (f.desde)     { qs.set('desde', f.desde); desc.push('Desde ' + ccDia(f.desde)); }
+  if (f.hasta)     { qs.set('hasta', f.hasta); desc.push('Hasta ' + ccDia(f.hasta)); }
+  if (f.proveedor) { qs.set('proveedor', f.proveedor); desc.push('Proveedor: ' + texto('#cc-proveedor')); }
+  if (f.tipo)      { qs.set('tipo', f.tipo); desc.push('Tipo: ' + f.tipo); }
+  if (f.origen)    { qs.set('origen', f.origen); desc.push(texto('#cc-origen')); }
+  if (f.zona)      { qs.set('zona', f.zona); desc.push('Zona: ' + f.zona); }
+  if (f.pago)      { qs.set('pago', f.pago); desc.push(texto('#cc-pago')); }
+  if (desc.length) qs.set('desc', JSON.stringify(desc));
+  window.location.href = '/gastos/control-costos.xlsx' + (qs.toString() ? '?' + qs.toString() : '');
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST con progreso en vivo (NDJSON)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1659,6 +1917,7 @@ function tab(name){
   if (name === 'os') _precargarCondicionesOS();
   if (name === 'reg-os') cargarOrdenesServicio();
   if (name === 'inv') cargarInventario();
+  if (name === 'costos') cargarControlCostos();
 }
 async function _precargarCondicionesOS() {
   const el = $('#os-observaciones');
@@ -1933,7 +2192,7 @@ function renderOrdenesServicio() {
     <tr style="cursor:pointer" onclick="verOS('${esc(o.id)}')">
       <td class="mono">${o.numeroOS ? esc(o.numeroOS) : '<span style="color:var(--txt-2);font-style:italic;font-size:11px">Borrador</span>'}</td>
       <td>${esc(o.fecha || '')}</td>
-      <td>${esc(o.proyecto || '')}</td>
+      <td>${esc(etiquetaProyecto(o.proyecto))}</td>
       <td>${esc(o.proveedorNombre || '')}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(o.tipoServicio || '')}">${esc((o.tipoServicio || '').substring(0, 60))}${(o.tipoServicio || '').length > 60 ? '…' : ''}</td>
       <td style="text-align:right" class="mono">${fmt$(o.total)}</td>
@@ -1995,7 +2254,7 @@ function verOS(id) {
   wrap.className = 'modal-backdrop';
   wrap.innerHTML = `
     <div class="modal-card" style="max-width:680px">
-      <h3>${esc(os.numeroOS || 'Borrador')} · ${esc(os.proyecto || '')}</h3>
+      <h3>${esc(os.numeroOS || 'Borrador')} · ${esc(etiquetaProyecto(os.proyecto))}</h3>
       <p class="text-muted" style="margin:4px 0 10px">
         ${esc(os.fecha || '')} · ${esc(os.proveedorNombre || '—')}
         · <span class="tag tag-${esc(os.estado || 'borrador')}">${capFirst(os.estado || 'borrador')}</span>
@@ -2124,7 +2383,7 @@ function editarOSModal(id) {
   const thStyle = 'padding:6px 8px;font-weight:600;color:var(--txt-2);font-size:11px;border-bottom:1px solid var(--border)';
   wrap.innerHTML = `
     <div class="modal-card" style="max-width:700px">
-      <h3>Editar borrador OS · ${esc(os.proyecto || '')}</h3>
+      <h3>Editar borrador OS · ${esc(etiquetaProyecto(os.proyecto))}</h3>
       <p class="text-muted" style="margin:4px 0 10px">${esc(os.proveedorNombre || '—')}</p>
       <label style="font-size:11px;font-weight:600;color:var(--txt-2);display:block;margin-bottom:3px">OBJETO</label>
       <textarea id="ose-tipo-servicio" rows="3" style="width:100%;resize:vertical;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:7px 9px;color:var(--txt);font-family:var(--sans);font-size:12px;margin-bottom:12px;box-sizing:border-box">${esc(os.tipoServicio || '')}</textarea>
@@ -2679,8 +2938,11 @@ async function cargarAutocompletes(){
   ESTADO.insumosBD     = insumos;
   ESTADO.proyectos     = proyectos;
   // /proyectos/admin devuelve el objeto completo; los filtros usan el código.
-  ESTADO.proyectosTodos = (Array.isArray(proyectosTodos) ? proyectosTodos : [])
-    .map(p => p.codigo).filter(Boolean);
+  const _todos = (Array.isArray(proyectosTodos) ? proyectosTodos : []).filter(p => p.codigo);
+  ESTADO.proyectosTodos = _todos.map(p => p.codigo);
+  // Lo que se MUESTRA es el nombre de KAOS; el valor sigue siendo el código.
+  ESTADO.etiquetasProyecto = new Map(_todos.map(p => [p.codigo, p.etiqueta || p.codigo]));
+  ESTADO.proyectosActivosSet = new Set(_todos.filter(p => p.activo).map(p => p.codigo));
 
   const dl1 = $('#lista-proveedores');
   if (dl1) dl1.innerHTML = ESTADO.proveedoresDB.map(p => `<option value="${esc(p.nombre+' (NIT: '+p.nit+')')}">`).join('');
@@ -2694,13 +2956,11 @@ async function cargarAutocompletes(){
 
   poblarDatalistInsumos();
 
-  const proyOpts = '<option value="">— Detectar del documento —</option>' +
-                   ESTADO.proyectos.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  const proyOpts = '<option value="">— Detectar del documento —</option>' + opcionesProyecto(ESTADO.proyectos);
   if ($('#proy-manual')) $('#proy-manual').innerHTML = proyOpts;
   if ($('#oc-proyecto')) {
     const _ocProy = $('#oc-proyecto').value;
-    $('#oc-proyecto').innerHTML = '<option value="">— Selecciona el proyecto —</option>' +
-      ESTADO.proyectos.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+    $('#oc-proyecto').innerHTML = '<option value="">— Selecciona el proyecto —</option>' + opcionesProyecto(ESTADO.proyectos);
     if (_ocProy) $('#oc-proyecto').value = _ocProy;
   }
 
@@ -2709,23 +2969,20 @@ async function cargarAutocompletes(){
   // Filtros: la lista COMPLETA. Filtrar es mirar el pasado, y el pasado incluye
   // las obras cerradas — que son la mayoría del histórico.
   const proyHtml = '<option value="">Todos los proyectos</option>' +
-                   (ESTADO.proyectosTodos.length ? ESTADO.proyectosTodos : ESTADO.proyectos)
-                     .map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+                   opcionesProyecto(ESTADO.proyectosTodos.length ? ESTADO.proyectosTodos : ESTADO.proyectos, { agrupar: true });
   if (fReqP) fReqP.innerHTML = proyHtml;
   if (fOcP)  fOcP.innerHTML  = proyHtml;
 
   // OS: proveedor datalist + proyecto selectors + filtros
   const dlOsProv = $('#lista-proveedores-os');
   if (dlOsProv) dlOsProv.innerHTML = ESTADO.proveedoresDB.map(p => `<option value="${esc(p.nit)}" label="${esc(p.razonSocial || p.nombre || '')}">`).join('');
-  const osProyOpts = '<option value="">— Seleccione —</option>' +
-    ESTADO.proyectos.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  const osProyOpts = '<option value="">— Seleccione —</option>' + opcionesProyecto(ESTADO.proyectos);
   if ($('#os-proyecto')) {
     const _osProy = $('#os-proyecto').value;
     $('#os-proyecto').innerHTML = osProyOpts;
     if (_osProy) $('#os-proyecto').value = _osProy;
   }
-  const osCotProyOpts = '<option value="">— Detectar del documento —</option>' +
-    ESTADO.proyectos.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  const osCotProyOpts = '<option value="">— Detectar del documento —</option>' + opcionesProyecto(ESTADO.proyectos);
   if ($('#os-cot-proyecto')) {
     const _osCotProy = $('#os-cot-proyecto').value;
     $('#os-cot-proyecto').innerHTML = osCotProyOpts;
@@ -2789,7 +3046,7 @@ function renderRequerimientos(){
         ${proy === SIN_PROYECTO
           ? `<h3 style="color:#b45309">⚠ Sin proyecto — revisar</h3>
              <span style="font-size:11px;color:var(--txt-2);margin-left:10px">El correo traía un proyecto que no está en el catálogo. Ábrelo y asígnale uno con <strong>Editar</strong>, o anúlalo.</span>`
-          : `<h3>${esc(proy)}</h3>${cerrada(reqs)
+          : `<h3>${esc(etiquetaProyecto(proy))}</h3>${cerrada(reqs)
               ? `<span style="font-size:9px;background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:3px;margin-left:8px">OBRA CERRADA</span>
                  <span style="font-size:11px;color:var(--txt-2);margin-left:8px">Reasígnalo con <strong>Editar</strong> o reactiva la obra en KAOS.</span>`
               : ''}`}
@@ -2866,7 +3123,7 @@ function _poblarProyectosEditReq(proyectoActual, textoCorreo = '') {
   todos.forEach(p => {
     const o = document.createElement('option');
     o.value = p;
-    o.textContent = p === sugerido ? `${p}  (sugerido)` : p;
+    o.textContent = p === sugerido ? `${etiquetaProyecto(p)}  (sugerido)` : etiquetaProyecto(p);
     if (p === (proyectoActual || sugerido)) o.selected = true;
     sel.appendChild(o);
   });
@@ -3594,7 +3851,7 @@ function _verRequerimientoRender(r) {
 
   wrap.innerHTML = `
     <div class="modal-card" style="max-width:980px">
-      <h3>${r.consecutivoSistema ? esc(r.consecutivoSistema) : esc(r.consecutivo || '—')} · ${esc(r.proyecto || '')}${r.consecutivoSistema && r.consecutivo ? `<span style="font-size:12px;font-weight:400;color:var(--txt-2);margin-left:8px">(ref. usuario: ${esc(r.consecutivo)})</span>` : ''}</h3>
+      <h3>${r.consecutivoSistema ? esc(r.consecutivoSistema) : esc(r.consecutivo || '—')} · ${esc(etiquetaProyecto(r.proyecto))}${r.consecutivoSistema && r.consecutivo ? `<span style="font-size:12px;font-weight:400;color:var(--txt-2);margin-left:8px">(ref. usuario: ${esc(r.consecutivo)})</span>` : ''}</h3>
       ${!r.proyecto ? `
         <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin:6px 0;font-size:12px;color:#92400e">
           <strong>⚠ Sin proyecto.</strong>
@@ -3602,7 +3859,7 @@ function _verRequerimientoRender(r) {
           No se puede generar OC hasta asignarle uno: usa <strong>Editar</strong>, o <strong>Anular</strong> si no corresponde.
         </div>` : r.proyectoActivo === false ? `
         <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;margin:6px 0;font-size:12px;color:#92400e">
-          <strong>⚠ Obra cerrada.</strong> No se puede generar OC para ${esc(r.proyecto)}: reasígnalo con <strong>Editar</strong> o reactiva la obra en KAOS.
+          <strong>⚠ Obra cerrada.</strong> No se puede generar OC para ${esc(etiquetaProyecto(r.proyecto))}: reasígnalo con <strong>Editar</strong> o reactiva la obra en KAOS.
         </div>` : ''}
       <p class="text-muted" style="margin:2px 0">
         ${esc(fmtFecha(r.fechaCorreo || r.fechaSolicitud))}
@@ -3825,7 +4082,7 @@ function abrirCargaManual(){
   //
   // Como <select> solo se puede elegir lo que hay, y lo que hay son los
   // proyectos activos — que desde la conexión vienen todos de KAOS.
-  const opciones = (ESTADO.proyectos || []).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  const opciones = opcionesProyecto(ESTADO.proyectos || []);
   $('#carga-proyecto').innerHTML = '<option value="">— Detectar del Excel —</option>' + opciones;
   $('#man-proyecto').innerHTML   = '<option value="">— Selecciona el proyecto —</option>' + opciones;
 
@@ -4085,7 +4342,7 @@ function renderOrdenes(){
                   <td onclick="event.stopPropagation()">${seleccionable ? `<input type="checkbox" class="oc-sel" value="${esc(o.id)}" data-proyecto="${esc(o.proyecto || '')}" onchange="onSeleccionOC()">` : ''}</td>
                   <td class="mono">${esc(o.numeroOC || '—')}</td>
                   <td>${esc(fmtFecha(o.fechaCreacion || o.fechaOC))}</td>
-                  <td>${esc(o.proyecto || '')}</td>
+                  <td>${esc(etiquetaProyecto(o.proyecto))}</td>
                   <td>${esc(o.proveedorNombre || '')}</td>
                   <td style="text-align:right" class="mono">${fmt$(o.total)}</td>
                   <td><span class="tag tag-${esc(o.estado || 'borrador')}">${capFirst(o.estado || 'borrador')}</span></td>
@@ -4189,7 +4446,7 @@ async function listarRemisiones(){
       <tr>
         <td class="mono">${esc(r.numero || '')}</td>
         <td>${esc((r.fecha || '').slice(0,10))}</td>
-        <td>${esc(r.proyecto || '')}</td>
+        <td>${esc(etiquetaProyecto(r.proyecto))}</td>
         <td>${esc(r.ocsAsociadas || '')}${alertaTxt}${motivoTxt}</td>
         <td><span class="tag tag-${est === 'activa' ? 'aprobada' : est === 'anulada' ? 'anulada' : 'parcial'}">${capFirst(est)}</span></td>
         <td>
@@ -4245,7 +4502,7 @@ function verOrden(id) {
   wrap.innerHTML = `
     <div class="modal-card" style="max-width:660px;position:relative">
       <button class="modal-x" id="oc-ver-x" title="Cerrar" aria-label="Cerrar">&times;</button>
-      <h3 style="padding-right:28px">${esc(o.numeroOC || 'Borrador')} · ${esc(o.proyecto || '')}</h3>
+      <h3 style="padding-right:28px">${esc(o.numeroOC || 'Borrador')} · ${esc(etiquetaProyecto(o.proyecto))}</h3>
       <p class="text-muted" style="margin:4px 0 14px">
         ${esc(fmtFecha(o.fechaCreacion || o.fechaOC))} · ${esc(o.proveedorNombre || '—')}
         · <span class="tag tag-${esc(o.estado || 'borrador')}">${capFirst(o.estado || 'borrador')}</span>
@@ -4478,7 +4735,7 @@ function actualizarReqsParaVincular() {
     (!proyecto || r.proyecto === proyecto)
   );
   sel.innerHTML = '<option value="">— Sin vincular —</option>' +
-    reqs.map(r => `<option value="${esc(r.id)}">${esc(r.consecutivo || r.id)} · ${esc(r.proyecto)} · ${esc(r.solicitante || '')} (${esc(r.estado)})</option>`).join('');
+    reqs.map(r => `<option value="${esc(r.id)}">${esc(r.consecutivo || r.id)} · ${esc(etiquetaProyecto(r.proyecto))} · ${esc(r.solicitante || '')} (${esc(r.estado)})</option>`).join('');
 }
 
 async function abrirVincularReq(ocId, proyecto) {
@@ -4498,7 +4755,7 @@ async function abrirVincularReq(ocId, proyecto) {
       <h3>Vincular OC a requerimiento</h3>
       <p style="font-size:13px;color:var(--txt-2);margin-bottom:12px">Selecciona el requerimiento que cubre esta OC. El estado del requerimiento se recalculará automáticamente.</p>
       <select id="vincular-req-select" style="width:100%;margin-bottom:12px">
-        ${reqs.map(r => `<option value="${esc(r.id)}">${esc(r.consecutivo || r.id)} — ${esc(r.proyecto)} — ${esc(r.solicitante || '')} (${esc(r.estado)})</option>`).join('')}
+        ${reqs.map(r => `<option value="${esc(r.id)}">${esc(r.consecutivo || r.id)} — ${esc(etiquetaProyecto(r.proyecto))} — ${esc(r.solicitante || '')} (${esc(r.estado)})</option>`).join('')}
       </select>
       <div class="modal-actions">
         <button class="btn btn-ghost" id="vincular-cancel">Cancelar</button>
@@ -4762,7 +5019,7 @@ async function enviarATesoreria(id){
         <span style="color:var(--txt-2)">Proveedor</span><span>${esc(o.proveedorNombre || '—')}</span>
         <span style="color:var(--txt-2)">NIT</span><span class="mono">${esc(o.proveedorNit || '—')}</span>
         <span style="color:var(--txt-2)">Total</span><strong class="mono">${fmt$(o.total)}</strong>
-        <span style="color:var(--txt-2)">Proyecto en la OC</span><span>${esc(o.proyecto || '—')}</span>
+        <span style="color:var(--txt-2)">Proyecto en la OC</span><span>${esc(etiquetaProyecto(o.proyecto) || '—')}</span>
       </div>
       <label>Proyecto (KAOS) *</label>
       <input type="text" id="tes-proy-buscar" placeholder="Filtrar proyectos…" autocomplete="off">
@@ -4963,8 +5220,8 @@ function opcionesProyectoFila(actual, idx) {
   const activos = ESTADO.proyectos || [];
   const fuera = valor && !activos.includes(valor);
   const opts = ['<option value="">— Sin proyecto —</option>']
-    .concat(fuera ? [`<option value="${esc(valor)}" selected>${esc(valor)} (no activo)</option>`] : [])
-    .concat(activos.map(p => `<option value="${esc(p)}"${p === valor ? ' selected' : ''}>${esc(p)}</option>`))
+    .concat(fuera ? [`<option value="${esc(valor)}" selected>${esc(etiquetaProyecto(valor))} (no activo)</option>`] : [])
+    .concat(activos.map(p => `<option value="${esc(p)}"${p === valor ? ' selected' : ''}>${esc(etiquetaProyecto(p))}</option>`))
     .join('');
   return `<select class="td-input" style="width:150px" onchange="actualizar(${idx},'proyecto',this.value)">${opts}</select>`;
 }
@@ -5280,6 +5537,7 @@ async function abrirConfig(){
     $('#cfg-correo').value     = e.correo || '';
     $('#cfg-condiciones').value = cfg.observacionesDefault || '';
     $('#cfg-iva').value = (cfg.ivaDefault != null ? cfg.ivaDefault : 19);
+    $('#cfg-tope-rrhh').value = (cfg.rrhhTopeAprobacionOS != null ? cfg.rrhhTopeAprobacionOS : '');
     window.IVA_DEFAULT = Number(cfg.ivaDefault) || 19;
   }catch(e){
     $('#msg-cfg').textContent = 'No se pudo cargar configuración: ' + e.message;
@@ -5471,7 +5729,7 @@ async function cargarSinProyecto(){
       const sugerido = d.motivo === 'proyecto_inactivo' ? ''
         : (lista.includes(d.proyectoDeducido) ? d.proyectoDeducido : sugerirProyecto(d.proyectoTexto, lista));
       const opciones = ['<option value="">Elegir proyecto…</option>']
-        .concat(lista.map(c => `<option value="${esc(c)}" ${c === sugerido ? 'selected' : ''}>${esc(c)}${c === sugerido ? '  (sugerido)' : ''}</option>`))
+        .concat(lista.map(c => `<option value="${esc(c)}" ${c === sugerido ? 'selected' : ''}>${esc(etiquetaProyecto(c))}${c === sugerido ? '  (sugerido)' : ''}</option>`))
         .join('');
       const control =
         `<select id="sp-sel-${i}" class="td-input" style="border:1px solid var(--border);padding:5px 8px;font-size:11px;width:190px;flex:none">${opciones}</select>
@@ -5523,7 +5781,9 @@ function sugerirProyecto(texto, lista){
   const total = [...buscadas].reduce((a, p) => a + peso(p), 0);
   let mejor = '', puntaje = 0;
   for (const c of lista) {
-    const delProyecto = palabras(c);
+    // Contra el código del ERP y contra el nombre de KAOS: el correo puede traer
+    // cualquiera de los dos («RSO PALMIRA», «0380», «COALA V2»).
+    const delProyecto = palabras(c + ' ' + etiquetaProyecto(c));
     const comunes = [...buscadas].filter(p => delProyecto.has(p)).reduce((a, p) => a + peso(p), 0);
     const s = comunes / total;
     if (s > puntaje) { mejor = c; puntaje = s; }
@@ -5750,9 +6010,15 @@ async function guardarConfig(){
     const ivaNum = parseFloat($('#cfg-iva').value);
     const iva    = Number.isFinite(ivaNum) && ivaNum >= 0 ? ivaNum : 19;
     window.IVA_DEFAULT = iva;
+    // Vacío = sin tope: falla cerrado, ninguna OS de RRHH se aprueba sola.
+    const topeTxt = $('#cfg-tope-rrhh').value.trim();
+    const topeNum = parseFloat(topeTxt);
+    const tope    = topeTxt === '' ? '' : (Number.isFinite(topeNum) && topeNum >= 0 ? topeNum : null);
+    if (tope === null) throw new Error('El tope de RRHH debe ser un número mayor o igual a 0, o quedar vacío.');
     const body = (valor) => JSON.stringify({ valor });
     const hdr  = { 'Content-Type':'application/json' };
     await Promise.all([
+      fetch('/config/rrhhTopeAprobacionOS', { method:'POST', headers:hdr, body: body(tope) }),
       fetch('/config/logo',      { method:'POST', headers:hdr, body: body(_logoDataUrl || '') }),
       fetch('/config/emisor',    { method:'POST', headers:hdr, body: body(emisor) }),
       fetch('/config/observacionesDefault', { method:'POST', headers:hdr, body: body(condiciones) }),
@@ -5838,17 +6104,13 @@ function invTab(name) {
 
 async function cargarInventario() {
   const sel = $('#inv-filtro-proyecto');
-  // Poblar selector desde proyectos activos de Configuración ERP (misma fuente que OC/Requerimientos)
+  // Es un filtro de CONSULTA (stock y movimientos): todas las obras, activas
+  // primero y las cerradas aparte, porque su stock e historial siguen ahí.
   if (sel) {
-    const proyActivos = ESTADO.proyectos || [];
+    const todos = ESTADO.proyectosTodos.length ? ESTADO.proyectosTodos : (ESTADO.proyectos || []);
     const valorActual = sel.value;
-    while (sel.options.length > 1) sel.remove(1);
-    proyActivos.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p; opt.textContent = p;
-      sel.appendChild(opt);
-    });
-    if (valorActual && proyActivos.includes(valorActual)) sel.value = valorActual;
+    sel.innerHTML = '<option value="">Todos los proyectos</option>' + opcionesProyecto(todos, { agrupar: true });
+    if (valorActual && todos.includes(valorActual)) sel.value = valorActual;
   }
   const proyecto = sel?.value || '';
   if (_invProyectoFiltro !== null && proyecto !== _invProyectoFiltro) {
@@ -5964,7 +6226,7 @@ async function cargarEntradasInv() {
           const itemsCount = (() => { try { return JSON.parse(o.itemsJson||'[]').length; } catch { return '?'; } })();
           return `<tr>
             <td><strong>OC ${esc(o.numeroOC||'—')}</strong></td>
-            <td>${esc(o.proyecto||'')}</td>
+            <td>${esc(etiquetaProyecto(o.proyecto))}</td>
             <td style="font-size:12px">${esc(o.proveedorNombre||'')}</td>
             <td style="text-align:right">${itemsCount}</td>
             <td><button class="btn btn-ghost btn-sm" style="font-size:11px;padding:3px 10px" onclick="inv_precargarEntradaDesdeOC('${esc(o.id)}')">Cargar ítems</button></td>

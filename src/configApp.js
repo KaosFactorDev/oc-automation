@@ -74,6 +74,7 @@ async function getConfig() {
   try {
     valores = await repoConfig.obtenerVarias([
       'logo', 'emisor', 'firmante', 'observacionesDefault', 'condicionesDefault', 'ivaDefault',
+      'rrhhTopeAprobacionOS',
     ]);
   } catch (e) {
     console.warn('[configApp] No se pudo leer la configuración, se usan los valores por defecto:', e.message);
@@ -95,6 +96,12 @@ async function getConfig() {
     firmante: { ...FIRMANTE_DEFAULT, ...(firmante || {}) },
     observacionesDefault: observaciones || observacionesLegacy || CONDICIONES_DEFAULT,
     ivaDefault: Number.isFinite(iva) ? iva : IVA_DEFAULT,
+    // Sin valor por defecto a propósito: si falta, la API de RRHH no aprueba
+    // nada sola. Solo para mostrarlo; la API lo lee sin esta caché.
+    rrhhTopeAprobacionOS: (() => {
+      const t = Number(interpretar(valores.get('rrhhTopeAprobacionOS'), NaN));
+      return Number.isFinite(t) ? t : null;
+    })(),
   };
   _cfgCacheAt = Date.now();
   return _cfgCache;

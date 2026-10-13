@@ -87,4 +87,73 @@ async function totales() {
   };
 }
 
-module.exports = { listar, porProyecto, porProveedor, porTipo, totales };
+// ── Pantalla de Control de Costos ───────────────────────────────────────────
+//
+// Los mismos gastos de erp.vw_gastos, con lo que la pantalla necesita de la
+// obra: su nombre en KAOS, el KP, la zona y si sigue activa. Solo lectura: no
+// toca proyectos ni documentos.
+//
+// La obra se nombra como en KAOS («CT26-026 MICROPILOTES RSO - JE JAIMES
+// (0380)»), que es como la ven Cash_Flow y KAOS. `codigo` —el del ERP, lo que
+// va impreso en los PDF— viaja aparte como dato secundario. Un proyecto que no
+// está en KAOS (historial local) se nombra por su código.
+
+const ORIGENES = {
+  orden_compra:   'Orden de compra',
+  orden_servicio: 'Orden de servicio',
+  salida_almacen: 'Salida de almacén',
+};
+
+/**
+ * Pagado / pendiente solo aplica a órdenes: una salida de almacén es consumo
+ * de material ya comprado, no se paga.
+ */
+function estadoPago(g) {
+  if (g.origen === 'salida_almacen') return 'no aplica';
+  return g.fecha_pago ? 'pagado' : 'pendiente';
+}
+
+/**
+ * @param {object} f  filtros, todos opcionales:
+ *   proyectoId, desde, hasta (fecha del documento, YYYY-MM-DD), proveedorNit,
+ *   tipoGasto, origen, zona, pago ('pagado' | 'pendiente')
+ */
+async function controlCostos(f = {}) {
+  const cond = [];
+  const vals = [];
+  const add = (sql, v) => { vals.push(v); cond.push(sql.replace('?', `$${vals.length}`)); };
+
+  if (f.proyectoId)   add('p.id = ?::bigint', f.proyectoId);
+  if (f.desde)        add('g.fecha_documento >= ?::date', f.desde);
+  if (f.hasta)        add('g.fecha_documento <= ?::date', f.hasta);
+  if (f.proveedorNit) add('g.proveedor_nit = ?', f.proveedorNit);
+  if (f.tipoGasto)    add('g.tipo_gasto = ?', f.tipoGasto);
+  if (f.origen)       add('g.origen = ?', f.origen);
+  if (f.zona)         add('p.zona = ?', f.zona);
+  if (f.pago === 'pagado')    cond.push("g.origen <> 'salida_almacen' AND g.fecha_pago IS NOT NULL");
+  if (f.pago === 'pendiente') cond.push("g.origen <> 'salida_almacen' AND g.fecha_pago IS NULL");
+
+  const filas = await pg.rows(
+    `SELECT g.*, p.id AS proyecto_id, p.nombre AS proyecto_nombre, p.kaos_id,
+            p.kaos_code, p.zona, p.activo AS proyecto_activo
+       FROM erp.vw_gastos g
+       LEFT JOIN erp.proyectos p ON p.codigo = g.proyecto
+      ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''}
+      ORDER BY g.fecha_documento DESC NULLS LAST, g.numero DESC`, vals);
+
+  return filas.map((g) => ({
+    ...mapear(g),
+    origenNombre:   ORIGENES[g.origen] || g.origen,
+    proyectoId:     g.proyecto_id ? String(g.proyecto_id) : '',
+    obra:           g.proyecto_id
+      ? (g.kaos_id ? g.proyecto_nombre : g.proyecto) || g.proyecto
+      : '(sin proyecto)',
+    codigoErp:      g.proyecto || '',
+    kaosCode:       g.kaos_code || '',
+    zona:           g.zona || '',
+    obraActiva:     g.proyecto_activo === true,
+    pago:           estadoPago(g),
+  }));
+}
+
+module.exports = { listar, porProyecto, porProveedor, porTipo, totales, controlCostos, ORIGENES };

@@ -210,16 +210,21 @@ todavía, así que se pueden borrar.
 
 ## 5 · La operación de todos los días
 
-**`kaos:sync` no corre solo.** Hay que engancharlo al ciclo del mailer o a un
-cron del host. Mientras sea manual, un proyecto creado en KAOS no aparece en el
-ERP hasta que alguien lo ejecute.
+**La sincronización corre sola**, en el contenedor `mailer` (supercronic,
+`deploy/crontab`): incremental + `kaos:aplicar` cada 15 minutos, y la
+reconciliación completa cada madrugada a las 3:20. Lo que se crea, renombra o
+activa/inactiva en KAOS llega al ERP en máximo 15 minutos. Sus salidas quedan en
+los logs del contenedor: `docker compose logs mailer`.
+
+**En el VPS no hay Node en el host**: para correr algo a mano, dentro del
+contenedor —p. ej. `docker exec oc-automation-app node src/scripts/kaos-sync.js`—.
 
 | Comando | Cuándo |
 |---|---|
-| `npm run kaos:sync` | seguido: trae solo lo modificado |
-| `npm run kaos:sync -- --todo` | cada tanto: es el único que detecta borrados |
-| `npm run kaos:aplicar -- --si` | después de un sync, para que el catálogo lo tome |
-| `npm run kaos:ligar -- --si` | cuando aparezca una obra que ya existía acá |
+| `kaos-sync.js` | lo corre el cron; a mano solo para forzar |
+| `kaos-sync.js --todo` | lo corre el cron de madrugada; detecta borrados |
+| `kaos-aplicar.js --si` | lo corre el cron después de cada sync |
+| `kaos-ligar.js --si` | a mano, si aparece en KAOS una obra que ya existía acá |
 
 **Por qué la reconciliación completa hace falta.** La API no emite borrados: un
 proyecto borrado en KAOS simplemente deja de aparecer, así que el incremental

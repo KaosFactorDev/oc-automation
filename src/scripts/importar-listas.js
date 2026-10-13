@@ -321,9 +321,46 @@ const reporte = { tablas: [], avisos: [] };
 const anotar  = (t, n) => reporte.tablas.push([t, n]);
 const avisar  = (m)    => reporte.avisos.push(m);
 
+/**
+ * Esta herramienta pasó los datos de SharePoint a Postgres (corte del 1-sep).
+ * Desde entonces la fuente de verdad es Postgres y el catálogo de proyectos lo
+ * manda KAOS. Correrla sobre una base ya conectada a KAOS deshace el empalme:
+ * recrea las variantes fusionadas, pisa los proyectos atados y devuelve los
+ * documentos a como estaban en SharePoint. Se niega, sin flag para saltárselo,
+ * y antes de leer SharePoint para no hacer esperar en vano.
+ */
+async function negarseSiConectadaAKaos() {
+  const c = new Client(configAdmin());
+  await c.connect();
+  try {
+    const col = await c.query(`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'erp' AND table_name = 'proyectos' AND column_name = 'kaos_id'
+      ) AS tiene`);
+    if (!col.rows[0].tiene) return;
+    const n = await c.query('SELECT count(*)::int AS n FROM erp.proyectos WHERE kaos_id IS NOT NULL');
+    if (n.rows[0].n === 0) return;
+    console.error(`\n✖ Esta base ya está conectada a KAOS (${n.rows[0].n} proyectos atados).`);
+    console.error('  Importar desde SharePoint deshace el empalme: recrea las variantes');
+    console.error('  fusionadas, pisa los proyectos de KAOS y reasigna los documentos.');
+    console.error('  Para traer datos reales a una base local usa: npm run db:clonar\n');
+    process.exitCode = 1;
+    throw new Error('base conectada a KAOS');
+  } finally {
+    await c.end();
+  }
+}
+
 async function main() {
   console.log('\n════ Import de las 11 listas de SharePoint → Postgres ════\n');
   if (DRY_RUN) console.log('  MODO ENSAYO: al final se revierte todo.\n');
+
+  try {
+    await negarseSiConectadaAKaos();
+  } catch {
+    process.exit(1);
+  }
 
   console.log('Leyendo listas...');
   const datos = await leerDeSharePoint();

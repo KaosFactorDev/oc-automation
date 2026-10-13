@@ -4,3 +4,13 @@
 # Por defecto supercronic no solapa ejecuciones: si "node index.js" sigue corriendo cuando
 # toca el siguiente disparo, ese disparo se omite (igual que "MultipleInstances IgnoreNew" en Windows).
 */5 6-18 * * 1-5 cd /app && node index.js
+
+# KAOS → ERP. KAOS es el dueño del catálogo de proyectos: lo que se crea, se
+# renombra o se activa/inactiva allá llega acá sin que nadie corra nada. Sin
+# esto el ERP seguiría dejando usar una obra que KAOS ya cerró.
+# kaos-sync sale con error si KAOS no responde, y el && evita aplicar a medias.
+# Incremental cada 15 minutos, todos los días:
+*/15 * * * * cd /app && node src/scripts/kaos-sync.js && node src/scripts/kaos-aplicar.js --si
+# Reconciliación completa cada madrugada: es la única que detecta proyectos
+# borrados en KAOS (la API no emite bajas).
+20 3 * * * cd /app && node src/scripts/kaos-sync.js --todo && node src/scripts/kaos-aplicar.js --si

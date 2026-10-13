@@ -74,6 +74,30 @@ async function resolver(c, texto, { exigirActivo = false } = {}) {
 }
 
 /**
+ * El proyecto del ERP que corresponde a un id de KAOS, o null si no está.
+ *
+ * Para quien manda el uuid de KAOS en vez del texto (la API de RRHH): no hay
+ * emparejamiento por nombre, y un id que no está NO se guarda sin asignar,
+ * a diferencia de resolver(). No lanza por inactivo: eso lo decide el llamador.
+ *
+ * @param {string} kaosId
+ * @param {object} [c]  cliente de una transacción; sin él, consulta suelta
+ * @returns {Promise<{id: number, codigo: string, activo: boolean, etiqueta: string}|null>}
+ */
+async function porKaosId(kaosId, c = null) {
+  const sql = `SELECT id, codigo, nombre, origen, activo FROM erp.proyectos WHERE kaos_id = $1`;
+  const r = c ? (await c.query(sql, [kaosId])).rows[0] : await pg.one(sql, [kaosId]);
+  if (!r) return null;
+  return {
+    id:       r.id,
+    codigo:   r.codigo,
+    activo:   r.activo,
+    // Igual que en las listas: el nombre de KAOS si la obra viene de allá.
+    etiqueta: r.origen === 'kaos' && r.nombre ? r.nombre : r.codigo,
+  };
+}
+
+/**
  * Los documentos que quedaron sin proyecto, de los seis tipos, en una sola
  * lista. Sale de `erp.vw_documentos_sin_proyecto`.
  *
@@ -206,4 +230,29 @@ async function asignar(tipo, id, codigo) {
   });
 }
 
-module.exports = { resolver, pendientes, contarPendientes, asignar, TABLA_POR_TIPO, ProyectoInactivo };
+/**
+ * Rechaza seguir con un documento cuya obra está inactiva en KAOS.
+ *
+ * Para los pasos que dan efecto a un documento ya creado —aprobar una OC o una
+ * OS—: el borrador pudo nacer con la obra activa y KAOS cerrarla después.
+ * Aprobarlo emitiría una orden para una obra cerrada.
+ *
+ * @param {object} c      cliente dentro de la transacción del llamador
+ * @param {string} tabla  'ordenes_compra' | 'ordenes_servicio'
+ * @param {string} id     id del documento
+ */
+async function exigirObraActiva(c, tabla, id) {
+  if (!['ordenes_compra', 'ordenes_servicio'].includes(tabla)) {
+    throw new Error(`exigirObraActiva: tabla no soportada ${tabla}`);
+  }
+  const r = await c.query(
+    `SELECT p.codigo, p.activo FROM erp.${tabla} d
+       JOIN erp.proyectos p ON p.id = d.proyecto_id
+      WHERE d.id = $1`, [id]);
+  if (r.rowCount && !r.rows[0].activo) throw new ProyectoInactivo(r.rows[0].codigo);
+}
+
+module.exports = {
+  resolver, porKaosId, pendientes, contarPendientes, asignar, exigirObraActiva,
+  TABLA_POR_TIPO, ProyectoInactivo,
+};

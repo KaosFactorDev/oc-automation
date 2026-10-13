@@ -194,6 +194,9 @@ async function crear(datos, items = []) {
  */
 async function aprobar(id, { usuario, formatear, cambios = {} }) {
   return pg.tx(async (c) => {
+    // Antes de consumir el número: el borrador pudo crearse con la obra activa
+    // y KAOS cerrarla después.
+    await repoProyecto.exigirObraActiva(c, 'ordenes_compra', id);
     const n = await c.query('SELECT erp.siguiente_numero_oc() AS n');
     const numero = formatear(Number(n.rows[0].n));
 

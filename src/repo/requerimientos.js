@@ -147,6 +147,35 @@ async function porOrigenCorreo(messageId) {
   return r ? obtener(r.id) : null;
 }
 
+/**
+ * Los requerimientos con ese origen_correo_id (cero o uno), con las órdenes de
+ * compra que compras generó desde cada uno. Es la reconciliación de la API de
+ * RRHH: le dice a KAOS cómo va su dotación.
+ */
+async function porOrigenConOcs(messageId) {
+  const reqs = await pg.rows(
+    `SELECT r.id, r.consecutivo_sistema, r.estado, r.created_at,
+            CASE WHEN p.origen = 'kaos' AND p.nombre <> '' THEN p.nombre ELSE p.codigo END AS proyecto
+       FROM erp.requerimientos r
+       LEFT JOIN erp.proyectos p ON p.id = r.proyecto_id
+      WHERE r.origen_correo_id = $1
+      ORDER BY r.id`, [String(messageId || '')]);
+  if (!reqs.length) return [];
+
+  const ocs = await pg.rows(
+    `SELECT o.requerimiento_id, o.id, o.numero_oc, o.estado, o.total,
+            pv.razon_social AS proveedor
+       FROM erp.ordenes_compra o
+       LEFT JOIN erp.proveedores pv ON pv.nit = o.proveedor_nit
+      WHERE o.requerimiento_id = ANY($1::bigint[])
+      ORDER BY o.id`, [reqs.map(r => r.id)]);
+
+  return reqs.map(r => ({
+    ...r,
+    ordenes_compra: ocs.filter(o => String(o.requerimiento_id) === String(r.id)),
+  }));
+}
+
 // ── Escritura ───────────────────────────────────────────────────────────────
 
 /**
@@ -305,6 +334,6 @@ async function actualizar(id, cambios) {
 }
 
 module.exports = {
-  listar, obtener, porOrigenCorreo,
+  listar, obtener, porOrigenCorreo, porOrigenConOcs,
   crear, actualizar, reemplazarItems,
 };

@@ -41,7 +41,8 @@ const localDb          = require('./db');
 const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
-const geminiConfig     = require('./geminiConfig');
+const apiRrhh          = require('./apiRrhh');
+const geminiModelos    = require('./geminiModelos');
 const geminiClient     = require('./geminiClient');
 
 // ── Requerimientos: adaptadores a la forma de SharePoint ─────────────────────
@@ -703,7 +704,10 @@ ${PROMPT}` }
   // numero cambia: son ~45 avisos en vez de los ~190 chunks que manda Gemini.
   let ultimoN = 0;
   const texto = await geminiClient.pedirStream(body, {
-    timeoutMs: 120000,
+    // Es un timeout de silencio (se reinicia con cada trozo que llega), no del total.
+    // 75s y no 120s: si un modelo no empieza a responder, el siguiente de la lista
+    // todavia tiene otros 75s dentro del presupuesto.
+    timeoutMs: 75000,
     // La consola aborta a los 180s: pasarse de ahi le muestra al usuario un timeout
     // generico en vez del error real.
     presupuestoMs: 150000,
@@ -954,6 +958,10 @@ async function obtenerProyectosSP({ soloActivos = true } = {}) {
   return rows.map(r => ({
     id: r.id, codigo: r.codigo, nombre: r.nombre, zona: r.zona, activo: r.activo,
     origen: r.origen, kaosCode: r.kaosCode,
+    // Lo que se MUESTRA en las listas: el nombre de KAOS («CT26-026 MICROPILOTES
+    // RSO - JE JAIMES (0380)»), que es como la obra se llama en KAOS y Cash_Flow.
+    // `codigo` sigue siendo el valor que se guarda y se imprime en los PDF.
+    etiqueta: r.origen === 'kaos' && r.descripcion ? r.descripcion : r.codigo,
   }));
 }
 
@@ -994,6 +1002,26 @@ const servidor = http.createServer(async (req, res) => {
       cerrar: () => { try { res.end(); } catch {} },
     };
   };
+
+  // ── /api/* → rutas de máquina, con llave en vez de cookie de sesión ──────
+  // Las usa RRHH (KAOS) desde su servidor. Es un tercer camino, no una
+  // excepción a RUTAS_PUBLICAS: /api/* no es pública, exige la llave.
+  // Si RRHH_API_KEY no está en el .env, /api/* simplemente no existe (404):
+  // es el interruptor, como tesoreriaClient.habilitado(). Ver src/apiRrhh.js.
+  if (url === '/api' || url.startsWith('/api/')) {
+    const esperada = String(process.env.RRHH_API_KEY || '').trim();
+    if (!esperada) return json({ error: 'not_found' }, 404);
+
+    // timingSafeEqual y no ===: comparar strings filtra información por el
+    // tiempo de respuesta. Las longitudes primero, porque si difieren lanza.
+    const a = Buffer.from(String(req.headers['x-api-key'] || ''));
+    const b = Buffer.from(esperada);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      console.warn('[api]', JSON.stringify({ metodo: req.method, ruta: url, status: 401 }));
+      return json({ error: 'unauthorized' }, 401);
+    }
+    return apiRrhh.atender(req, res, url);
+  }
 
   // ── Middleware de autenticación ──────────────────────────────────────────
   const esPublica = RUTAS_PUBLICAS.includes(url);
@@ -1438,28 +1466,15 @@ const servidor = http.createServer(async (req, res) => {
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
-  // ── PATCH /proyectos/:id → actualizar datos del proyecto ────────────────
+  // ── PATCH /proyectos/:id → ya no se editan desde el ERP ─────────────────
+  // Nombre, ciudad, departamento y zona los trae KAOS (kaos:aplicar), así que un
+  // cambio acá lo desharía la siguiente sincronización sin avisar. Y `codigo` es
+  // lo que va impreso en los PDF de toda la historia de la obra. La pantalla ya
+  // no lo ofrece; la ruta responde 405 para que tampoco se pueda por la API.
   if (req.method === 'PATCH' && mProyId) {
-    const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', async () => {
-      try {
-        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
-        const campos = {};
-        if (body.codigo       !== undefined) campos.codigo       = String(body.codigo).trim();
-        // En SharePoint "nombre" era el descriptivo, aparte del código.
-        if (body.nombre       !== undefined) campos.descripcion  = String(body.nombre).trim();
-        if (body.tipo         !== undefined) campos.tipo         = String(body.tipo).trim();
-        if (body.ciudad       !== undefined) campos.ciudad       = String(body.ciudad).trim();
-        if (body.zona         !== undefined) campos.zona         = String(body.zona).trim();
-        if (body.departamento !== undefined) campos.departamento = String(body.departamento).trim();
-
-        const actualizado = await repoCatalogos.actualizarProyecto(mProyId[1], campos);
-        if (!actualizado) return json({ error: 'Proyecto no encontrado' }, 404);
-        return json({ ok: true });
-      } catch (err) { return json({ error: err.message }, 500); }
-    });
-    return;
+    return json({
+      error: 'Los proyectos se editan en KAOS y llegan al ERP por la sincronización.',
+    }, 405);
   }
 
   // ── POST /proyectos → crear nuevo proyecto ──────────────────────────────
@@ -2187,8 +2202,9 @@ const servidor = http.createServer(async (req, res) => {
   // ── GET /requerimientos/formato → descarga el formato oficial en blanco ─────
   // Misma copia que adjunta la respuesta automática por correo.
   if (req.method === 'GET' && url === '/requerimientos/formato') {
-    const { rutaFormatoRequerimiento, NOMBRE_FORMATO } = require('./procesarCorreo');
-    const ruta = rutaFormatoRequerimiento();
+    const { NOMBRE_FORMATO } = require('./procesarCorreo');
+    // Con la lista de obras activas de KAOS al día (formatoRequerimiento.js).
+    const ruta = await require('./formatoRequerimiento').asegurarFormato();
     if (!fs.existsSync(ruta)) {
       console.error('GET /requerimientos/formato: no existe', ruta);
       return json({ error: 'El formato oficial no está disponible en el servidor.' }, 404);
@@ -2368,7 +2384,7 @@ const servidor = http.createServer(async (req, res) => {
   }
 
   // ── POST /config/:clave → actualizar (body = JSON { valor }) ────────────
-  const mConf = url.match(/^\/config\/(logo|emisor|firmante|observacionesDefault|ivaDefault)$/);
+  const mConf = url.match(/^\/config\/(logo|emisor|firmante|observacionesDefault|ivaDefault|rrhhTopeAprobacionOS)$/);
   if (req.method === 'POST' && mConf) {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -3134,7 +3150,8 @@ Reglas para el clausulado (CRÍTICO — aplica todos sin excepción):
 
         try {
           const raw = await geminiClient.pedirStream(gBody, {
-            timeoutMs: 120000,
+            // Igual que /extraer: 75s de silencio, para que quepan dos modelos.
+            timeoutMs: 75000,
             // Igual que /extraer: la consola aborta a los 180s.
             presupuestoMs: 150000,
             etiqueta: '/os/extraer',
@@ -3973,6 +3990,36 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
           origen:   qs.origen   || null,
         }));
       }
+
+      // ── Pantalla 1.7 Control de Costos ──────────────────────────────────
+      // /gastos/control devuelve todo el histórico con los datos de la obra y
+      // la pantalla filtra en el navegador (son pocos miles de filas a lo sumo).
+      // /gastos/control-costos.xlsx arma el Excel con los MISMOS filtros y lo
+      // baja al equipo; no pasa por SharePoint.
+      const filtrosCostos = () => ({
+        proyectoId:   qs.proyecto  || null,
+        desde:        qs.desde     || null,
+        hasta:        qs.hasta     || null,
+        proveedorNit: qs.proveedor || null,
+        tipoGasto:    qs.tipo      || null,
+        origen:       qs.origen    || null,
+        zona:         qs.zona      || null,
+        pago:         ['pagado', 'pendiente'].includes(qs.pago) ? qs.pago : null,
+      });
+      if (url === "/gastos/control") {
+        return json(await repoGastos.controlCostos(filtrosCostos()));
+      }
+      if (url === "/gastos/control-costos.xlsx") {
+        let descripcion = [];
+        try { descripcion = JSON.parse(qs.desc || '[]').map(String).slice(0, 12); } catch {}
+        const buffer = await cc.generarXlsxControl(filtrosCostos(), descripcion);
+        const hoy = new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Bogota' });
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': `attachment; filename="Control_Costos_${hoy}.xlsx"`,
+        });
+        return res.end(Buffer.from(buffer));
+      }
     } catch (err) { return json({ error: err.message }, 500); }
   }
 
@@ -3999,11 +4046,11 @@ servidor.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT}`);
   console.log('  Abre esa URL en tu navegador para cargar cotizaciones.\n');
   require('./modoPrueba').avisar();
-  // Comprueba que GEMINI_MODEL apunte a un modelo que existe. No bloquea el
-  // arranque: solo deja el diagnostico en el log, para que un .env mal escrito se
-  // vea aqui y no cuando un usuario intente extraer una cotizacion.
-  geminiConfig.verificarModelo(GEMINI_KEY)
-    .catch(e => console.warn('[geminiConfig] Verificación falló:', e.message));
+  // Carga la lista de modelos de Gemini que publica Google y la deja en el log.
+  // No bloquea el arranque y nunca lanza: si Google no contesta, la primera
+  // peticion a Gemini vuelve a intentarlo.
+  geminiModelos.iniciar()
+    .catch(e => console.warn('[geminiModelos] No se pudo cargar la lista:', e.message));
   // Crear admin inicial si la base de usuarios está vacía
   bootstrapAdmin()
     .catch(e => console.warn('[bootstrap]', e.message));
