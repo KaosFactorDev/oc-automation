@@ -42,6 +42,9 @@ const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
 const apiRrhh          = require('./apiRrhh');
+const bitacora         = require('./bitacora');
+const repoBitacora     = require('./repo/historial');
+const correcciones     = require('./correcciones');
 const geminiModelos    = require('./geminiModelos');
 const geminiClient     = require('./geminiClient');
 
@@ -104,6 +107,75 @@ async function obtenerOC(id) {
   const o = await repoOrdenesCompra.obtener(id);
   if (!o) throw new Error(`Orden de compra ${id} no existe`);
   return { id: o.id, fields: o };
+}
+
+/**
+ * Qué acción admite cada estado de una orden de compra. Devuelve el motivo del
+ * rechazo, o null si la acción corresponde. Es la misma regla que aplica la
+ * consola al mostrar los botones; acá es la que vale.
+ */
+function validarAccionOC(accion, oc) {
+  const e = oc.estado;
+  if (accion === 'aprobar' && e !== 'borrador') {
+    return `Solo se aprueba un borrador; esta orden está ${e}.`;
+  }
+  if (accion === 'anular' && !['borrador', 'aprobada'].includes(e)) {
+    return `Solo se anula una orden en borrador o aprobada; esta está ${e}.`;
+  }
+  if (accion === 'pagar') {
+    if (e !== 'aprobada') return `Solo se marca como pagada una orden aprobada; esta está ${e}.`;
+    if (oc.pagado) return 'Esta orden ya está marcada como pagada.';
+  }
+  if (accion === 'entregar') {
+    if (e !== 'aprobada') return `Solo se marca como entregada una orden aprobada; esta está ${e}.`;
+    if (oc.entregado) return 'Esta orden ya está marcada como entregada.';
+  }
+  return null;
+}
+
+/** Lo mismo para una orden de servicio. */
+function validarAccionOS(accion, os) {
+  const e = os.estado;
+  if (accion === 'aprobar' && e !== 'borrador') {
+    return `Solo se aprueba un borrador; esta orden está ${e}.`;
+  }
+  if (accion === 'anular' && ['anulada', 'finalizada'].includes(e)) {
+    return `Una orden ${e} no se anula.`;
+  }
+  if (accion === 'pagar') {
+    if (e !== 'aprobada') return `Solo se marca como pagada una orden aprobada; esta está ${e}.`;
+    if (os.pagado) return 'Esta orden ya está marcada como pagada.';
+  }
+  if (accion === 'cumplir') {
+    if (e !== 'aprobada') return `Solo se marca como cumplida una orden aprobada; esta está ${e}.`;
+    if (os.cumplido) return 'Esta orden ya está marcada como cumplida.';
+  }
+  return null;
+}
+
+/**
+ * Las filas que una OC deja en el historial de precios: una por ítem con precio,
+ * con el precio unitario CON IVA, que es lo que se compara al sugerir.
+ */
+function filasHistorialDeOC(oc) {
+  let itemsOC = [];
+  try { itemsOC = JSON.parse(oc.itemsJson || '[]'); } catch {}
+  return itemsOC
+    .filter(it => Number(it.precioUnitario || it.precio || 0) > 0)
+    .map(it => {
+      const base = Number(it.precioUnitario || it.precio || 0);
+      const precioFinal = base * (1 + Number(it.ivaPct || 0) / 100);
+      return {
+        proyecto:        oc.proyecto || '',
+        numCotizacion:   oc.numeroOC || '',
+        nitProveedor:    oc.proveedorNit || '',
+        nombreProveedor: oc.proveedorNombre || '',
+        fechaVigencia:   new Date().toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' }),
+        insumo:          it.descripcion || it.insumo || '',
+        cantidad:        Number(it.cantidad || 1),
+        precio:          precioFinal,
+      };
+    });
 }
 
 async function listarOC(filtro) {
@@ -1432,7 +1504,12 @@ const servidor = http.createServer(async (req, res) => {
         if (!repoProyecto.TABLA_POR_TIPO[tipo]) {
           return json({ error: `Tipo de documento desconocido: ${tipo}` }, 400);
         }
-        const hecho = await repoProyecto.asignar(tipo, id, proyecto);
+        // Cambiar la obra de una orden cambia a qué proyecto se carga el gasto:
+        // queda en la bitácora con el antes y el después.
+        const hecho = repoBitacora.TIPOS.includes(tipo)
+          ? await bitacora.conHistorial({ tipo, id, accion: 'asignar_proyecto', req },
+              () => repoProyecto.asignar(tipo, id, proyecto))
+          : await repoProyecto.asignar(tipo, id, proyecto);
         return hecho ? json({ ok: true }) : json({ error: 'Documento no encontrado' }, 404);
       } catch (err) {
         return json({ error: err.message }, 400);
@@ -1804,7 +1881,9 @@ const servidor = http.createServer(async (req, res) => {
           const iva      = grupo.items.reduce((s, it) => s + (Number(it.cantidad) * Number(it.precioUnitario) * (1 - Number(it.descuentoPct || 0)/100) * Number(it.ivaPct || 0)/100), 0);
           const total    = subtotal + iva;
 
-          const ocId = await repoOrdenesCompra.crear({
+          const ocId = await bitacora.conHistorial({
+            tipo: 'orden_compra', id: null, accion: 'crear', req, idDe: (id) => id,
+          }, () => repoOrdenesCompra.crear({
             // Sin número: el consecutivo se emite al aprobar.
             requerimientoId:     reqItem.id,
             requerimientoOrigen: `REQ-${reqF.consecutivo || reqItem.id}`,
@@ -1813,9 +1892,9 @@ const servidor = http.createServer(async (req, res) => {
             proyecto:            reqF.proyecto || '',
             subtotal, iva, total,
             estado:              'borrador',
-            creadoPor:           process.env.USUARIO_EMAIL || 'sistema',
+            creadoPor:           bitacora.quien(req).usuario,
             fechaCreacion:       new Date().toISOString(),
-          }, grupo.items);
+          }, grupo.items));
           creadas.push({ id: ocId, proveedor: grupo.nombre, total });
         }
 
@@ -1933,7 +2012,7 @@ const servidor = http.createServer(async (req, res) => {
           // Guardar en SharePoint
           const requerimientos = require('./requerimientos');
           const { item, duplicado, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, {
-            messageId:  `manual:${process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
+            messageId:  `manual:${bitacora.quien(req).usuario}:${Date.now()}`,
             adjuntoUrl: '',
           });
 
@@ -1993,7 +2072,7 @@ const servidor = http.createServer(async (req, res) => {
 
         const requerimientos = require('./requerimientos');
         const { item, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, {
-          messageId:  `manual:${sesion?.email || process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
+          messageId:  `manual:${bitacora.quien(req).usuario}:${Date.now()}`,
           adjuntoUrl: '',
         });
 
@@ -2053,7 +2132,7 @@ const servidor = http.createServer(async (req, res) => {
 
         const ctx = await ctxSharePoint();
 
-        const usuario = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario = bitacora.quien(req).usuario;
         const { id, numero } = await crearRemisionYGuardar(ctx, ocIds, {
           observaciones:        body.observaciones,
           responsableEntrega:   body.responsableEntrega,
@@ -2138,7 +2217,7 @@ const servidor = http.createServer(async (req, res) => {
         if (estadoActual === 'anulado')   return json({ error: 'Ya está anulado' }, 400);
         if (estadoActual === 'gestionado') return json({ error: 'No se puede anular un requerimiento ya gestionado' }, 400);
         const notasPrev = reqItem.fields?.notas || '';
-        const usuario   = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario   = bitacora.quien(req).usuario;
         const notasNuevas = (notasPrev ? notasPrev + ' | ' : '') +
           `ANULADO por ${usuario} el ${new Date().toLocaleDateString('es-CO')}${motivo ? ` — ${motivo}` : ''}`;
         await actualizarRequerimiento(reqItem.id, {
@@ -2512,11 +2591,13 @@ const servidor = http.createServer(async (req, res) => {
         // que hacer creer al usuario que el envío falló (y un reintento es
         // seguro, la Edge Function es idempotente).
         try {
-          await repoOrdenesCompra.actualizar(itemId, {
-            solicitudTesoreriaId:    resultado.egreso_id || '',
-            fechaSolicitudTesoreria: new Date().toISOString(),
-            solicitudTesoreriaPor:   req._sesion?.email || '',
-          });
+          await bitacora.conHistorial(
+            { tipo: 'orden_compra', id: itemId, accion: 'enviar_tesoreria', req },
+            () => repoOrdenesCompra.actualizar(itemId, {
+              solicitudTesoreriaId:    resultado.egreso_id || '',
+              fechaSolicitudTesoreria: new Date().toISOString(),
+              solicitudTesoreriaPor:   bitacora.quien(req).usuario,
+            }));
         } catch (e) {
           console.warn(`[OC ${numeroOC}] Solicitud ${resultado.egreso_id} creada, pero no se pudo marcar la OC:`, e.message);
         }
@@ -2535,6 +2616,17 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GET /ordenes/:id/historial y /os/:id/historial → la bitácora ─────────
+  // Quién hizo qué, cuándo, con qué motivo y qué cambió. Incluye, marcados como
+  // `previo`, los eventos de antes de que existiera la bitácora (ver bitacora.js).
+  const mHist = url.match(/^\/(ordenes|os)\/([^\/]+)\/historial$/);
+  if (req.method === 'GET' && mHist) {
+    try {
+      const tipo = mHist[1] === 'ordenes' ? 'orden_compra' : 'orden_servicio';
+      return json({ historial: await bitacora.historialDe(tipo, mHist[2]) });
+    } catch (err) { return json({ error: err.message }, 500); }
+  }
+
   // ── POST /ordenes/:id/:accion → aprobar, anular, pagar, entregar ────────
   const mAccion = url.match(/^\/ordenes\/([^\/]+)\/(aprobar|anular|pagar|entregar)$/);
   if (req.method === 'POST' && mAccion) {
@@ -2550,8 +2642,21 @@ const servidor = http.createServer(async (req, res) => {
       const ctx = await ctxSharePoint();
 
       const now = new Date().toISOString();
-      const usuario = process.env.USUARIO_EMAIL || 'sistema';
+      // La persona de la sesión, no la cuenta del servidor (ver src/bitacora.js).
+      const usuario = bitacora.quien(req).usuario;
       const cambios = {};
+
+      // Qué acción corresponde a qué estado. La consola ya esconde los botones;
+      // esto es lo que impide hacerlo por HTTP (pagar un borrador, anular una
+      // orden finalizada, aprobar dos veces).
+      const previa = (await obtenerOC(itemId)).fields;
+      const errEstado = validarAccionOC(accion, previa);
+      if (errEstado) return json({ error: errEstado }, 409);
+
+      const motivo = String(body.motivo || '').trim();
+      if (accion === 'anular' && !motivo) {
+        return json({ error: 'Anular exige un motivo.' }, 400);
+      }
 
       if (accion === 'aprobar')  {
         // Condiciones comerciales estructuradas (tipo + días si aplica) + observaciones separadas.
@@ -2561,17 +2666,18 @@ const servidor = http.createServer(async (req, res) => {
         if (body.observaciones != null)          cambios.observaciones          = String(body.observaciones).trim();
         if (body.fechaEntregaPrevista)           cambios.fechaEntregaPrevista   = String(body.fechaEntregaPrevista).trim();
       }
-      if (accion === 'anular')   { cambios.estado = 'anulada';   cambios.anuladoPor  = usuario; cambios.fechaAnulacion  = now; }
+      if (accion === 'anular')   {
+        cambios.estado = 'anulada'; cambios.anuladoPor = usuario; cambios.fechaAnulacion = now;
+        cambios.motivoAnulacion = motivo;
+      }
       if (accion === 'pagar')    { cambios.pagado = true;    cambios.pagadoPor    = usuario; cambios.fechaPago    = now; }
       if (accion === 'entregar') { cambios.entregado = true; cambios.entregadoPor = usuario; cambios.fechaEntrega = now; }
 
       // Auto-finalizar: si tras este cambio quedan pago + entrega completos → estado 'finalizada'
       if (accion === 'pagar' || accion === 'entregar') {
-        const actual = await obtenerOC(itemId);
-        const f = actual.fields || {};
-        const pagado    = accion === 'pagar'    ? true : !!f.pagado;
-        const entregado = accion === 'entregar' ? true : !!f.entregado;
-        if (pagado && entregado && f.estado === 'aprobada') {
+        const pagado    = accion === 'pagar'    ? true : !!previa.pagado;
+        const entregado = accion === 'entregar' ? true : !!previa.entregado;
+        if (pagado && entregado && previa.estado === 'aprobada') {
           cambios.estado = 'finalizada';
         }
       }
@@ -2579,49 +2685,35 @@ const servidor = http.createServer(async (req, res) => {
       // Ya no hace falta leer la OC antes del PATCH para preservar itemsJson: la
       // lectura de Postgres siempre lo trae armado desde la tabla de ítems.
       let actualizado;
-      if (accion === 'aprobar') {
-        // El número se emite DENTRO de la transacción que aprueba. Con el
-        // MAX(numeroOC) anterior —que además excluía los estados anulados—,
-        // anular la orden más alta dejaba que la siguiente reutilizara su
-        // número: ya ocurrió 16 veces en producción.
-        const contador = require('./contador');
-        await repoOrdenesCompra.aprobar(itemId, {
-          usuario,
-          formatear: contador.formato,
-          cambios,
-        });
-        actualizado = await repoOrdenesCompra.obtener(itemId);
-      } else {
-        actualizado = await repoOrdenesCompra.actualizar(itemId, cambios);
-      }
+      await bitacora.conHistorial({
+        tipo: 'orden_compra', id: itemId, accion, req, motivo: motivo || null,
+      }, async () => {
+        if (accion === 'aprobar') {
+          // El número se emite DENTRO de la transacción que aprueba. Con el
+          // MAX(numeroOC) anterior —que además excluía los estados anulados—,
+          // anular la orden más alta dejaba que la siguiente reutilizara su
+          // número: ya ocurrió 16 veces en producción.
+          const contador = require('./contador');
+          await repoOrdenesCompra.aprobar(itemId, {
+            usuario,
+            formatear: contador.formato,
+            cambios,
+          });
+          actualizado = await repoOrdenesCompra.obtener(itemId);
+        } else {
+          actualizado = await repoOrdenesCompra.actualizar(itemId, cambios);
+        }
+      });
       if (!actualizado) return json({ error: 'Orden de compra no encontrada' }, 404);
 
       // Si se aprueba → ejecutar tareas secundarias en segundo plano (no bloquean la respuesta)
       if (accion === 'aprobar') {
         const oc = actualizado;
-        const itemsJson = oc.itemsJson || '[]';
         (async () => {
           // Ya no se registra el gasto en ninguna parte: erp.vw_gastos lo deriva
           // de la orden aprobada.
           try {
-            let itemsOC = [];
-            try { itemsOC = JSON.parse(itemsJson); } catch {}
-            const filasHist = itemsOC
-              .filter(it => Number(it.precioUnitario || it.precio || 0) > 0)
-              .map(it => {
-                const base = Number(it.precioUnitario || it.precio || 0);
-                const precioFinal = base * (1 + Number(it.ivaPct || 0) / 100);
-                return {
-                  proyecto:        oc.proyecto || '',
-                  numCotizacion:   oc.numeroOC || '',
-                  nitProveedor:    oc.proveedorNit || '',
-                  nombreProveedor: oc.proveedorNombre || '',
-                  fechaVigencia:   new Date().toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' }),
-                  insumo:          it.descripcion || it.insumo || '',
-                  cantidad:        Number(it.cantidad || 1),
-                  precio:          precioFinal,
-                };
-              });
+            const filasHist = filasHistorialDeOC(oc);
             if (filasHist.length) {
               const n = await agregarFilasCompras(filasHist);
               console.log(`[OC ${oc.numeroOC}] ${n} precios añadidos a HistorialPrecios SP`);
@@ -2630,7 +2722,7 @@ const servidor = http.createServer(async (req, res) => {
 
           // Recalcular estado del requerimiento de origen (la aprobación no lo hacía)
           try {
-            const reqId = oc.requerimientoId || ocLocalPre?.requerimientoId;
+            const reqId = oc.requerimientoId;
             if (reqId) {
               const reqItem = await obtenerRequerimiento(reqId);
               const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqItem);
@@ -2759,7 +2851,7 @@ const servidor = http.createServer(async (req, res) => {
 
       return json({ ok: true, remisionesAfectadas, requerimientoRecalculado, autoRefs, remisionGenerada, pdfOCGenerado });
     } catch (err) {
-      return json({ error: err.message }, 500);
+      return json({ error: err.message }, err.status || 500);
     }
     });
     return;
@@ -2954,7 +3046,9 @@ const servidor = http.createServer(async (req, res) => {
             s + (it.cantidad * it.precioUnitario * (1 - it.descuentoPct/100) * it.ivaPct/100), 0);
           const total = subtotal + iva;
 
-          const ocId = await repoOrdenesCompra.crear({
+          const ocId = await bitacora.conHistorial({
+            tipo: 'orden_compra', id: null, accion: 'crear', req, idDe: (id) => id,
+          }, () => repoOrdenesCompra.crear({
             requerimientoId:  reqItem ? String(reqItem.id) : '',
             cotizacionId:     String(numCotizacion || '').trim(),
             proveedorNit:     grupo.nit || '',
@@ -2962,9 +3056,9 @@ const servidor = http.createServer(async (req, res) => {
             proyecto:         proyecto || '',
             subtotal, iva, total,
             estado:           'borrador',
-            creadoPor:        process.env.USUARIO_EMAIL || 'sistema',
+            creadoPor:        bitacora.quien(req).usuario,
             fechaCreacion:    new Date().toISOString(),
-          }, grupo.items);
+          }, grupo.items));
           creadas.push({ id: ocId, proveedor: grupo.nombre, total });
         }
 
@@ -3004,9 +3098,9 @@ const servidor = http.createServer(async (req, res) => {
         const reqItem = await obtenerRequerimiento(reqId);
 
         // Actualizar OC con el requerimientoId
-        await repoOrdenesCompra.actualizar(ocItem.id, {
-          requerimientoId: String(reqItem.id),
-        });
+        await bitacora.conHistorial(
+          { tipo: 'orden_compra', id: ocItem.id, accion: 'vincular_requerimiento', req },
+          () => repoOrdenesCompra.actualizar(ocItem.id, { requerimientoId: String(reqItem.id) }));
 
         // Recalcular estado del requerimiento
         const estadoRequerimiento = await calcularEstadoRequerimiento(ctx, reqItem);
@@ -3257,7 +3351,7 @@ FORMATO:
       try {
         const osData = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         const ctx = await ctxSharePoint();
-        const usuario = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario = bitacora.quien(req).usuario;
         const now = new Date().toISOString();
 
         const fields = {
@@ -3288,7 +3382,9 @@ FORMATO:
         if (osData.fechaInicio) fields.fechaInicio = new Date(osData.fechaInicio).toISOString();
         if (osData.fechaFin)    fields.fechaFin    = new Date(osData.fechaFin).toISOString();
 
-        const createdId = await repoOrdenesServicio.crear(fields, osData.items || []);
+        const createdId = await bitacora.conHistorial({
+          tipo: 'orden_servicio', id: null, accion: 'crear', req, idDe: (id) => id,
+        }, () => repoOrdenesServicio.crear(fields, osData.items || []));
         // numeroOS va vacío a propósito: el consecutivo se emite al aprobar.
         json({ ok: true, id: createdId, numeroOS: '' });
       } catch (err) { json({ error: err.message }, 500); }
@@ -3418,9 +3514,19 @@ FORMATO:
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
         const ctx = await ctxSharePoint();
-        const usuario = process.env.USUARIO_EMAIL || 'sistema';
+        // La persona de la sesión, no la cuenta del servidor (ver src/bitacora.js).
+        const usuario = bitacora.quien(req).usuario;
         const now = new Date().toISOString();
         const cambios = {};
+
+        const previa = await repoOrdenesServicio.obtener(osId);
+        if (!previa) return json({ error: 'Orden de servicio no encontrada' }, 404);
+        const errEstado = validarAccionOS(accion, previa);
+        if (errEstado) return json({ error: errEstado }, 409);
+        const motivo = String(body.motivo || '').trim();
+        if (accion === 'anular' && !motivo) {
+          return json({ error: 'Anular exige un motivo.' }, 400);
+        }
 
         // El número de OS no se pone acá: lo emite
         // repoOrdenesServicio.aprobar() dentro de la transacción que aprueba.
@@ -3428,7 +3534,7 @@ FORMATO:
           cambios.estado          = 'anulada';
           cambios.anuladoPor      = usuario;
           cambios.fechaAnulacion  = now;
-          cambios.motivoAnulacion = String(body.motivo || '').trim();
+          cambios.motivoAnulacion = motivo;
         } else if (accion === 'pagar') {
           cambios.pagado     = true;
           cambios.pagadoPor  = usuario;
@@ -3441,27 +3547,29 @@ FORMATO:
 
         // Auto-finalizar: si tras este cambio quedan pago + cumplido completos → 'finalizada'
         if (accion === 'pagar' || accion === 'cumplir') {
-          const f = await repoOrdenesServicio.obtener(osId);
-          if (!f) return json({ error: 'Orden de servicio no encontrada' }, 404);
-          const pagado   = accion === 'pagar'   ? true : !!f.pagado;
-          const cumplido = accion === 'cumplir' ? true : !!f.cumplido;
-          if (pagado && cumplido && f.estado === 'aprobada') {
+          const pagado   = accion === 'pagar'   ? true : !!previa.pagado;
+          const cumplido = accion === 'cumplir' ? true : !!previa.cumplido;
+          if (pagado && cumplido && previa.estado === 'aprobada') {
             cambios.estado = 'finalizada';
           }
         }
 
         let actualizado;
-        if (accion === 'aprobar') {
-          const contador = require('./contador');
-          await repoOrdenesServicio.aprobar(osId, {
-            usuario,
-            formatear: contador.formatoOS,
-            cambios,
-          });
-          actualizado = await repoOrdenesServicio.obtener(osId);
-        } else {
-          actualizado = await repoOrdenesServicio.actualizar(osId, cambios);
-        }
+        await bitacora.conHistorial({
+          tipo: 'orden_servicio', id: osId, accion, req, motivo: motivo || null,
+        }, async () => {
+          if (accion === 'aprobar') {
+            const contador = require('./contador');
+            await repoOrdenesServicio.aprobar(osId, {
+              usuario,
+              formatear: contador.formatoOS,
+              cambios,
+            });
+            actualizado = await repoOrdenesServicio.obtener(osId);
+          } else {
+            actualizado = await repoOrdenesServicio.actualizar(osId, cambios);
+          }
+        });
         if (!actualizado) return json({ error: 'Orden de servicio no encontrada' }, 404);
 
         // El gasto de la OS y sus fechas de pago y cumplimiento no se copian a
@@ -3476,7 +3584,121 @@ FORMATO:
         }
 
         json({ ok: true, numeroOS: actualizado.numeroOS || '', pdfOSGenerado });
-      } catch (err) { json({ error: err.message }, 500); }
+      } catch (err) { json({ error: err.message }, err.status || 500); }
+    });
+    return;
+  }
+
+  // ── POST /ordenes/:id/corregir y /os/:id/corregir → corregir una emitida ──
+  // Solo admin y con motivo. Con ?simular=1 devuelve el plan sin escribir: qué
+  // cambia, qué efectos tiene y qué lo bloquea, para confirmarlo antes. Ver
+  // src/correcciones.js.
+  const mCorregir = url.match(/^\/(ordenes|os)\/([^\/]+)\/corregir$/);
+  if (req.method === 'POST' && mCorregir) {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        if (!(await correcciones.esAdmin(req))) {
+          return json({ error: 'Solo un administrador puede corregir órdenes ya emitidas.' }, 403);
+        }
+        const esOC = mCorregir[1] === 'ordenes';
+        const id = mCorregir[2];
+        const simular = new URLSearchParams(req.url.split('?')[1] || '').get('simular') === '1';
+        const quien = bitacora.quien(req);
+        const tipo = esOC ? 'orden_compra' : 'orden_servicio';
+
+        const previa = esOC ? await repoOrdenesCompra.obtener(id) : await repoOrdenesServicio.obtener(id);
+        if (!previa) return json({ error: 'Orden no encontrada' }, 404);
+
+        let remisiones = [];
+        let plan;
+        if (esOC) {
+          const movimientos = await repoInventario.vigentesDeOC(id);
+          remisiones = (await repoRemisiones.porOrdenCompra(id)).filter(r => r.estado === 'activa');
+          plan = correcciones.planOC(previa, body, { movimientos, remisiones });
+        } else {
+          plan = correcciones.planOS(previa, body);
+        }
+
+        const vista = { resumen: plan.resumen, efectos: plan.efectos, bloqueos: plan.bloqueos };
+        if (simular) return json({ ok: true, simulado: true, ...vista });
+        if (plan.bloqueos.length) return json({ error: 'La corrección está bloqueada.', ...vista }, 409);
+
+        await bitacora.conHistorial({ tipo, id, accion: 'corregir', req, motivo: plan.motivo },
+          () => (esOC ? repoOrdenesCompra : repoOrdenesServicio).corregir(id, plan.escritura));
+        const doc = esOC ? await repoOrdenesCompra.obtener(id) : await repoOrdenesServicio.obtener(id);
+        const numero = (esOC ? doc.numeroOC : doc.numeroOS) || '';
+
+        // Los efectos van después y uno por uno: la orden ya quedó corregida, y un
+        // efecto que falle se informa y queda en la bitácora, sin deshacer el resto.
+        const hechos = [];
+        const avisos = [];
+        const anotar = (accion, motivo) => bitacora.anotar({
+          tipo, id, accion, numero, usuario: quien.usuario, usuarioNombre: quien.nombre,
+          origen: quien.origen, motivo, antes: null, despues: null,
+        });
+
+        if (plan.efectos.almacen) {
+          try {
+            const r = await repoInventario.reemitirDeOC(id,
+              correcciones.movimientosNuevos(doc, plan.efectos.almacen, quien.usuario),
+              `corrección de ${numero}: ${plan.motivo}`);
+            const t = `Almacén: anulados ${r.anulados.join(', ') || '—'}; emitidos ${r.emitidos.join(', ')}`;
+            hechos.push(t); await anotar('ajuste_almacen', t);
+          } catch (e) { avisos.push(`No se pudo ajustar el almacén: ${e.message}`); }
+        }
+
+        if (plan.efectos.remisiones) {
+          const fecha = new Date().toLocaleDateString('es-CO');
+          for (const rem of remisiones) {
+            try {
+              const alerta = `⚠ OC ${numero} se corrigió el ${fecha} (${plan.motivo}): sus ítems cambiaron. Hay que generar una remisión nueva.`;
+              await repoRemisiones.actualizar(rem.id, {
+                estado: 'requiere-reemplazo',
+                alertas: rem.alertas ? `${rem.alertas}\n${alerta}` : alerta,
+              });
+              const t = `Remisión ${rem.numero} marcada para reemplazo`;
+              hechos.push(t); await anotar('remision_reemplazo', t);
+            } catch (e) { avisos.push(`No se pudo marcar la remisión ${rem.numero}: ${e.message}`); }
+          }
+        }
+
+        if (plan.efectos.precios) {
+          try {
+            const viejos = await repoHistorial.marcarDeCompra(numero, 'Corregida');
+            const nuevos = await agregarFilasCompras(filasHistorialDeOC(doc));
+            const t = `Historial de precios: ${viejos} precio(s) marcados como corregidos, ${nuevos} nuevo(s)`;
+            hechos.push(t); await anotar('precios_corregidos', t);
+          } catch (e) { avisos.push(`No se pudo actualizar el historial de precios: ${e.message}`); }
+        }
+
+        if (plan.efectos.requerimiento) {
+          try {
+            const ctx = await ctxSharePoint();
+            const reqItem = await obtenerRequerimiento(plan.efectos.requerimiento);
+            const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqItem);
+            if (nuevoEstado !== ((reqItem.fields || {}).estado || 'pendiente')) {
+              await actualizarRequerimiento(plan.efectos.requerimiento, { estado: nuevoEstado });
+              hechos.push(`Requerimiento recalculado: ${nuevoEstado}`);
+            }
+          } catch (e) { avisos.push(`No se pudo recalcular el requerimiento: ${e.message}`); }
+        }
+
+        if (plan.efectos.pdf) {
+          try {
+            const ctx = await ctxSharePoint();
+            if (esOC) await guardarPdfOCEnSharePoint(ctx, id, req._sesion);
+            else await guardarPdfOSEnSharePoint(ctx, id, req._sesion);
+            hechos.push('PDF regenerado');
+          } catch (e) { avisos.push(`No se pudo regenerar el PDF: ${e.message}`); }
+        }
+
+        return json({ ok: true, resumen: plan.resumen, hechos, avisos });
+      } catch (err) {
+        return json({ error: err.message, detalles: err.detalles }, err.status || 500);
+      }
     });
     return;
   }
@@ -3520,8 +3742,10 @@ FORMATO:
         if (obs != null) cambios.observaciones          = obs;
         if (le  != null) cambios.lugarEntrega           = le;
         if (fep)         cambios.fechaEntregaPrevista   = fep; // dateTime — no enviar string vacío
-        const actualizado = await repoOrdenesCompra.actualizar(ocId, cambios);
-        
+        const actualizado = await bitacora.conHistorial(
+          { tipo: 'orden_compra', id: ocId, accion: 'editar', req },
+          () => repoOrdenesCompra.actualizar(ocId, cambios));
+
         json({ ok: true, oc: actualizado || {} });
       } catch (err) { json({ error: err.message }, 500); }
     });
@@ -3563,8 +3787,10 @@ FORMATO:
           condicionesComerciales: body.condicionesComerciales != null ? String(body.condicionesComerciales) : f.condicionesComerciales,
           observaciones:          body.observaciones != null          ? String(body.observaciones)          : f.observaciones,
         };
-        const actualizado = await repoOrdenesServicio.actualizar(osId, cambios);
-        
+        const actualizado = await bitacora.conHistorial(
+          { tipo: 'orden_servicio', id: osId, accion: 'editar', req },
+          () => repoOrdenesServicio.actualizar(osId, cambios));
+
         json({ ok: true, os: actualizado || {} });
       } catch (err) { json({ error: err.message }, 500); }
     });
@@ -3634,7 +3860,7 @@ FORMATO:
           }
         }
         const ctx = await ctxSharePoint();
-        const usuario = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario = bitacora.quien(req).usuario;
         const now     = new Date().toISOString();
         const creados = [];
         const batchId = `BORR-EA-${Date.now()}`;
@@ -3679,7 +3905,7 @@ FORMATO:
       try {
         const body    = JSON.parse(Buffer.concat(chunks).toString());
         const ctx     = await ctxSharePoint();
-        const usuario = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario = bitacora.quien(req).usuario;
         const now     = new Date().toISOString();
         // Aceptar tanto { items: [...] } como objeto simple (retrocompat)
         const items   = Array.isArray(body.items) ? body.items : [body];
@@ -3736,7 +3962,7 @@ FORMATO:
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString());
         const ctx  = await ctxSharePoint();
-        const usuario  = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario  = bitacora.quien(req).usuario;
         const now      = new Date().toISOString();
         const devBatchId = `BORR-DEV-${Date.now()}`;
         const creados  = [];

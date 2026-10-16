@@ -2291,6 +2291,8 @@ function verOS(id) {
         <a class="btn btn-ghost" href="/os/${esc(os.id)}/xlsx">Excel</a>
         <a class="btn btn-ghost" href="/os/${esc(os.id)}/html" target="_blank">PDF</a>
         ${os.pdfUrl ? `<a class="btn btn-ghost" href="${esc(os.pdfUrl)}" target="_blank" rel="noopener">☁️ PDF SharePoint</a>` : ''}
+        <button class="btn btn-ghost btn-sm" id="os-ver-historial">Historial</button>
+        ${esAdminConsola() && ['aprobada', 'finalizada'].includes(os.estado) ? `<button class="btn btn-ghost btn-sm" id="os-ver-corregir">Corregir</button>` : ''}
         ${puedeAnular  ? `<button class="btn btn-danger btn-sm"  id="os-ver-anular">Anular</button>` : ''}
         ${puedeEditar  ? `<button class="btn btn-ghost btn-sm"   id="os-ver-editar">Editar borrador</button>` : ''}
         ${puedePagar   ? `<button class="btn btn-primary"        id="os-ver-pagar">Pagada</button>` : ''}
@@ -2311,6 +2313,257 @@ function verOS(id) {
   if (bAprobar) bAprobar.onclick = () => { wrap.remove(); aprobarOS(id); };
   if (bPagar)   bPagar.onclick   = () => { wrap.remove(); pagarOS(id); };
   if (bCumplir) bCumplir.onclick = () => { wrap.remove(); cumplirOS(id); };
+  wrap.querySelector('#os-ver-historial').onclick = () =>
+    verHistorial('os', id, os.numeroOS || 'OS en borrador');
+  const bCorregirOS = wrap.querySelector('#os-ver-corregir');
+  if (bCorregirOS) bCorregirOS.onclick = () => { wrap.remove(); corregirOrden('os', os); };
+}
+
+// ─── Historial de una orden (bitácora) ───────────────────────────────────────
+// Lo que pasó con la orden: quién, cuándo, con qué motivo y qué cambió. Los
+// eventos «previos» son de antes de que existiera la bitácora y salen de las
+// columnas de la orden: su «quién» puede ser la cuenta del servidor.
+const ACCIONES_HISTORIAL = {
+  crear: 'Creada', editar: 'Editada', aprobar: 'Aprobada', anular: 'Anulada',
+  pagar: 'Marcada como pagada', entregar: 'Marcada como entregada', cumplir: 'Marcada como cumplida',
+  enviar_tesoreria: 'Enviada a tesorería', vincular_requerimiento: 'Vinculada a un requerimiento',
+  asignar_proyecto: 'Proyecto asignado', corregir: 'Corregida',
+  ajuste_almacen: 'Almacén ajustado', remision_reemplazo: 'Remisión marcada para reemplazo',
+  precios_corregidos: 'Historial de precios corregido',
+};
+const ORIGENES_HISTORIAL = { 'api-rrhh': 'vía RRHH (KAOS)', sistema: 'proceso automático' };
+
+const CAMPOS_DINERO_HISTORIAL = new Set(['subtotal', 'valor', 'iva', 'total']);
+function valorHistorial(v, campo) {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'boolean') return v ? 'Sí' : 'No';
+  if (typeof v === 'number') return CAMPOS_DINERO_HISTORIAL.has(campo) ? fmt$(v) : String(v);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(String(v))) return fmtFecha(v);
+  return String(v);
+}
+
+function lineaItemHistorial(it) {
+  if (!it) return '—';
+  const desc = it.descripcion || it.insumo || '—';
+  return `${desc} · ${it.cantidad ?? 0} ${it.unidad || ''} × ${fmt$(it.precioUnitario || 0)}`;
+}
+
+// ─── Corregir una orden ya emitida (solo admin) ──────────────────────────────
+// La consola solo esconde el botón: el servidor vuelve a comprobar que quien
+// corrige es admin, leyendo su rol de la base en cada corrección.
+function esAdminConsola() { return ESTADO.usuario?.rol === 'admin'; }
+
+const fechaInput = (v) => (v ? String(v).slice(0, 10) : '');
+
+function corregirOrden(recurso, doc) {
+  const esOC = recurso === 'ordenes';
+  let items = [];
+  if (esOC) { try { items = JSON.parse(doc.itemsJson || '[]'); } catch {} }
+  else items = Array.isArray(doc.items) ? doc.items : (() => { try { return JSON.parse(doc.itemsJson || '[]'); } catch { return []; } })();
+  items = items.map(it => ({
+    descripcion: it.descripcion || it.insumo || '', cantidad: Number(it.cantidad || 0),
+    unidad: it.unidad || 'UND', precioUnitario: Number(it.precioUnitario || 0),
+    descuentoPct: Number(it.descuentoPct || 0), ivaPct: Number(it.ivaPct ?? 0),
+    ...(it.insumoOriginal ? { insumoOriginal: it.insumoOriginal } : {}),
+  }));
+  const itemsBloqueados = !esOC && doc.tipoContrato === 'AIU';
+  const proyectos = (ESTADO.proyectos || []).map(p => (typeof p === 'string' ? p : p.codigo)).filter(Boolean);
+  if (doc.proyecto && !proyectos.includes(doc.proyecto)) proyectos.unshift(doc.proyecto);
+  const titulo = (esOC ? doc.numeroOC : doc.numeroOS) || '';
+
+  const campo = (id, etiqueta, valor, tipo = 'text') =>
+    `<label style="display:block;font-size:11px;color:var(--txt-2);margin-top:8px">${etiqueta}
+       <input id="${id}" type="${tipo}" value="${esc(valor ?? '')}" style="width:100%;margin-top:3px"></label>`;
+  const area = (id, etiqueta, valor) =>
+    `<label style="display:block;font-size:11px;color:var(--txt-2);margin-top:8px">${etiqueta}
+       <textarea id="${id}" rows="2" style="width:100%;margin-top:3px">${esc(valor ?? '')}</textarea></label>`;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal-card" style="max-width:820px;position:relative">
+      <button class="modal-x" title="Cerrar" aria-label="Cerrar">&times;</button>
+      <h3 style="padding-right:28px">Corregir ${esc(titulo)}</h3>
+      <p class="text-muted" style="margin:4px 0 8px;font-size:12px">La orden conserva su número. Todo cambio queda en su historial con el motivo.</p>
+      <div style="max-height:62vh;overflow-y:auto;padding-right:4px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">
+          <label style="display:block;font-size:11px;color:var(--txt-2);margin-top:8px">Obra
+            <select id="co-proyecto" style="width:100%;margin-top:3px">
+              ${proyectos.map(c => `<option value="${esc(c)}" ${c === doc.proyecto ? 'selected' : ''}>${esc(etiquetaProyecto(c))}</option>`).join('')}
+            </select></label>
+          ${campo('co-tipogasto', 'Tipo de gasto', doc.tipoGasto)}
+          ${campo('co-nit', 'NIT proveedor', doc.proveedorNit)}
+          ${campo('co-nombre', 'Proveedor', doc.proveedorNombre)}
+          ${esOC ? campo('co-lugar', 'Lugar de entrega', doc.lugarEntrega) : campo('co-lugar', 'Lugar de prestación', doc.lugarPrestacion)}
+          ${esOC ? campo('co-fecha', 'Entrega prevista', fechaInput(doc.fechaEntregaPrevista), 'date')
+                 : campo('co-tiposervicio', 'Tipo de servicio', doc.tipoServicio)}
+          ${!esOC ? campo('co-inicio', 'Inicio', fechaInput(doc.fechaInicio), 'date') + campo('co-fin', 'Fin', fechaInput(doc.fechaFin), 'date') : ''}
+          ${!esOC ? campo('co-oferta', 'Referencia de la oferta', doc.ofertaEconomicaRef) : ''}
+        </div>
+        ${area('co-condiciones', 'Condiciones comerciales', doc.condicionesComerciales)}
+        ${area('co-observaciones', 'Observaciones', doc.observaciones)}
+
+        <div style="margin-top:12px;font-size:11px;color:var(--txt-2)">Ítems${itemsBloqueados ? ' — contrato AIU: los ítems no se corrigen desde acá' : ''}</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px" id="co-items">
+          <thead><tr>
+            <th style="text-align:left">Descripción</th><th>Cant.</th><th>Unidad</th><th>P. unit. (sin IVA)</th>
+            ${esOC ? '<th>Desc. %</th>' : ''}<th>IVA %</th><th></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        ${itemsBloqueados ? '' : '<button class="btn btn-ghost btn-sm" id="co-agregar" style="margin-top:6px">+ Ítem</button>'}
+
+        ${doc.pagado ? `<label style="display:flex;gap:8px;align-items:center;justify-content:flex-start;margin-top:12px;font-size:12px;text-transform:none;letter-spacing:0;color:var(--txt)">
+          <input type="checkbox" id="co-desmarcar" style="width:auto;margin:0;flex:none"> Desmarcar el pago (se marcó como pagada por error)</label>` : ''}
+
+        ${area('co-motivo', 'Motivo de la corrección (obligatorio)', '')}
+        <div id="co-plan" style="margin-top:12px;font-size:12px"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="co-cancelar">Cancelar</button>
+        <button class="btn btn-primary" id="co-revisar">Revisar cambios</button>
+        <button class="btn btn-success" id="co-confirmar" style="display:none">Confirmar corrección</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const cerrar = () => wrap.remove();
+  wrap.querySelector('.modal-x').onclick = cerrar;
+  wrap.querySelector('#co-cancelar').onclick = cerrar;
+
+  const tbody = wrap.querySelector('#co-items tbody');
+  const pintarItems = () => {
+    const ro = itemsBloqueados ? 'disabled' : '';
+    tbody.innerHTML = items.map((it, i) => `
+      <tr data-i="${i}">
+        <td><input data-k="descripcion" value="${esc(it.descripcion)}" ${ro} style="width:100%"></td>
+        <td><input data-k="cantidad" type="number" step="any" value="${it.cantidad}" ${ro} style="width:70px"></td>
+        <td><input data-k="unidad" value="${esc(it.unidad)}" ${ro} style="width:60px"></td>
+        <td><input data-k="precioUnitario" type="number" step="any" value="${it.precioUnitario}" ${ro} style="width:110px"></td>
+        ${esOC ? `<td><input data-k="descuentoPct" type="number" step="any" value="${it.descuentoPct}" ${ro} style="width:60px"></td>` : ''}
+        <td><input data-k="ivaPct" type="number" step="any" value="${it.ivaPct}" ${ro} style="width:60px"></td>
+        <td>${itemsBloqueados ? '' : `<button class="btn btn-ghost btn-sm" data-quitar="${i}">✕</button>`}</td>
+      </tr>`).join('');
+  };
+  pintarItems();
+  tbody.addEventListener('input', (e) => {
+    const k = e.target.dataset.k; const i = Number(e.target.closest('tr').dataset.i);
+    if (!k) return;
+    items[i][k] = ['descripcion', 'unidad'].includes(k) ? e.target.value : Number(e.target.value);
+    invalidarPlan();
+  });
+  tbody.addEventListener('click', (e) => {
+    const q = e.target.dataset.quitar; if (q == null) return;
+    items.splice(Number(q), 1); pintarItems(); invalidarPlan();
+  });
+  const bAgregar = wrap.querySelector('#co-agregar');
+  if (bAgregar) bAgregar.onclick = () => { items.push({ descripcion: '', cantidad: 1, unidad: 'UND', precioUnitario: 0, descuentoPct: 0, ivaPct: 19 }); pintarItems(); invalidarPlan(); };
+
+  const bConfirmar = wrap.querySelector('#co-confirmar');
+  const plan = wrap.querySelector('#co-plan');
+  function invalidarPlan() { bConfirmar.style.display = 'none'; plan.innerHTML = ''; }
+  wrap.querySelectorAll('input:not([data-k]), select, textarea').forEach(el => el.addEventListener('input', invalidarPlan));
+
+  const v = (id) => { const el = wrap.querySelector('#' + id); return el ? el.value : undefined; };
+  const pedido = () => {
+    const cabecera = {
+      observaciones: v('co-observaciones'), condicionesComerciales: v('co-condiciones'), tipoGasto: v('co-tipogasto'),
+    };
+    if (esOC) { cabecera.lugarEntrega = v('co-lugar'); cabecera.fechaEntregaPrevista = v('co-fecha'); }
+    else {
+      cabecera.lugarPrestacion = v('co-lugar'); cabecera.tipoServicio = v('co-tiposervicio');
+      cabecera.fechaInicio = v('co-inicio'); cabecera.fechaFin = v('co-fin'); cabecera.ofertaEconomicaRef = v('co-oferta');
+    }
+    return {
+      motivo: v('co-motivo'), cabecera, proyecto: v('co-proyecto'),
+      proveedorNit: v('co-nit'), proveedorNombre: v('co-nombre'),
+      items: itemsBloqueados ? undefined : items,
+      desmarcarPago: !!wrap.querySelector('#co-desmarcar')?.checked,
+    };
+  };
+  const enviar = async (simular) => {
+    const r = await fetch(`/${recurso}/${encodeURIComponent(doc.id)}/corregir${simular ? '?simular=1' : ''}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pedido()),
+    });
+    const data = await r.json().catch(() => ({}));
+    return { ok: r.ok, data };
+  };
+  const lista = (xs) => xs.length ? `<ul style="margin:4px 0 0 16px;padding:0">${xs.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '';
+
+  wrap.querySelector('#co-revisar').onclick = async () => {
+    plan.innerHTML = '<span class="text-muted">Revisando…</span>';
+    const { ok, data } = await enviar(true);
+    if (!ok) { plan.innerHTML = `<div style="color:var(--danger,#c33)">${esc(data.error || 'Error')}${lista(data.detalles || [])}</div>`; return; }
+    const ef = data.efectos || {};
+    const efectos = [
+      ef.almacen ? `Almacén: se anulan ${ef.almacen.anular.join(', ') || 'los movimientos'} y se emiten documentos nuevos con lo corregido` : null,
+      ef.remisiones ? `Remisión ${ef.remisiones.join(', ')}: queda para reemplazo` : null,
+      ef.precios ? 'Historial de precios: los de esta orden se marcan como corregidos y entran los nuevos' : null,
+      ef.requerimiento ? 'Se recalcula el estado del requerimiento' : null,
+      ef.pdf ? 'Se regenera el PDF' : null,
+    ].filter(Boolean);
+    plan.innerHTML = `
+      <strong>Cambios:</strong>${lista(data.resumen || [])}
+      ${efectos.length ? `<div style="margin-top:6px"><strong>Efectos:</strong>${lista(efectos)}</div>` : ''}
+      ${(data.bloqueos || []).length ? `<div style="margin-top:6px;color:var(--danger,#c33)"><strong>Bloqueado:</strong>${lista(data.bloqueos)}</div>` : ''}`;
+    bConfirmar.style.display = (data.bloqueos || []).length ? 'none' : '';
+  };
+
+  bConfirmar.onclick = async () => {
+    bConfirmar.disabled = true;
+    const { ok, data } = await enviar(false);
+    bConfirmar.disabled = false;
+    if (!ok) { plan.innerHTML = `<div style="color:var(--danger,#c33)">${esc(data.error || 'Error')}${lista(data.detalles || data.bloqueos || [])}</div>`; return; }
+    cerrar();
+    const avisos = (data.avisos || []).length ? `\n\nAvisos:\n• ${data.avisos.join('\n• ')}` : '';
+    alert(`Orden corregida.\n\n• ${[...(data.resumen || []), ...(data.hechos || [])].join('\n• ')}${avisos}`);
+    if (esOC) await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
+    else await cargarOrdenesServicio();
+  };
+}
+
+async function verHistorial(recurso, id, titulo) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal-card" style="max-width:680px;position:relative">
+      <button class="modal-x" title="Cerrar" aria-label="Cerrar">&times;</button>
+      <h3 style="padding-right:28px">Historial · ${esc(titulo)}</h3>
+      <div id="hist-cuerpo" style="max-height:60vh;overflow-y:auto;margin-top:12px">
+        <p class="text-muted">Cargando…</p>
+      </div>
+      <div class="modal-actions"><button class="btn btn-ghost">Cerrar</button></div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.querySelectorAll('.modal-x, .modal-actions .btn').forEach(b => b.onclick = () => wrap.remove());
+  const cuerpo = wrap.querySelector('#hist-cuerpo');
+
+  try {
+    const r = await fetch(`/${recurso}/${encodeURIComponent(id)}/historial`);
+    const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || 'Error');
+    const eventos = data.historial || [];
+    if (!eventos.length) { cuerpo.innerHTML = '<p class="text-muted">Sin eventos registrados.</p>'; return; }
+
+    cuerpo.innerHTML = eventos.slice().reverse().map(e => {
+      const quien = e.usuarioNombre ? `${esc(e.usuarioNombre)} (${esc(e.usuario)})` : esc(e.usuario || '—');
+      const origen = ORIGENES_HISTORIAL[e.origen] ? ` · ${ORIGENES_HISTORIAL[e.origen]}` : '';
+      const campos = (e.cambios?.campos || []).map(c =>
+        `<li><strong>${esc(c.etiqueta)}:</strong> ${esc(valorHistorial(c.antes, c.campo))} → ${esc(valorHistorial(c.despues, c.campo))}</li>`).join('');
+      const items = (e.cambios?.items || []).map(l =>
+        `<li><strong>Ítem ${l.linea} ${esc(l.tipo)}:</strong> ${l.antes ? esc(lineaItemHistorial(l.antes)) : ''}${l.antes && l.despues ? ' → ' : ''}${l.despues ? esc(lineaItemHistorial(l.despues)) : ''}</li>`).join('');
+      return `
+        <div style="border-left:3px solid var(--border);padding:6px 0 10px 12px;margin-bottom:6px">
+          <div style="font-size:13px"><strong>${esc(ACCIONES_HISTORIAL[e.accion] || e.accion)}</strong>
+            ${e.previo ? '<span class="tag tag-borrador" title="Registrado antes de que existiera la bitácora: puede no ser la persona real">previo</span>' : ''}
+          </div>
+          <div class="text-muted" style="font-size:11px;margin-top:2px">${esc(new Date(e.fecha).toLocaleString('es-CO'))} · ${quien}${esc(origen)}</div>
+          ${e.motivo ? `<div style="font-size:12px;margin-top:4px">Motivo: ${esc(e.motivo)}</div>` : ''}
+          ${campos || items ? `<ul style="font-size:12px;margin:6px 0 0 16px;padding:0">${campos}${items}</ul>` : ''}
+        </div>`;
+    }).join('');
+  } catch (err) {
+    cuerpo.innerHTML = `<p style="color:var(--danger,#c33)">No se pudo cargar el historial: ${esc(err.message)}</p>`;
+  }
 }
 
 // ─── OS: edición de borrador ──────────────────────────────────────────────────
@@ -4565,6 +4818,8 @@ function verOrden(id) {
         <a class="btn btn-ghost" href="/oc/${esc(o.id)}.xlsx">Excel</a>
         <a class="btn btn-ghost" href="/oc/${esc(o.id)}.html" target="_blank">PDF</a>
         ${o.pdfUrl ? `<a class="btn btn-ghost" href="${esc(o.pdfUrl)}" target="_blank" rel="noopener">☁️ PDF SharePoint</a>` : ''}
+        <button class="btn btn-ghost btn-sm" id="oc-ver-historial">Historial</button>
+        ${esAdminConsola() && ['aprobada', 'finalizada'].includes(o.estado) ? `<button class="btn btn-ghost btn-sm" id="oc-ver-corregir">Corregir</button>` : ''}
         ${puedeVincular  ? `<button class="btn btn-ghost btn-sm" id="oc-ver-vincular">Vincular req.</button>` : ''}
         ${puedeAnular    ? `<button class="btn btn-danger"  id="oc-ver-anular">Anular</button>` : ''}
         ${puedeEnviarTes ? `<button class="btn btn-primary" id="oc-ver-tesoreria">Enviar a tesorería</button>` : ''}
@@ -4594,6 +4849,10 @@ function verOrden(id) {
   if (bTesoreria) bTesoreria.onclick = () => { cerrar(); enviarATesoreria(id); };
   const bEditar = wrap.querySelector('#oc-btn-editar');
   if (bEditar) bEditar.onclick = () => activarEdicionOC(wrap, o, itemsOC);
+  wrap.querySelector('#oc-ver-historial').onclick = () =>
+    verHistorial('ordenes', id, o.numeroOC || 'OC en borrador');
+  const bCorregir = wrap.querySelector('#oc-ver-corregir');
+  if (bCorregir) bCorregir.onclick = () => { cerrar(); corregirOrden('ordenes', o); };
 }
 
 // ─── OC: edición de borrador ──────────────────────────────────────────────────
@@ -4808,10 +5067,19 @@ function descargarRegistroOCs(){
 async function accionOC(id, accion){
   if (accion === 'aprobar') return aprobarOCConModal(id);
   if (accion === 'entregar') return accionOCEntregar(id);
-  const confirms = { anular: '¿Anular esta OC?\n\nSi está asociada a una remisión, esa remisión se anulará (o se marcará para reemplazo si tenía otras OC).', pagar: '¿Marcar como pagada?' };
-  if (!confirm(confirms[accion])) return;
+  let body;
+  if (accion === 'anular') {
+    // El motivo queda en la orden y en su historial: es lo que responde, meses
+    // después, por qué no siguió.
+    const motivo = prompt('¿Por qué se anula esta OC?\n\nSi está asociada a una remisión, esa remisión se anulará (o se marcará para reemplazo si tenía otras OC).');
+    if (motivo === null) return;
+    if (!motivo.trim()) { alert('Anular exige un motivo.'); return; }
+    body = JSON.stringify({ motivo: motivo.trim() });
+  } else if (!confirm('¿Marcar como pagada?')) return;
   try{
-    const resp = await fetch(`/ordenes/${encodeURIComponent(id)}/${accion}`, { method: 'POST' });
+    const resp = await fetch(`/ordenes/${encodeURIComponent(id)}/${accion}`, {
+      method: 'POST', headers: body ? { 'Content-Type': 'application/json' } : undefined, body,
+    });
     const data = await resp.json();
     if (!resp.ok || data.error) throw new Error(data.error || 'Error');
     if (accion === 'anular' && Array.isArray(data.remisionesAfectadas) && data.remisionesAfectadas.length){

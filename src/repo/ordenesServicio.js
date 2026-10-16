@@ -18,6 +18,7 @@
 const pg = require('../pg');
 
 const repoProyecto = require('./_proyecto');
+const { EstadoInvalido } = require('./_estado');
 const CABECERA = `
   o.id, o.numero_os, o.requerimiento_id, o.proyecto_id, o.proveedor_nit,
   o.tipo_servicio, o.clausulas, o.oferta_economica_ref, o.oferta_economica_condiciones,
@@ -211,8 +212,10 @@ async function aprobarEn(c, id, { usuario, formatear, cambios = {} }) {
   vals.push(id);
   const r = await c.query(
     `UPDATE erp.ordenes_servicio SET ${sets.join(', ')}
-      WHERE id = $${vals.length} RETURNING id`, vals);
-  if (!r.rowCount) throw new Error(`Orden de servicio ${id} no existe`);
+      WHERE id = $${vals.length} AND estado = 'borrador' RETURNING id`, vals);
+  // Solo un borrador se aprueba: aprobar dos veces quemaría otro número y
+  // sobrescribiría el que ya tenía. La transacción se deshace y el número no se gasta.
+  if (!r.rowCount) throw new EstadoInvalido(`Orden de servicio ${id} no existe o ya no está en borrador`);
   return numero;
 }
 
@@ -356,7 +359,59 @@ async function resolverProveedor(c, nit, nombre) {
   return clave;
 }
 
+/**
+ * Corrige una orden ya emitida (aprobada o finalizada), en UNA transacción:
+ * cabecera, obra, proveedor e ítems. Lo que cambia y por qué lo decide
+ * src/correcciones.js; acá solo se escribe.
+ *
+ * @param {object} datos
+ * @param {object} [datos.cambios]   columnas de cabecera, con los nombres de COLUMNAS
+ * @param {string} [datos.proyecto]  la obra nueva (código); tiene que estar activa
+ * @param {string} [datos.proveedorNit] y [datos.proveedorNombre]
+ * @param {Array}  [datos.items]     si viene, reemplaza los ítems
+ */
+async function corregir(id, { cambios = {}, proyecto = null, proveedorNit = null, proveedorNombre = null, items = null } = {}) {
+  return pg.tx(async (c) => {
+    // FOR UPDATE: nadie aprueba, anula ni paga esta orden mientras se corrige.
+    const actual = await c.query('SELECT estado FROM erp.ordenes_servicio WHERE id = $1 FOR UPDATE', [id]);
+    if (!actual.rowCount || !['aprobada', 'finalizada'].includes(actual.rows[0].estado)) {
+      throw new EstadoInvalido(`La orden ${id} no existe o no está aprobada ni finalizada`);
+    }
+
+    const sets = [];
+    const vals = [];
+    const poner = (col, valor) => { vals.push(valor); sets.push(`${col} = $${vals.length}`); };
+
+    if (proyecto) {
+      const { proyectoId } = await resolverProyecto(c, proyecto, { exigirActivo: true });
+      if (!proyectoId) throw Object.assign(new Error(`El proyecto "${proyecto}" no está en el catálogo`), { status: 422 });
+      poner('proyecto_id', proyectoId);
+      poner('proyecto_texto', null);
+    }
+    if (proveedorNit) {
+      const nit = await resolverProveedor(c, proveedorNit, proveedorNombre);
+      if (!nit) throw Object.assign(new Error('El NIT del proveedor no es válido'), { status: 422 });
+      poner('proveedor_nit', nit);
+    }
+    for (const [clave, valor] of Object.entries(cambios)) {
+      const col = COLUMNAS[clave];
+      if (col) poner(col, valor);
+    }
+
+    if (items) {
+      await c.query('DELETE FROM erp.orden_servicio_items WHERE orden_servicio_id = $1', [id]);
+      await insertarItems(c, id, items);
+    }
+    if (sets.length) {
+      vals.push(id);
+      await c.query(
+        `UPDATE erp.ordenes_servicio SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+    }
+  });
+}
+
 module.exports = {
+  corregir,
   listar, obtener, crear, aprobar, actualizar,
   crearDesdeApi, porOrigenSolicitud, ProyectoNoEncontrado,
 };

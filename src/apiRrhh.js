@@ -34,6 +34,7 @@ const contador       = require('./contador');
 const repoOS         = require('./repo/ordenesServicio');
 const repoReq        = require('./repo/requerimientos');
 const repoProyecto   = require('./repo/_proyecto');
+const bitacora       = require('./bitacora');
 
 const ORIGEN_SISTEMA = 'rrhh-app';
 const CLAVE_TOPE     = 'rrhhTopeAprobacionOS';
@@ -254,6 +255,16 @@ async function crearOrdenServicio(body) {
         `[RRHH:${comun.origenSolicitudId.slice(0, 8)}] ${tipoServicio} · solicitó ` +
         `${comun.origenSolicitadoPorNombre} (${comun.origenSolicitadoPor})`,
     }, items, { aprobar, formatear: contador.formatoOS });
+
+    // A la bitácora, con la persona de RRHH que la pidió (no hay sesión de consola).
+    const despues = await bitacora.foto('orden_servicio', id).catch(() => null);
+    const quien = { usuario: comun.origenSolicitadoPor, usuarioNombre: comun.origenSolicitadoPorNombre, origen: 'api-rrhh' };
+    await bitacora.anotar({ tipo: 'orden_servicio', id, accion: 'crear', numero: numeroOS, ...quien,
+      motivo: `Solicitud RRHH ${comun.origenSolicitudId}`, antes: null, despues });
+    if (aprobar) {
+      await bitacora.anotar({ tipo: 'orden_servicio', id, accion: 'aprobar', numero: numeroOS, ...quien,
+        motivo: `Aprobación automática: total ${totales.total} ≤ tope ${tope}`, antes: null, despues });
+    }
 
     const cuerpo = {
       creada:                  true,
