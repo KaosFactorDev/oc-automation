@@ -1125,6 +1125,17 @@ const servidor = http.createServer(async (req, res) => {
     };
   };
 
+  // ── GET /marca/* → logo e ícono de KAOS ──────────────────────────────────
+  // Públicos porque los usa la pantalla de login, antes de haber sesión. Lista
+  // cerrada de archivos: no es una carpeta servida, así que no hay ruta que
+  // armar ni forma de pedir otra cosa con «../».
+  const MARCA = { '/marca/kaos-logo.png': 'image/png', '/marca/kaos-icon.ico': 'image/x-icon' };
+  if (req.method === 'GET' && MARCA[url]) {
+    res.writeHead(200, { 'Content-Type': MARCA[url], 'Cache-Control': 'public, max-age=86400' });
+    res.end(fs.readFileSync(path.join(__dirname, '../ui', url)));
+    return;
+  }
+
   // ── /api/* → rutas de máquina, con llave en vez de cookie de sesión ──────
   // Las usa RRHH (KAOS) desde su servidor. Es un tercer camino, no una
   // excepción a RUTAS_PUBLICAS: /api/* no es pública, exige la llave.

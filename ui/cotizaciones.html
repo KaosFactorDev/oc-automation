@@ -3,24 +3,28 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cotizaciones — Civiltech</title>
-<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<title>Cotizaciones — KAOS</title>
+<link rel="icon" href="/marca/kaos-icon.ico">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@300;400;500;600&family=Poppins:wght@600&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg:#0f1117; --surface:#171b25; --card:#1e2330; --border:#2a3045; --border-hi:#3d4d6a;
-  --accent:#3d7fff; --accent-lo:rgba(61,127,255,.12); --accent-hi:#6fa3ff;
+  /* Marca KAOS, tema oscuro: los mismos tokens de la consola */
+  --kaos-naranja:hsl(21 89% 52%); --header-bg:hsl(217 68% 11%);
+  --bg:hsl(217 62% 8%); --surface:hsl(217 66% 11%); --card:hsl(217 62% 14%); --border:hsl(217 40% 22%); --border-hi:hsl(217 30% 33%);
+  --accent:hsl(21 89% 52%); --accent-lo:hsl(21 89% 52% / .13); --accent-hi:hsl(21 95% 64%); --accent-bd:hsl(21 89% 52% / .35);
   --success:#2eb87e; --warn:#e09c3a; --danger:#e05050;
-  --txt:#d6dae8; --txt-2:#7b85a0; --txt-3:#4a5270;
-  --mono:'DM Mono',monospace; --sans:'DM Sans',sans-serif; --r:6px;
+  --txt:hsl(214 32% 93%); --txt-2:hsl(215 18% 67%); --txt-3:hsl(215 14% 46%);
+  --mono:'DM Mono',monospace; --sans:'Inter',system-ui,sans-serif; --r:8px;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--bg);color:var(--txt);font-family:var(--sans);font-size:14px;min-height:100vh;}
 
-header{display:flex;align-items:center;gap:16px;padding:18px 32px;border-bottom:1px solid var(--border);background:var(--surface);}
-.logo-mark{width:32px;height:32px;background:var(--accent);clip-path:polygon(0 100%,50% 0,100% 100%);flex-shrink:0;}
-header h1{font-size:15px;font-weight:600;}
-header span{font-size:12px;color:var(--txt-2);font-family:var(--mono);}
-.badge{margin-left:auto;font-family:var(--mono);font-size:11px;background:var(--accent-lo);color:var(--accent-hi);border:1px solid rgba(61,127,255,.3);padding:3px 10px;border-radius:20px;}
+header{display:flex;align-items:center;gap:16px;padding:14px 32px;border-bottom:3px solid var(--kaos-naranja);background:var(--header-bg);color:#fff;}
+.marca-logo{height:30px;width:auto;display:block;flex-shrink:0;filter:brightness(0) invert(1);}
+.brand{border-left:1px solid hsl(0 0% 100% / .22);padding-left:16px;}
+header h1{font-family:'Poppins','Inter',sans-serif;font-size:15px;font-weight:600;}
+header span{font-size:12px;color:hsl(215 25% 75%);font-family:var(--mono);}
+.badge{margin-left:auto;font-family:var(--mono);font-size:11px;background:var(--accent-lo);color:var(--accent-hi);border:1px solid var(--accent-bd);padding:3px 10px;border-radius:20px;}
 
 main{max-width:1100px;margin:0 auto;padding:32px 24px;display:grid;gap:24px;}
 
@@ -73,7 +77,7 @@ main{max-width:1100px;margin:0 auto;padding:32px 24px;display:grid;gap:24px;}
 
 .estado{padding:10px 14px;border-radius:var(--r);font-size:13px;display:none;align-items:center;gap:10px;}
 .estado.visible{display:flex;}
-.estado.cargando{background:var(--accent-lo);border:1px solid rgba(61,127,255,.3);color:var(--accent-hi);}
+.estado.cargando{background:var(--accent-lo);border:1px solid var(--accent-bd);color:var(--accent-hi);}
 .estado.ok{background:rgba(46,184,126,.1);border:1px solid rgba(46,184,126,.3);color:var(--success);}
 .estado.error{background:rgba(224,80,80,.1);border:1px solid rgba(224,80,80,.3);color:var(--danger);}
 
@@ -87,7 +91,7 @@ tr.excluida td{opacity:.4;}
 .td-input{background:var(--surface);border:1px solid transparent;border-radius:4px;padding:5px 8px;color:var(--txt);font-family:var(--sans);font-size:13px;width:100%;transition:border-color .15s;}
 .td-input:focus{outline:none;border-color:var(--accent);}
 .precio-nuevo{color:var(--accent-hi);font-family:var(--mono);font-weight:500;}
-.tag-nuevo{font-size:10px;background:var(--accent-lo);color:var(--accent-hi);border:1px solid rgba(61,127,255,.3);padding:2px 7px;border-radius:20px;font-family:var(--mono);}
+.tag-nuevo{font-size:10px;background:var(--accent-lo);color:var(--accent-hi);border:1px solid var(--accent-bd);padding:2px 7px;border-radius:20px;font-family:var(--mono);}
 .tag-existe{font-size:10px;background:rgba(46,184,126,.1);color:var(--success);border:1px solid rgba(46,184,126,.3);padding:2px 7px;border-radius:20px;font-family:var(--mono);}
 .check-excluir{width:16px;height:16px;cursor:pointer;accent-color:var(--accent);}
 
@@ -111,9 +115,9 @@ tr.excluida td{opacity:.4;}
 <body>
 
 <header>
-  <div class="logo-mark"></div>
-  <div>
-    <h1>Cotizaciones — Civiltech</h1>
+  <img class="marca-logo" src="/marca/kaos-logo.png" width="493" height="177" alt="KAOS">
+  <div class="brand">
+    <h1>Cotizaciones</h1>
     <span>Actualización de precios y generación de OC</span>
   </div>
   <div class="badge">v2.0 · local</div>
