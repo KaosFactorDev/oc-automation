@@ -1562,7 +1562,7 @@ const servidor = http.createServer(async (req, res) => {
           : await repoProyecto.asignar(tipo, id, proyecto);
         return hecho ? json({ ok: true }) : json({ error: 'Documento no encontrado' }, 404);
       } catch (err) {
-        return json({ error: err.message }, 400);
+        return json({ error: err.message }, err.status || 400);
       }
     });
     return;
