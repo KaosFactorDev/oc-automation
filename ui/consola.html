@@ -3,49 +3,72 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title> ERP — CivilTech</title>
-<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<title>ERP — KAOS</title>
+<link rel="icon" href="/marca/kaos-icon.ico">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@300;400;500;600;700&family=Poppins:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --bg:#0f1117;--surface:#171b25;--card:#1e2330;--card-hi:#252c3d;
-  --border:#2a3045;--border-hi:#3d4d6a;
-  --accent:#3d7fff;--accent-lo:rgba(61,127,255,.12);--accent-hi:#6fa3ff;
+  /* Marca KAOS: navy 217 68% 15% y naranja 21 89% 52%, los mismos de
+     kaos-webapp y G-activos. En oscuro el acento es el naranja (el navy no se
+     lee sobre navy); en claro es el navy y el naranja queda para lo activo. */
+  --kaos-navy:hsl(217 68% 15%);--kaos-naranja:hsl(21 89% 52%);
+  --header-bg:hsl(217 68% 11%);
+  --bg:hsl(217 62% 8%);--surface:hsl(217 66% 11%);--card:hsl(217 62% 14%);--card-hi:hsl(217 54% 17%);
+  --border:hsl(217 40% 22%);--border-hi:hsl(217 30% 33%);
+  --accent:hsl(21 89% 52%);--accent-lo:hsl(21 89% 52% / .13);--accent-hi:hsl(21 95% 64%);--accent-bd:hsl(21 89% 52% / .35);
   --success:#2eb87e;--success-lo:rgba(46,184,126,.12);
   --warn:#e09c3a;--warn-lo:rgba(224,156,58,.12);
   --danger:#e05050;--danger-lo:rgba(224,80,80,.12);
-  --txt:#d6dae8;--txt-2:#7b85a0;--txt-3:#4a5270;
-  --mono:'DM Mono',monospace;--sans:'DM Sans',sans-serif;--r:6px;
+  --txt:hsl(214 32% 93%);--txt-2:hsl(215 18% 67%);--txt-3:hsl(215 14% 46%);
+  --mono:'DM Mono',monospace;--sans:'Inter',system-ui,sans-serif;--titulo:'Poppins','Inter',system-ui,sans-serif;--r:8px;
 }
 [data-theme="light"]{
-  --bg:#eef1f6;--surface:#ffffff;--card:#ffffff;--card-hi:#f4f6fb;
-  --border:#dde1ec;--border-hi:#c3c9da;
-  --accent:#2563eb;--accent-lo:rgba(37,99,235,.1);--accent-hi:#1d4ed8;
+  --header-bg:hsl(217 68% 15%);
+  --bg:hsl(220 24% 95%);--surface:#ffffff;--card:#ffffff;--card-hi:hsl(220 24% 97.5%);
+  --border:hsl(220 13% 86%);--border-hi:hsl(215 16% 72%);
+  --accent:hsl(217 68% 15%);--accent-lo:hsl(217 68% 15% / .07);--accent-hi:hsl(217 68% 26%);--accent-bd:hsl(217 68% 15% / .25);
   --success:#16a34a;--success-lo:rgba(22,163,74,.1);
   --warn:#d97706;--warn-lo:rgba(217,119,6,.1);
   --danger:#dc2626;--danger-lo:rgba(220,38,38,.1);
-  --txt:#0f172a;--txt-2:#475569;--txt-3:#94a3b8;
-  --mono:'DM Mono',monospace;--sans:'DM Sans',sans-serif;--r:6px;
+  --txt:hsl(217 68% 15%);--txt-2:hsl(215 16% 42%);--txt-3:hsl(215 14% 62%);
+  --mono:'DM Mono',monospace;--sans:'Inter',system-ui,sans-serif;--titulo:'Poppins','Inter',system-ui,sans-serif;--r:8px;
 }
-[data-theme="light"] header{box-shadow:0 1px 4px rgba(0,0,0,.07)}
+[data-theme="light"] header{box-shadow:0 4px 14px -6px hsl(217 45% 20% / .25)}
 [data-theme="light"] .nav{box-shadow:0 1px 2px rgba(0,0,0,.04)}
 [data-theme="light"] .modal-backdrop{background:rgba(0,0,0,.4)}
-[data-theme="light"] .btn-refresh{background:var(--accent-lo);border-color:rgba(37,99,235,.3);color:var(--accent-hi)}
-[data-theme="light"] .btn-refresh:hover{background:rgba(37,99,235,.18);border-color:var(--accent)}
 [data-theme="light"] .modal-card{box-shadow:0 8px 30px rgba(0,0,0,.12)}
+/* En oscuro el logo del login va en blanco: el «KAOS» navy no se lee sobre navy */
+:root:not([data-theme="light"]) .login-logo{filter:brightness(0) invert(1)}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--txt);font-family:var(--sans);font-size:14px;min-height:100vh}
 
 /* Header */
-header{display:flex;align-items:center;gap:16px;padding:14px 28px;border-bottom:1px solid var(--border);background:var(--surface);position:sticky;top:0;z-index:10}
-.logo-mark{width:34px;height:34px;background:linear-gradient(135deg,var(--accent),#1e5fff);clip-path:polygon(0 100%,50% 0,100% 100%);flex-shrink:0}
-.brand h1{font-size:15px;font-weight:600}
-.brand span{font-size:11px;color:var(--txt-2);font-family:var(--mono)}
+header{display:flex;align-items:center;gap:16px;padding:12px 28px;border-bottom:3px solid var(--kaos-naranja);background:var(--header-bg);color:#fff;position:sticky;top:0;z-index:10}
+/* Logo de KAOS. El archivo es el de color; el filtro lo deja blanco, que es la
+   versión oficial sobre navy (la misma que usa G-activos en su barra). */
+.marca-logo{height:30px;width:auto;display:block;flex-shrink:0;filter:brightness(0) invert(1)}
+/* Con logo de la empresa (Configuración ERP) va ese, tal cual, sin el filtro:
+   es la marca del cliente y no se le cambian los colores. Mismo esquema que la
+   barra de KAOS: la empresa a la izquierda y KAOS en un sello a la derecha. */
+.marca-logo.es-empresa{height:36px;max-width:170px;object-fit:contain;filter:none}
+.kaos-sello{display:inline-flex;align-items:center;padding:6px 14px;border-radius:999px;border:1px solid hsl(0 0% 100% / .15);background:hsl(0 0% 100% / .05)}
+.kaos-sello img{height:15px;width:auto;display:block;filter:brightness(0) invert(1)}
+@media (max-width:1100px){.kaos-sello{display:none}}
+.brand{border-left:1px solid hsl(0 0% 100% / .22);padding-left:16px}
+.brand h1{font-family:var(--titulo);font-size:15px;font-weight:600;letter-spacing:.02em}
+.brand span{font-size:10px;color:hsl(215 25% 75%);font-family:var(--mono);text-transform:uppercase;letter-spacing:.14em}
+/* Los controles de la barra van sobre navy en los dos temas */
+header .btn-refresh,header .btn-tema,header .btn-ghost{background:hsl(0 0% 100% / .08);border:1px solid hsl(0 0% 100% / .18);color:#fff}
+header .btn-refresh:hover,header .btn-tema:hover,header .btn-ghost:hover{background:hsl(0 0% 100% / .16);border-color:hsl(0 0% 100% / .35);color:#fff}
+header .refresh-info{color:hsl(215 25% 78%)}
+header .refresh-info .cron{color:hsl(215 18% 60%)}
+header .user-chip{background:hsl(0 0% 100% / .08);border-color:hsl(0 0% 100% / .18);color:hsl(215 25% 85%)}
 .header-right{margin-left:auto;display:flex;align-items:center;gap:12px}
 .refresh-info{font-size:11px;color:var(--txt-2);font-family:var(--mono);text-align:right}
 .refresh-info span{display:block}
 .refresh-info .cron{color:var(--txt-3);font-size:10px}
-.btn-refresh{background:var(--accent-lo);border:1px solid rgba(61,127,255,.3);color:var(--accent-hi);padding:7px 14px;border-radius:var(--r);font-size:12px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s}
-.btn-refresh:hover{background:rgba(61,127,255,.2);border-color:var(--accent)}
+.btn-refresh{background:var(--accent-lo);border:1px solid var(--accent-bd);color:var(--accent-hi);padding:7px 14px;border-radius:var(--r);font-size:12px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s}
+.btn-refresh:hover{background:var(--accent-lo);border-color:var(--accent)}
 .btn-refresh.rotando svg{animation:spin 1s linear infinite}
 .btn-tema{background:none;border:1px solid var(--border);border-radius:var(--r);color:var(--txt-2);cursor:pointer;padding:6px 10px;font-size:16px;line-height:1;transition:border-color .15s,color .15s}
 .btn-tema:hover{border-color:var(--border-hi);color:var(--txt)}
@@ -55,7 +78,7 @@ header{display:flex;align-items:center;gap:16px;padding:14px 28px;border-bottom:
 .nav{display:flex;gap:2px;padding:0 28px;background:var(--surface);border-bottom:1px solid var(--border);overflow-x:auto}
 .nav-tab{background:none;border:none;color:var(--txt-2);padding:14px 22px;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;display:flex;align-items:center;gap:8px;transition:color .15s,border-color .15s}
 .nav-tab:hover{color:var(--txt)}
-.nav-tab.active{color:var(--accent-hi);border-bottom-color:var(--accent)}
+.nav-tab.active{color:var(--txt);border-bottom-color:var(--kaos-naranja)}
 .nav-tab .tab-num{font-family:var(--mono);font-size:10px;color:var(--txt-3);background:var(--card);padding:2px 6px;border-radius:4px}
 .nav-tab.active .tab-num{color:var(--accent);background:var(--accent-lo)}
 .nav-tab .count{background:var(--border);color:var(--txt);font-family:var(--mono);font-size:10px;padding:1px 7px;border-radius:20px;min-width:18px;text-align:center}
@@ -66,9 +89,9 @@ main{max-width:1400px;margin:0 auto;padding:28px 24px}
 .panel.active{display:block}
 /* Inventario sub-tabs */
 .inv-subtab{transition:color .15s,border-bottom-color .15s}
-.inv-subtab.active{color:var(--accent-hi)!important;border-bottom:2px solid var(--accent)!important;font-weight:600}
+.inv-subtab.active{color:var(--txt)!important;border-bottom:2px solid var(--kaos-naranja)!important;font-weight:600}
 .panel-head{display:flex;align-items:center;gap:14px;margin-bottom:20px}
-.panel-head h2{font-size:20px;font-weight:600}
+.panel-head h2{font-family:var(--titulo);font-size:20px;font-weight:600}
 .panel-head .desc{font-size:13px;color:var(--txt-2);margin-top:2px}
 .panel-head .tools{margin-left:auto;display:flex;gap:8px;align-items:center}
 
@@ -84,7 +107,7 @@ main{max-width:1400px;margin:0 auto;padding:28px 24px}
 .campo{display:flex;flex-direction:column;gap:6px;flex:1;min-width:160px}
 .campo label{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2)}
 .campo input,.campo select,.campo textarea{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:8px 12px;color:var(--txt);font-family:var(--sans);font-size:13px;transition:border-color .15s}
-.campo input:focus,.campo select:focus,.campo textarea:focus{outline:none;border-color:var(--accent)}
+.campo input:focus,.campo select:focus,.campo textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px hsl(21 89% 52% / .22)}
 .campo input::placeholder{color:var(--txt-3)}
 
 .btn{padding:9px 20px;border-radius:var(--r);border:none;cursor:pointer;font-family:var(--sans);font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:7px;transition:opacity .15s,transform .1s}
@@ -105,7 +128,7 @@ main{max-width:1400px;margin:0 auto;padding:28px 24px}
 /* Modals (Aprobar OC, Remisión, etc.) */
 .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:1000;padding:20px}
 .modal-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:22px 24px;width:100%;max-width:480px;box-shadow:0 12px 40px rgba(0,0,0,.4);max-height:90vh;overflow-y:auto}
-.modal-card h3{margin:0 0 6px 0;font-size:17px;color:var(--txt)}
+.modal-card h3{margin:0 0 6px 0;font-family:var(--titulo);font-size:17px;font-weight:600;color:var(--txt)}
 /* Cierre siempre visible en la esquina, independiente de .modal-actions */
 .modal-x{position:absolute;top:12px;right:14px;background:none;border:none;color:var(--txt-2);
   font-size:22px;line-height:1;cursor:pointer;padding:2px 6px;border-radius:6px}
@@ -124,7 +147,7 @@ main{max-width:1400px;margin:0 auto;padding:28px 24px}
 
 .estado{padding:10px 14px;border-radius:var(--r);font-size:13px;display:none;align-items:center;gap:10px;margin-top:12px}
 .estado.visible{display:flex}
-.estado.cargando{background:var(--accent-lo);border:1px solid rgba(61,127,255,.3);color:var(--accent-hi)}
+.estado.cargando{background:var(--accent-lo);border:1px solid var(--accent-bd);color:var(--accent-hi)}
 .estado.ok{background:var(--success-lo);border:1px solid rgba(46,184,126,.3);color:var(--success)}
 .estado.error{background:var(--danger-lo);border:1px solid rgba(224,80,80,.3);color:var(--danger)}
 
@@ -150,12 +173,12 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
 .tag{font-size:10px;padding:2px 7px;border-radius:20px;font-family:var(--mono);display:inline-block;font-weight:500}
 .tag-pendiente{background:var(--card-hi);color:var(--txt-2);border:1px solid var(--border-hi)}
 .tag-gestionado{background:var(--success-lo);color:var(--success);border:1px solid rgba(46,184,126,.3)}
-.tag-parcial{background:var(--accent-lo);color:var(--accent-hi);border:1px solid rgba(61,127,255,.3)}
+.tag-parcial{background:var(--accent-lo);color:var(--accent-hi);border:1px solid var(--accent-bd)}
 .tag-aprobado{background:var(--success-lo);color:var(--success);border:1px solid rgba(46,184,126,.3)}
 .tag-cerrado{background:var(--success-lo);color:var(--success);border:1px solid rgba(46,184,126,.3)}
 .tag-anulado{background:var(--danger-lo);color:var(--danger);border:1px solid rgba(224,80,80,.3)}
 .tag-borrador{background:var(--card);color:var(--txt-2);border:1px solid var(--border)}
-.tag-aprobada{background:var(--accent-lo);color:var(--accent-hi);border:1px solid rgba(61,127,255,.3)}
+.tag-aprobada{background:var(--accent-lo);color:var(--accent-hi);border:1px solid var(--accent-bd)}
 .tag-pagada{background:var(--success-lo);color:var(--success);border:1px solid rgba(46,184,126,.3)}
 .tag-entregada{background:var(--success-lo);color:var(--success);border:1px solid rgba(46,184,126,.3)}
 .tag-finalizada{background:var(--success);color:#fff;border:1px solid var(--success)}
@@ -202,12 +225,13 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
 <body>
 
 <header>
-  <div class="logo-mark" id="logo-display"></div>
+  <img class="marca-logo" id="logo-empresa" src="/marca/kaos-logo.png" width="493" height="177" alt="KAOS">
   <div class="brand">
-    <h1>ERP — CivilTech</h1>
-    <span>Centro operativo de requerimientos, órdenes de compra y costos</span>
+    <h1>ERP</h1>
+    <span>Requerimientos · compras · costos</span>
   </div>
   <div class="header-right">
+    <div class="kaos-sello" title="Funciona con KAOS"><img src="/marca/kaos-logo.png" width="493" height="177" alt="KAOS"></div>
     <div class="refresh-info">
       <span id="ultima-act">— sin actualizar —</span>
       <span class="cron">auto-refresh 1h</span>
@@ -227,8 +251,8 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
 <!-- ── Login overlay ──────────────────────────────────────────────────────── -->
 <div id="login-overlay" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:9999;align-items:center;justify-content:center;flex-direction:column;gap:20px">
   <div style="text-align:center;max-width:400px;padding:40px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
-    <div style="font-size:28px;margin-bottom:8px">🔐</div>
-    <h2 style="font-size:18px;font-weight:700;margin-bottom:6px">ERP Civiltech</h2>
+    <img class="login-logo" src="/marca/kaos-logo.png" width="493" height="177" alt="KAOS" style="height:56px;width:auto;margin:0 auto 14px;display:block">
+    <h2 style="font-family:var(--titulo);font-size:18px;font-weight:600;margin-bottom:6px">ERP</h2>
     <p style="font-size:12px;color:var(--txt-2);margin-bottom:24px">Inicia sesión con tu cuenta corporativa de Microsoft para continuar.</p>
     <button id="btn-ms-login" class="btn btn-primary" style="width:100%;justify-content:center;gap:8px" onclick="iniciarLoginMicrosoft()">
       <svg width="16" height="16" viewBox="0 0 21 21" fill="none"><rect x="1" y="1" width="9" height="9" fill="#f25022"/><rect x="11" y="1" width="9" height="9" fill="#7fba00"/><rect x="1" y="11" width="9" height="9" fill="#00a4ef"/><rect x="11" y="11" width="9" height="9" fill="#ffb900"/></svg>
@@ -1179,7 +1203,7 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
     </div>
     <div style="padding:20px;display:grid;gap:18px">
       <div>
-        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:500">Logo (se imprime en cada OC)</label>
+        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--txt-2);font-weight:500">Logo de la empresa (barra superior y cada OC, OS y remisión)</label>
         <div style="margin-top:8px;display:flex;gap:10px;align-items:center">
           <div id="logo-preview" style="width:160px;height:60px;border:1px dashed var(--border-hi);border-radius:4px;display:grid;place-items:center;color:var(--txt-3);font-size:11px;overflow:hidden;background:var(--surface)">sin logo</div>
           <div>
@@ -2100,22 +2124,25 @@ function toggleTema() {
   localStorage.setItem('erp-tema', nuevo);
   _actualizarIconoTema(nuevo);
 }
+// Logo de la empresa en la barra; sin logo (o si no carga) queda el de KAOS.
+function _aplicarLogoHeader(logo) {
+  const img = document.getElementById('logo-empresa');
+  if (!img) return;
+  const kaos = () => {
+    img.onerror = null;
+    img.src = '/marca/kaos-logo.png';
+    img.alt = 'KAOS';
+    img.classList.remove('es-empresa');
+  };
+  if (!logo) return kaos();
+  img.onerror = kaos;
+  img.src = logo;
+  img.alt = 'Logo de la empresa';
+  img.classList.add('es-empresa');
+}
 function _actualizarIconoTema(tema) {
   const btn = document.getElementById('btn-tema');
   if (btn) btn.textContent = tema === 'dark' ? '☀' : '🌙';
-}
-function _aplicarLogoHeader(cfg) {
-  const el    = document.getElementById('logo-display');
-  const brand = document.querySelector('header .brand');
-  if (!el) return;
-  if (cfg && cfg.logo) {
-    el.innerHTML      = `<img src="${cfg.logo}" style="height:36px;max-width:130px;object-fit:contain;display:block">`;
-    el.style.background = 'none';
-    el.style.clipPath   = 'none';
-    if (brand) brand.style.display = 'none';
-  } else {
-    if (brand) brand.style.display = '';
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6612,6 +6639,7 @@ async function guardarConfig(){
       fetch('/config/observacionesDefault', { method:'POST', headers:hdr, body: body(condiciones) }),
       fetch('/config/ivaDefault', { method:'POST', headers:hdr, body: body(iva) }),
     ]);
+    _aplicarLogoHeader(_logoDataUrl);
     $('#msg-cfg').textContent = '✓ Guardado';
     setTimeout(cerrarConfig, 900);
   }catch(e){
@@ -6668,7 +6696,7 @@ async function guardarConfig(){
   try {
     const cfg = await fetch('/config').then(r => r.json());
     window.IVA_DEFAULT = Number(cfg.ivaDefault) || 19;
-    _aplicarLogoHeader(cfg);
+    _aplicarLogoHeader(cfg.logo);
   } catch { window.IVA_DEFAULT = 19; }
   await cargarTesoreria(); // antes de refrescarTodo: renderOrdenes ya lo necesita
   await refrescarTodo();
