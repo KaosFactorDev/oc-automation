@@ -2291,6 +2291,7 @@ function verOS(id) {
         <a class="btn btn-ghost" href="/os/${esc(os.id)}/xlsx">Excel</a>
         <a class="btn btn-ghost" href="/os/${esc(os.id)}/html" target="_blank">PDF</a>
         ${os.pdfUrl ? `<a class="btn btn-ghost" href="${esc(os.pdfUrl)}" target="_blank" rel="noopener">☁️ PDF SharePoint</a>` : ''}
+        <button class="btn btn-ghost btn-sm" id="os-ver-historial">Historial</button>
         ${puedeAnular  ? `<button class="btn btn-danger btn-sm"  id="os-ver-anular">Anular</button>` : ''}
         ${puedeEditar  ? `<button class="btn btn-ghost btn-sm"   id="os-ver-editar">Editar borrador</button>` : ''}
         ${puedePagar   ? `<button class="btn btn-primary"        id="os-ver-pagar">Pagada</button>` : ''}
@@ -2311,6 +2312,80 @@ function verOS(id) {
   if (bAprobar) bAprobar.onclick = () => { wrap.remove(); aprobarOS(id); };
   if (bPagar)   bPagar.onclick   = () => { wrap.remove(); pagarOS(id); };
   if (bCumplir) bCumplir.onclick = () => { wrap.remove(); cumplirOS(id); };
+  wrap.querySelector('#os-ver-historial').onclick = () =>
+    verHistorial('os', id, os.numeroOS || 'OS en borrador');
+}
+
+// ─── Historial de una orden (bitácora) ───────────────────────────────────────
+// Lo que pasó con la orden: quién, cuándo, con qué motivo y qué cambió. Los
+// eventos «previos» son de antes de que existiera la bitácora y salen de las
+// columnas de la orden: su «quién» puede ser la cuenta del servidor.
+const ACCIONES_HISTORIAL = {
+  crear: 'Creada', editar: 'Editada', aprobar: 'Aprobada', anular: 'Anulada',
+  pagar: 'Marcada como pagada', entregar: 'Marcada como entregada', cumplir: 'Marcada como cumplida',
+  enviar_tesoreria: 'Enviada a tesorería', vincular_requerimiento: 'Vinculada a un requerimiento',
+  asignar_proyecto: 'Proyecto asignado',
+};
+const ORIGENES_HISTORIAL = { 'api-rrhh': 'vía RRHH (KAOS)', sistema: 'proceso automático' };
+
+const CAMPOS_DINERO_HISTORIAL = new Set(['subtotal', 'valor', 'iva', 'total']);
+function valorHistorial(v, campo) {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'boolean') return v ? 'Sí' : 'No';
+  if (typeof v === 'number') return CAMPOS_DINERO_HISTORIAL.has(campo) ? fmt$(v) : String(v);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(String(v))) return fmtFecha(v);
+  return String(v);
+}
+
+function lineaItemHistorial(it) {
+  if (!it) return '—';
+  const desc = it.descripcion || it.insumo || '—';
+  return `${desc} · ${it.cantidad ?? 0} ${it.unidad || ''} × ${fmt$(it.precioUnitario || 0)}`;
+}
+
+async function verHistorial(recurso, id, titulo) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal-card" style="max-width:680px;position:relative">
+      <button class="modal-x" title="Cerrar" aria-label="Cerrar">&times;</button>
+      <h3 style="padding-right:28px">Historial · ${esc(titulo)}</h3>
+      <div id="hist-cuerpo" style="max-height:60vh;overflow-y:auto;margin-top:12px">
+        <p class="text-muted">Cargando…</p>
+      </div>
+      <div class="modal-actions"><button class="btn btn-ghost">Cerrar</button></div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.querySelectorAll('.modal-x, .modal-actions .btn').forEach(b => b.onclick = () => wrap.remove());
+  const cuerpo = wrap.querySelector('#hist-cuerpo');
+
+  try {
+    const r = await fetch(`/${recurso}/${encodeURIComponent(id)}/historial`);
+    const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || 'Error');
+    const eventos = data.historial || [];
+    if (!eventos.length) { cuerpo.innerHTML = '<p class="text-muted">Sin eventos registrados.</p>'; return; }
+
+    cuerpo.innerHTML = eventos.slice().reverse().map(e => {
+      const quien = e.usuarioNombre ? `${esc(e.usuarioNombre)} (${esc(e.usuario)})` : esc(e.usuario || '—');
+      const origen = ORIGENES_HISTORIAL[e.origen] ? ` · ${ORIGENES_HISTORIAL[e.origen]}` : '';
+      const campos = (e.cambios?.campos || []).map(c =>
+        `<li><strong>${esc(c.etiqueta)}:</strong> ${esc(valorHistorial(c.antes, c.campo))} → ${esc(valorHistorial(c.despues, c.campo))}</li>`).join('');
+      const items = (e.cambios?.items || []).map(l =>
+        `<li><strong>Ítem ${l.linea} ${esc(l.tipo)}:</strong> ${l.antes ? esc(lineaItemHistorial(l.antes)) : ''}${l.antes && l.despues ? ' → ' : ''}${l.despues ? esc(lineaItemHistorial(l.despues)) : ''}</li>`).join('');
+      return `
+        <div style="border-left:3px solid var(--border);padding:6px 0 10px 12px;margin-bottom:6px">
+          <div style="font-size:13px"><strong>${esc(ACCIONES_HISTORIAL[e.accion] || e.accion)}</strong>
+            ${e.previo ? '<span class="tag tag-borrador" title="Registrado antes de que existiera la bitácora: puede no ser la persona real">previo</span>' : ''}
+          </div>
+          <div class="text-muted" style="font-size:11px;margin-top:2px">${esc(new Date(e.fecha).toLocaleString('es-CO'))} · ${quien}${esc(origen)}</div>
+          ${e.motivo ? `<div style="font-size:12px;margin-top:4px">Motivo: ${esc(e.motivo)}</div>` : ''}
+          ${campos || items ? `<ul style="font-size:12px;margin:6px 0 0 16px;padding:0">${campos}${items}</ul>` : ''}
+        </div>`;
+    }).join('');
+  } catch (err) {
+    cuerpo.innerHTML = `<p style="color:var(--danger,#c33)">No se pudo cargar el historial: ${esc(err.message)}</p>`;
+  }
 }
 
 // ─── OS: edición de borrador ──────────────────────────────────────────────────
@@ -4565,6 +4640,7 @@ function verOrden(id) {
         <a class="btn btn-ghost" href="/oc/${esc(o.id)}.xlsx">Excel</a>
         <a class="btn btn-ghost" href="/oc/${esc(o.id)}.html" target="_blank">PDF</a>
         ${o.pdfUrl ? `<a class="btn btn-ghost" href="${esc(o.pdfUrl)}" target="_blank" rel="noopener">☁️ PDF SharePoint</a>` : ''}
+        <button class="btn btn-ghost btn-sm" id="oc-ver-historial">Historial</button>
         ${puedeVincular  ? `<button class="btn btn-ghost btn-sm" id="oc-ver-vincular">Vincular req.</button>` : ''}
         ${puedeAnular    ? `<button class="btn btn-danger"  id="oc-ver-anular">Anular</button>` : ''}
         ${puedeEnviarTes ? `<button class="btn btn-primary" id="oc-ver-tesoreria">Enviar a tesorería</button>` : ''}
@@ -4594,6 +4670,8 @@ function verOrden(id) {
   if (bTesoreria) bTesoreria.onclick = () => { cerrar(); enviarATesoreria(id); };
   const bEditar = wrap.querySelector('#oc-btn-editar');
   if (bEditar) bEditar.onclick = () => activarEdicionOC(wrap, o, itemsOC);
+  wrap.querySelector('#oc-ver-historial').onclick = () =>
+    verHistorial('ordenes', id, o.numeroOC || 'OC en borrador');
 }
 
 // ─── OC: edición de borrador ──────────────────────────────────────────────────
@@ -4808,10 +4886,19 @@ function descargarRegistroOCs(){
 async function accionOC(id, accion){
   if (accion === 'aprobar') return aprobarOCConModal(id);
   if (accion === 'entregar') return accionOCEntregar(id);
-  const confirms = { anular: '¿Anular esta OC?\n\nSi está asociada a una remisión, esa remisión se anulará (o se marcará para reemplazo si tenía otras OC).', pagar: '¿Marcar como pagada?' };
-  if (!confirm(confirms[accion])) return;
+  let body;
+  if (accion === 'anular') {
+    // El motivo queda en la orden y en su historial: es lo que responde, meses
+    // después, por qué no siguió.
+    const motivo = prompt('¿Por qué se anula esta OC?\n\nSi está asociada a una remisión, esa remisión se anulará (o se marcará para reemplazo si tenía otras OC).');
+    if (motivo === null) return;
+    if (!motivo.trim()) { alert('Anular exige un motivo.'); return; }
+    body = JSON.stringify({ motivo: motivo.trim() });
+  } else if (!confirm('¿Marcar como pagada?')) return;
   try{
-    const resp = await fetch(`/ordenes/${encodeURIComponent(id)}/${accion}`, { method: 'POST' });
+    const resp = await fetch(`/ordenes/${encodeURIComponent(id)}/${accion}`, {
+      method: 'POST', headers: body ? { 'Content-Type': 'application/json' } : undefined, body,
+    });
     const data = await resp.json();
     if (!resp.ok || data.error) throw new Error(data.error || 'Error');
     if (accion === 'anular' && Array.isArray(data.remisionesAfectadas) && data.remisionesAfectadas.length){
