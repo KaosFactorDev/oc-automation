@@ -2,6 +2,26 @@
 
 Comandos, respaldos y los problemas con los que ya nos tropezamos.
 
+## En producción, las migraciones se aplican solas
+
+Desde el 16/10/2026, el workflow de deploy (`.github/workflows/deploy.yml`) corre
+`deploy/aplicar-migraciones.sh` en el VPS **después** de sincronizar el código y
+**antes** de reconstruir los contenedores:
+
+- Aplica, en orden, las migraciones de `supabase/migrations` que no estén en
+  `supabase_migrations.schema_migrations` (la misma tabla que usa `db:push`).
+- Cada migración va en una transacción junto con su registro: o quedan las dos,
+  o ninguna.
+- Si una falla, el deploy se detiene sin reconstruir y la versión anterior
+  sigue corriendo.
+
+Para ver qué aplicaría, en el VPS y desde la carpeta del proyecto:
+`deploy/aplicar-migraciones.sh --en-seco`.
+
+Ya no hace falta aplicar nada a mano antes de mergear a `main`. Las reglas
+siguen igual: solo migraciones nuevas, que no rompan el código que está
+corriendo mientras se despliega, y numeradas por encima de la última de `main`.
+
 ## Comandos
 
 | Comando | Qué hace |

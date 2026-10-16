@@ -606,7 +606,7 @@ npm run dev                 # http://localhost:3001
 
 ## 11. Despliegue
 
-**a) La migración va primero, y a mano.** El deploy no aplica migraciones. Aplícala en el VPS **antes** de mergear a `main`, como se aplican las demás (ver `docs/operacion-base-de-datos.md`). Las columnas anulables, el índice y la clave de configuración no le cambian nada al código que ya está desplegado.
+**a) La migración va primero.** Desde el 16/10/2026 el deploy la aplica solo, antes de reconstruir los contenedores (`deploy/aplicar-migraciones.sh`). Las columnas anulables, el índice y la clave de configuración no le cambian nada al código que ya está desplegado.
 
 **b) Llegar apagado.** Mergea a `main` **sin** `RRHH_API_KEY` en el `.env` del VPS. La superficie llega inerte (`404`) y se enciende poniendo la variable. **Eso separa «desplegar» de «activar».**
 
