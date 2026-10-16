@@ -28,6 +28,7 @@ const CABECERA = `
   o.aprobado_por, o.fecha_aprobacion, o.anulado_por, o.fecha_anulacion,
   o.motivo_anulacion, o.pagado, o.pagado_por, o.fecha_pago,
   o.cumplido, o.cumplido_por, o.fecha_cumplido, o.pdf_url, o.sp_id,
+  o.papelera_en, o.papelera_por, o.papelera_motivo,
   p.codigo AS proyecto,
   pr.razon_social AS proveedor_nombre`;
 
@@ -75,6 +76,10 @@ function mapear(o, items = []) {
     fechaCumplido:               iso(o.fecha_cumplido),
     pdfUrl:                      o.pdf_url || '',
     itemsJson:                   JSON.stringify(items),
+    // En la papelera: no aparece en listados ni en Control de Costos.
+    papeleraEn:                  iso(o.papelera_en),
+    papeleraPor:                 o.papelera_por || '',
+    papeleraMotivo:              o.papelera_motivo || '',
     sp_id:                       o.sp_id,
   };
 }
@@ -113,7 +118,8 @@ async function armar(cabeceras) {
 }
 
 async function listar({ estado = null, proyectoId = null } = {}) {
-  const cond = [];
+  // Lo que está en la papelera no existe para los listados.
+  const cond = ['o.papelera_en IS NULL'];
   const vals = [];
   if (estado)     { vals.push(estado);     cond.push(`o.estado = $${vals.length}`); }
   if (proyectoId) { vals.push(proyectoId); cond.push(`o.proyecto_id = $${vals.length}`); }
@@ -282,8 +288,9 @@ async function crearDesdeApi(datos, items, { aprobar: aprobarla, formatear }) {
 /** Las órdenes de servicio con ese origen_solicitud_id (cero o una). */
 async function porOrigenSolicitud(origenSolicitudId) {
   return pg.rows(
-    `SELECT o.id, o.numero_os, o.estado, o.pagado, o.cumplido,
-            o.valor, o.iva, o.total, o.fecha_creacion,
+    `SELECT o.id, o.numero_os,
+            CASE WHEN o.papelera_en IS NOT NULL THEN 'papelera' ELSE o.estado END AS estado,
+            o.pagado, o.cumplido, o.valor, o.iva, o.total, o.fecha_creacion,
             CASE WHEN p.origen = 'kaos' AND p.nombre <> '' THEN p.nombre ELSE p.codigo END AS proyecto
        FROM erp.ordenes_servicio o
        LEFT JOIN erp.proyectos p ON p.id = o.proyecto_id
