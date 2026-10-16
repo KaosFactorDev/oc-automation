@@ -1848,6 +1848,157 @@ document.addEventListener('mousedown', e => {
   _cerrarModal(el);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Ventanas de confirmación propias (reemplazan confirm() y prompt())
+// ─────────────────────────────────────────────────────────────────────────────
+// Las del navegador tienen dos problemas que acá pesan:
+//   · Se pueden apagar sin querer («Evitar que esta página cree más diálogos»):
+//     desde ahí confirm() responde que no y prompt() vacío, EN SILENCIO, y una
+//     acción como anular o mandar a la papelera deja de funcionar sin aviso.
+//   · No permiten validar ni mostrar nada más que texto plano.
+//
+// Estas usan el sistema de modales de la consola, así que el cierre universal
+// las maneja igual que a las demás: Escape cierra la de más arriba, y un clic
+// en el fondo solo cierra las que no tienen campos. Cerrarlas así cuenta como
+// CANCELAR: la promesa siempre se resuelve, nunca queda colgada.
+//
+// ⚠ Son asíncronas: hay que esperarlas con `await`. Un `if (!pedirConfirmacion(...))`
+//   sin await siempre es falso (una promesa es «verdadera») y la acción seguiría
+//   sin confirmar.
+
+// `cuerpo` es HTML que arma quien llama, con todo lo variable ya pasado por esc().
+// Los botones con `oculto` no se pintan en la barra: los pinta el cuerpo con el
+// mismo data-dlg (así funciona pedirOpcion).
+function _dialogo({ titulo, mensaje, cuerpo = '', botones, valorCancelar = null, alAbrir }) {
+  return new Promise((resolver) => {
+    const previo = document.activeElement;
+    let resuelto = false;
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-backdrop';
+    // Encima de cualquier modal que ya esté abierto (se abren desde otros).
+    wrap.style.zIndex = String(1100 + _modalesAbiertos().length);
+    wrap.innerHTML = `
+      <div class="modal-card" role="dialog" aria-modal="true" style="max-width:500px">
+        <h3 style="margin:0 0 10px">${esc(titulo)}</h3>
+        ${mensaje ? `<p style="white-space:pre-line;margin:0 0 12px;font-size:13px;line-height:1.5">${esc(mensaje)}</p>` : ''}
+        ${cuerpo}
+        <div class="modal-actions">
+          ${botones.map((b, i) => b.oculto ? '' : `<button class="btn ${b.clase || 'btn-ghost'}" data-dlg="${i}">${esc(b.texto)}</button>`).join('')}
+        </div>
+      </div>`;
+
+    const obs = new MutationObserver(() => { if (!wrap.isConnected) terminar(valorCancelar); });
+    function terminar(valor) {
+      if (resuelto) return;
+      resuelto = true;
+      obs.disconnect();
+      wrap.remove();
+      if (previo && typeof previo.focus === 'function' && previo.isConnected) previo.focus();
+      resolver(valor);
+    }
+
+    wrap.addEventListener('click', (e) => {
+      const i = e.target.closest('[data-dlg]')?.dataset.dlg;
+      if (i == null) return;
+      const b = botones[Number(i)];
+      const valor = b.alElegir ? b.alElegir(wrap) : b.valor;
+      if (valor !== undefined) terminar(valor);   // undefined = no cerrar (validación)
+    });
+
+    document.body.appendChild(wrap);
+    obs.observe(document.body, { childList: true });
+    if (alAbrir) alAbrir(wrap, terminar);
+    else wrap.querySelector('.btn-primary, .btn-danger, .btn-success')?.focus();
+  });
+}
+
+/**
+ * Sí / no. Devuelve true o false.
+ * @param {string} mensaje
+ * @param {object} [o] { titulo, aceptar, cancelar, peligro }
+ */
+function pedirConfirmacion(mensaje, o = {}) {
+  return _dialogo({
+    titulo: o.titulo || 'Confirmar',
+    mensaje,
+    valorCancelar: false,
+    botones: [
+      { texto: o.cancelar || 'Cancelar', valor: false },
+      { texto: o.aceptar || 'Aceptar', valor: true, clase: o.peligro ? 'btn-danger' : 'btn-primary' },
+    ],
+  });
+}
+
+/**
+ * Un texto, normalmente un motivo. Devuelve el texto (sin espacios a los
+ * lados) o null si se canceló. Con `obligatorio`, no deja aceptar vacío y lo
+ * dice en la misma ventana.
+ * @param {string} mensaje
+ * @param {object} [o] { titulo, etiqueta, valor, placeholder, obligatorio=true, aceptar, peligro }
+ */
+function pedirTexto(mensaje, o = {}) {
+  const obligatorio = o.obligatorio !== false;
+  const aceptar = (wrap) => {
+    const v = wrap.querySelector('#dlg-texto').value.trim();
+    if (obligatorio && !v) {
+      wrap.querySelector('#dlg-error').textContent = 'Este campo es obligatorio.';
+      wrap.querySelector('#dlg-texto').focus();
+      return undefined;
+    }
+    return v;
+  };
+  return _dialogo({
+    titulo: o.titulo || 'Escribe',
+    mensaje,
+    valorCancelar: null,
+    cuerpo: `
+      <label style="display:block;font-size:11px;color:var(--txt-2)">${esc(o.etiqueta || (obligatorio ? 'Motivo (obligatorio)' : 'Motivo (opcional)'))}
+        <textarea id="dlg-texto" rows="3" placeholder="${esc(o.placeholder || '')}"
+          style="width:100%;margin-top:4px;resize:vertical">${esc(o.valor || '')}</textarea>
+      </label>
+      <div id="dlg-error" style="color:var(--danger,#c33);font-size:12px;min-height:16px;margin-top:4px"></div>`,
+    botones: [
+      { texto: 'Cancelar', valor: null },
+      { texto: o.aceptar || 'Aceptar', alElegir: aceptar, clase: o.peligro ? 'btn-danger' : 'btn-primary' },
+    ],
+    alAbrir: (wrap, terminar) => {
+      const t = wrap.querySelector('#dlg-texto');
+      t.focus();
+      t.addEventListener('input', () => { wrap.querySelector('#dlg-error').textContent = ''; });
+      // Ctrl+Enter acepta; Enter solo hace salto de línea.
+      t.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          const v = aceptar(wrap);
+          if (v !== undefined) terminar(v);
+        }
+      });
+    },
+  });
+}
+
+/**
+ * Una entre varias opciones. Devuelve el `valor` de la elegida, o null si se
+ * canceló.
+ * @param {string} mensaje
+ * @param {Array<{valor, texto, detalle?, clase?}>} opciones
+ * @param {object} [o] { titulo }
+ */
+function pedirOpcion(mensaje, opciones, o = {}) {
+  return _dialogo({
+    titulo: o.titulo || 'Elige',
+    mensaje,
+    valorCancelar: null,
+    cuerpo: `<div style="display:flex;flex-direction:column;gap:8px">
+      ${opciones.map((op, i) => `
+        <button class="btn ${op.clase || 'btn-ghost'}" data-dlg="${i + 1}" style="text-align:left;display:flex;flex-direction:column;align-items:flex-start;white-space:normal;height:auto;padding:10px 12px">
+          <strong>${esc(op.texto)}</strong>${op.detalle ? `<div style="font-size:11px;font-weight:400;opacity:.8;margin-top:2px">${esc(op.detalle)}</div>` : ''}
+        </button>`).join('')}
+    </div>`,
+    botones: [{ texto: 'Cancelar', valor: null }, ...opciones.map(op => ({ texto: '', valor: op.valor, oculto: true }))],
+    alAbrir: (wrap) => wrap.querySelector('[data-dlg="1"]')?.focus(),
+  });
+}
+
 function _coberturaReq(reqId, items) {
   const norm = s => String(s || '').trim().toUpperCase().replace(/\s+/g, ' ');
   const cubierto = {};
@@ -2535,12 +2686,12 @@ function corregirOrden(recurso, doc) {
 // Para lo que no debía existir (un duplicado, un error). Distinto de anular: la
 // orden desaparece de todo, lo que generó se deshace, y se puede restaurar.
 async function enviarAPapelera(recurso, id, titulo) {
-  const motivo = prompt(`¿Por qué va ${titulo} a la papelera?\n\nÚsala para lo que no debía existir (un duplicado, un error). Si la orden existió y no sigue, anúlala.`);
+  const motivo = await pedirTexto('Úsala para lo que no debía existir (un duplicado, un error). Si la orden existió y no sigue, anúlala.',
+    { titulo: `¿Por qué va ${titulo} a la papelera?`, aceptar: 'Continuar' });
   if (motivo === null) return;
-  if (!motivo.trim()) { alert('La papelera exige un motivo.'); return; }
   const url = `/${recurso}/${encodeURIComponent(id)}/papelera`;
   const pedir = (simular) => fetch(url + (simular ? '?simular=1' : ''), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ motivo: motivo.trim() }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ motivo }),
   }).then(async r => ({ ok: r.ok, data: await r.json().catch(() => ({})) }));
   try {
     const vista = await pedir(true);
@@ -2552,10 +2703,10 @@ async function enviarAPapelera(recurso, id, titulo) {
       ef.precios ? '• Sus precios dejan de sugerirse' : null,
       ef.tesoreria ? `• Su solicitud de pago ${ef.tesoreria.egresoId} se retira en tesorería (queda RECHAZADA y se avisa a los pagadores)` : null,
     ].filter(Boolean);
-    const texto = `${titulo} va a la papelera.\n\nDeja de aparecer en listados y en Control de Costos.` +
+    const texto = 'Deja de aparecer en listados y en Control de Costos.' +
       (efectos.length ? `\n\nTambién:\n${efectos.join('\n')}` : '') +
-      '\n\nTodo se puede restaurar desde la Papelera. ¿Continuar?';
-    if (!confirm(texto)) return;
+      '\n\nTodo se puede restaurar desde la Papelera.';
+    if (!(await pedirConfirmacion(texto, { titulo: `${titulo} va a la papelera`, aceptar: 'Mandar a la papelera', peligro: true }))) return;
     const r = await pedir(false);
     if (!r.ok) { alert(r.data.error || 'Error'); return; }
     if (recurso === 'ordenes') await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
@@ -2613,12 +2764,12 @@ async function verPapelera() {
     if (h) { const [t, id, n] = h.split('|'); verHistorial(t === 'orden_compra' ? 'ordenes' : 'os', id, n || 'Borrador'); }
     if (rs) {
       const [t, id, n] = rs.split('|');
-      const motivo = prompt(`¿Por qué se restaura ${n || 'esta orden'}?`);
+      const motivo = await pedirTexto('Vuelve a aparecer en listados y en Control de Costos, y se rehace lo que la papelera deshizo.',
+        { titulo: `¿Por qué se restaura ${n || 'esta orden'}?`, aceptar: 'Restaurar' });
       if (motivo === null) return;
-      if (!motivo.trim()) { alert('Restaurar exige un motivo.'); return; }
       const recurso = t === 'orden_compra' ? 'ordenes' : 'os';
       const r = await fetch(`/${recurso}/${encodeURIComponent(id)}/restaurar`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ motivo: motivo.trim() }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ motivo }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { alert(data.error || 'Error'); return; }
@@ -2827,7 +2978,7 @@ function editarOSModal(id) {
 }
 
 async function aprobarOS(id) {
-  if (!confirm('¿Aprobar esta Orden de Servicio? Se le asignará el número definitivo del contador.')) return;
+  if (!(await pedirConfirmacion('Se le asignará el número definitivo del contador.', { titulo: '¿Aprobar esta orden de servicio?', aceptar: 'Aprobar' }))) return;
   try {
     const r = await fetch(`/os/${id}/aprobar`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     const data = await r.json();
@@ -2838,8 +2989,8 @@ async function aprobarOS(id) {
 }
 
 async function anularOS(id) {
-  const motivo = prompt('Motivo de anulación:');
-  if (!motivo) return;
+  const motivo = await pedirTexto('La orden queda anulada y visible, con su número.', { titulo: '¿Por qué se anula esta orden de servicio?', aceptar: 'Anular', peligro: true });
+  if (motivo === null) return;
   try {
     const r = await fetch(`/os/${id}/anular`, {
       method: 'POST',
@@ -2853,7 +3004,7 @@ async function anularOS(id) {
 }
 
 async function pagarOS(id) {
-  if (!confirm('¿Marcar esta Orden de Servicio como pagada?')) return;
+  if (!(await pedirConfirmacion('', { titulo: '¿Marcar esta orden de servicio como pagada?', aceptar: 'Marcar pagada' }))) return;
   try {
     const r = await fetch(`/os/${id}/pagar`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     const data = await r.json();
@@ -2863,7 +3014,7 @@ async function pagarOS(id) {
 }
 
 async function cumplirOS(id) {
-  if (!confirm('¿Marcar esta Orden de Servicio como cumplida?')) return;
+  if (!(await pedirConfirmacion('', { titulo: '¿Marcar esta orden de servicio como cumplida?', aceptar: 'Marcar cumplida' }))) return;
   try {
     const r = await fetch(`/os/${id}/cumplir`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     const data = await r.json();
@@ -3445,9 +3596,10 @@ function renderRequerimientos(){
 }
 
 async function anularRequerimiento(id, consecutivo){
-  const motivo = prompt(`Anular requerimiento ${consecutivo}.\n\nEscribe el motivo (opcional):`);
+  // Una sola ventana: el motivo (opcional) y la confirmación van juntos.
+  const motivo = await pedirTexto('Esta acción no se puede deshacer.',
+    { titulo: `¿Anular el requerimiento ${consecutivo}?`, obligatorio: false, aceptar: 'Anular', peligro: true });
   if (motivo === null) return; // canceló
-  if (!confirm(`¿Confirmas la anulación de ${consecutivo}?\n\nEsta acción no se puede deshacer.`)) return;
   try {
     const res = await fetch(`/requerimientos/${encodeURIComponent(id)}/anular`, {
       method: 'POST',
@@ -4142,7 +4294,8 @@ async function confirmarGenerarOC(){
   }
 
   const resumen = Object.values(porProv).map(p => `  • ${p.nombre} — ${p.items} ítem(s)`).join('\n');
-  if (!confirm(`Se generarán ${Object.keys(porProv).length} OC(s) en estado borrador:\n\n${resumen}\n\n¿Continuar?`)) return;
+  if (!(await pedirConfirmacion(`Quedan en estado borrador:\n\n${resumen}`,
+    { titulo: `¿Generar ${Object.keys(porProv).length} OC(s)?`, aceptar: 'Generar' }))) return;
 
   const btn = $('#btn-generar-oc-req');
   btn.disabled = true;
@@ -5185,11 +5338,11 @@ async function accionOC(id, accion){
   if (accion === 'anular') {
     // El motivo queda en la orden y en su historial: es lo que responde, meses
     // después, por qué no siguió.
-    const motivo = prompt('¿Por qué se anula esta OC?\n\nSi está asociada a una remisión, esa remisión se anulará (o se marcará para reemplazo si tenía otras OC).');
+    const motivo = await pedirTexto('Si está asociada a una remisión, esa remisión se anulará (o se marcará para reemplazo si tenía otras OC).',
+      { titulo: '¿Por qué se anula esta OC?', aceptar: 'Anular', peligro: true });
     if (motivo === null) return;
-    if (!motivo.trim()) { alert('Anular exige un motivo.'); return; }
-    body = JSON.stringify({ motivo: motivo.trim() });
-  } else if (!confirm('¿Marcar como pagada?')) return;
+    body = JSON.stringify({ motivo });
+  } else if (!(await pedirConfirmacion('', { titulo: '¿Marcar esta OC como pagada?', aceptar: 'Marcar pagada' }))) return;
   try{
     const resp = await fetch(`/ordenes/${encodeURIComponent(id)}/${accion}`, {
       method: 'POST', headers: body ? { 'Content-Type': 'application/json' } : undefined, body,
@@ -5222,23 +5375,16 @@ async function accionOCEntregar(id) {
   // Paso 1: Confirmar recepción
   const oc = ESTADO.ordenes?.find(o => String(o.id) === String(id));
   const numOC = oc?.numeroOC || id;
-  if (!confirm(`¿Confirmar recepción de la OC ${numOC}?`)) return;
-
-  // Paso 2: ¿Entrada automática?
-  const autoEntrada = confirm(
-    `¿Generar entrada de almacén automáticamente con las cantidades completas de la OC ${numOC}?\n\n` +
-    `• [Aceptar] → Sí, registrar entrada\n• [Cancelar] → No, lo haré manualmente desde Inventarios`
-  );
-
-  let autoSalida = false;
-  if (autoEntrada) {
-    // Paso 3: ¿Salida inmediata?
-    autoSalida = confirm(
-      `¿Registrar también la salida inmediata de los mismos ítems al proyecto?\n\n` +
-      `(Útil cuando el material va directo a uso en obra)\n\n` +
-      `• [Aceptar] → Sí, entrada + salida\n• [Cancelar] → Solo entrada`
-    );
-  }
+  // Antes eran tres confirm() seguidos con «[Aceptar] → …, [Cancelar] → …» en el
+  // texto. Ahora una sola ventana con las tres opciones con nombre.
+  const modo = await pedirOpcion('¿Qué se registra en el almacén con las cantidades completas de la orden?', [
+    { valor: 'entrada-salida', texto: 'Entrada y salida a la obra', detalle: 'El material va directo a uso en obra', clase: 'btn-primary' },
+    { valor: 'entrada', texto: 'Solo entrada de almacén', detalle: 'El material queda en bodega' },
+    { valor: 'nada', texto: 'Nada por ahora', detalle: 'Lo registro a mano desde Inventarios' },
+  ], { titulo: `Recepción de la OC ${numOC}` });
+  if (modo === null) return;
+  const autoEntrada = modo !== 'nada';
+  const autoSalida  = modo === 'entrada-salida';
 
   _entregandoOC = true;
   const bEntregar = document.querySelector('#oc-ver-entregar');
@@ -5333,7 +5479,8 @@ async function aprobarOCConModal(id){
       const oAprobada = ESTADO.ordenes.find(x => String(x.id) === String(id));
       if (ESTADO.tesoreria?.habilitado && oAprobada && tesoreriaDeOC(oAprobada).enviable
           && !tesoreriaDeOC(oAprobada).enviada
-          && confirm(`OC ${oAprobada.numeroOC || ''} aprobada.\n\n¿Enviar la solicitud de pago a tesorería ahora?`)) {
+          && (await pedirConfirmacion('Se puede enviar después desde el detalle de la orden.',
+                { titulo: `OC ${oAprobada.numeroOC || ''} aprobada. ¿Enviar la solicitud de pago a tesorería ahora?`, aceptar: 'Enviar ahora', cancelar: 'Después' }))) {
         enviarATesoreria(id);
       }
     }catch(e){ alert('Error: ' + e.message); }
@@ -5366,7 +5513,8 @@ async function enviarATesoreria(id){
     alert('Solo se pueden enviar OC aprobadas o finalizadas, con número asignado.');
     return;
   }
-  if (t.enviada && !confirm(`Esta OC ya se envió a tesorería como ${t.egresoId}.\n\n¿Abrir el formulario de todas formas? No se creará una segunda solicitud.`)) return;
+  if (t.enviada && t.estado !== 'RECHAZADA' && !(await pedirConfirmacion('No se creará una segunda solicitud.',
+        { titulo: `Esta OC ya se envió a tesorería como ${t.egresoId}. ¿Abrir el formulario de todas formas?`, aceptar: 'Abrir' }))) return;
 
   const proyectos = ESTADO.tesoreria.proyectos || [];
   if (!proyectos.length) {
@@ -5686,7 +5834,7 @@ async function confirmar(){
   const filas = ESTADO.itemsExtraidos.filter(i => !i.excluir && i.insumo);
   if (!filas.length) return alert('No hay ítems para guardar.');
   const sinPrecio = filas.filter(i => !i.precio || parseFloat(i.precio) <= 0);
-  if (sinPrecio.length && !confirm(`${sinPrecio.length} ítem(s) sin precio. ¿Guardar igualmente?`)) return;
+  if (sinPrecio.length && !(await pedirConfirmacion('', { titulo: `${sinPrecio.length} ítem(s) sin precio. ¿Guardar igualmente?`, aceptar: 'Guardar' }))) return;
   const btn = $('#btn-confirmar'); const spin = $('#spinner-conf');
   btn.disabled = true; spin.style.display = 'block';
   try{
@@ -5854,7 +6002,7 @@ async function generarOCdesdeCot(){
   }
 
   const sinPrecio = filas.filter(i => !i.precio || parseFloat(i.precio) <= 0);
-  if (sinPrecio.length && !confirm(`${sinPrecio.length} ítem(s) sin precio. Quedarán marcados como PENDIENTE. ¿Continuar?`)) return;
+  if (sinPrecio.length && !(await pedirConfirmacion('Quedarán marcados como PENDIENTE.', { titulo: `${sinPrecio.length} ítem(s) sin precio. ¿Continuar?`, aceptar: 'Continuar' }))) return;
   const btn = $('#btn-generar-oc'); const spin = $('#spinner-generar-oc');
   btn.disabled = true; spin.style.display = 'block';
   try{
@@ -6577,7 +6725,8 @@ function _invRenderDocumentos(movs, tbody, tipo) {
 
 // placeholder para evitar referencias rotas (anulación se gestiona desde el modal de detalle)
 async function anularDocumentoInv(docRef, tipo) {
-  if (!confirm(`¿Anular el documento ${docRef}?\n\nEsta acción marcará todos los movimientos como anulados y ajustará el stock. No se puede deshacer.`)) return;
+  if (!(await pedirConfirmacion('Todos sus movimientos quedan anulados y el stock se ajusta. No se puede deshacer.',
+        { titulo: `¿Anular el documento ${docRef}?`, aceptar: 'Anular', peligro: true }))) return;
   try {
     const resp = await fetch(`/inventario/documentos/${encodeURIComponent(docRef)}/anular`, { method: 'PATCH' });
     const data = await resp.json();
@@ -6801,7 +6950,7 @@ async function _invConfirmarDevolucion(docRef, batchId, proyecto) {
 }
 
 async function _invAprobarDocumento(batchId, proyecto, tipo) {
-  if (!confirm('¿Aprobar este documento? Se asignará el consecutivo definitivo.')) return;
+  if (!(await pedirConfirmacion('Se le asignará el consecutivo definitivo.', { titulo: '¿Aprobar este documento?', aceptar: 'Aprobar' }))) return;
   try {
     const r = await fetch(`/inventario/documentos/${encodeURIComponent(batchId)}/aprobar`, {
       method: 'PATCH',
@@ -6816,7 +6965,7 @@ async function _invAprobarDocumento(batchId, proyecto, tipo) {
 }
 
 async function _invAnularDocumento(batchId) {
-  if (!confirm('¿Anular este documento? Esta acción no se puede deshacer.')) return;
+  if (!(await pedirConfirmacion('Esta acción no se puede deshacer.', { titulo: '¿Anular este documento?', aceptar: 'Anular', peligro: true }))) return;
   try {
     const r = await fetch(`/inventario/documentos/${encodeURIComponent(batchId)}/anular`, {
       method: 'PATCH',
