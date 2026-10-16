@@ -196,6 +196,13 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
 
 /* Empty states */
 .empty{text-align:center;padding:60px 20px;color:var(--txt-2)}
+.paginador{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:10px 14px;border-top:1px solid var(--border);font-size:12px;color:var(--txt-2)}
+.paginador .pags{display:flex;gap:4px;flex-wrap:wrap}
+.paginador button{min-width:30px;padding:4px 8px;border:1px solid var(--border);background:var(--surface);color:var(--txt);border-radius:6px;font-family:var(--mono);font-size:12px;cursor:pointer}
+.paginador button:hover:not(:disabled){border-color:var(--border-hi)}
+.paginador button:disabled{opacity:.4;cursor:default}
+.paginador button.actual{background:var(--accent);border-color:var(--accent);color:#fff;cursor:default;opacity:1}
+.paginador .gap{padding:4px 2px;color:var(--txt-3)}
 .empty-icon{font-size:48px;margin-bottom:12px;opacity:.4}
 .empty-txt{font-size:15px;margin-bottom:6px;color:var(--txt)}
 .empty-sub{font-size:12px;color:var(--txt-2)}
@@ -806,6 +813,7 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         </tr></thead>
         <tbody id="tbody-os"><tr><td colspan="8" style="text-align:center;color:var(--txt-2);padding:32px">Cargando…</td></tr></tbody>
       </table>
+      <div id="os-paginador"></div>
     </div>
   </section>
 
@@ -2174,6 +2182,7 @@ function subTab(grupo, nombre){
 // Refresh
 // ─────────────────────────────────────────────────────────────────────────────
 async function refrescarTodo(){
+  _ultimoRefresco = Date.now();
   const btn = $('#btn-refresh');
   btn.classList.add('rotando');
   try{
@@ -2192,7 +2201,13 @@ function reiniciarTimer(){
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(refrescarTodo, REFRESH_MS);
 }
-document.addEventListener('visibilitychange', () => { if(!document.hidden) refrescarTodo(); });
+// Al volver a la pestaña se refresca, pero no en cada cambio de ventana: antes
+// cada Alt+Tab volvía a traer requerimientos, OC y OS completos.
+const REFRESH_AL_VOLVER_MS = 2 * 60 * 1000;
+let _ultimoRefresco = 0;
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Date.now() - _ultimoRefresco > REFRESH_AL_VOLVER_MS) refrescarTodo();
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Carga de datos desde backend
@@ -2389,13 +2404,69 @@ function badgeTesoreria(o){
   return '<span style="color:var(--txt-2)">—</span>';
 }
 // ─────────────────────────────────────────────────────────────────────────────
+// Paginación de los registros de OC y OS
+// ─────────────────────────────────────────────────────────────────────────────
+// Las listas siguen llegando completas (las usan la cobertura de requerimientos,
+// el inventario, tesorería…); lo que se pagina es la tabla, que pintaba cientos
+// de filas de una vez. Filtros y búsqueda siguen sobre la lista entera.
+//
+// La página se conserva entre refrescos y vuelve a la 1 cuando cambia un filtro.
+const POR_PAGINA = 25;
+const _paginas = { oc: { n: 1, filtros: '' }, os: { n: 1, filtros: '' } };
+
+function _paginar(clave, lista, filtros) {
+  const st = _paginas[clave];
+  if (st.filtros !== filtros) { st.filtros = filtros; st.n = 1; }
+  const total = Math.max(1, Math.ceil(lista.length / POR_PAGINA));
+  st.n = Math.min(Math.max(1, st.n), total);
+  return { filas: lista.slice((st.n - 1) * POR_PAGINA, st.n * POR_PAGINA), n: st.n, total, cuantas: lista.length };
+}
+
+function _htmlPaginador(clave, pg) {
+  if (pg.cuantas <= POR_PAGINA) return '';
+  const desde = (pg.n - 1) * POR_PAGINA + 1;
+  const hasta = Math.min(pg.n * POR_PAGINA, pg.cuantas);
+  // Primera, última y dos a cada lado de la actual; el resto se resume en «…».
+  const nums = [];
+  for (let i = 1; i <= pg.total; i++) {
+    if (i === 1 || i === pg.total || Math.abs(i - pg.n) <= 2) nums.push(i);
+    else if (nums[nums.length - 1] !== '…') nums.push('…');
+  }
+  const b = (n, txt, attrs = '') => `<button type="button" onclick="irPagina('${clave}', ${n})" ${attrs}>${txt}</button>`;
+  return `<div class="paginador">
+    <span>Mostrando ${desde}–${hasta} de ${pg.cuantas}</span>
+    <div class="pags">
+      ${b(pg.n - 1, '‹', `aria-label="Página anterior" ${pg.n === 1 ? 'disabled' : ''}`)}
+      ${nums.map(n => n === '…' ? '<span class="gap">…</span>'
+        : b(n, n, n === pg.n ? 'class="actual" aria-current="page" disabled' : '')).join('')}
+      ${b(pg.n + 1, '›', `aria-label="Página siguiente" ${pg.n === pg.total ? 'disabled' : ''}`)}
+    </div>
+  </div>`;
+}
+
+function irPagina(clave, n) {
+  _paginas[clave].n = n;
+  if (clave === 'oc') renderOrdenes(); else renderOrdenesServicio();
+  // Volver al inicio de la tabla: el paginador queda abajo.
+  const ancla = clave === 'oc' ? $('#oc-contenido') : $('#tbody-os')?.closest('table');
+  ancla?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 1.4 ÓRDENES DE SERVICIO
 // ─────────────────────────────────────────────────────────────────────────────
 let _ordenesServicio = [];
 
 async function cargarOrdenesServicio() {
-  try { _ordenesServicio = await fetch('/os/ordenes').then(r => r.json()); }
-  catch { _ordenesServicio = []; }
+  try {
+    const r = await fetch('/os/ordenes').then(r => r.json());
+    // Un 500 llega como { error }: no es una lista y rompía el refresco entero.
+    if (!Array.isArray(r)) throw new Error(r?.error || 'respuesta inválida');
+    _ordenesServicio = r;
+  } catch (e) {
+    console.error('GET /os/ordenes:', e.message);
+    _ordenesServicio = [];
+  }
   $('#cnt-os').textContent = _ordenesServicio.length;
   renderOrdenesServicio();
 }
@@ -2422,11 +2493,15 @@ function renderOrdenesServicio() {
   if ($('#os-stats-aprobadas')) $('#os-stats-aprobadas').textContent = `${osBase.filter(o => o.estado === 'aprobada').length} Aprobadas`;
   if ($('#os-stats-borrador'))  $('#os-stats-borrador').textContent  = `${osBase.filter(o => o.estado === 'borrador').length} Borradores`;
 
+  const pg = _paginar('os', lista, JSON.stringify([q, estado, proy]));
+  const pie = $('#os-paginador');
+  if (pie) pie.innerHTML = _htmlPaginador('os', pg);
+
   if (!lista.length) {
     tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--txt-2);padding:32px">No hay órdenes de servicio${estado ? ' en estado "' + estado + '"' : ''}.</td></tr>`;
     return;
   }
-  tbody.innerHTML = lista.map(o => `
+  tbody.innerHTML = pg.filas.map(o => `
     <tr style="cursor:pointer" onclick="verOS('${esc(o.id)}')">
       <td class="mono">${o.numeroOS ? esc(o.numeroOS) : '<span style="color:var(--txt-2);font-style:italic;font-size:11px">Borrador</span>'}</td>
       <td>${esc(o.fecha || '')}</td>
@@ -4901,6 +4976,8 @@ function renderOrdenes(){
   $('#oc-stats-borrador').textContent  = `${ocBase.filter(o => o.estado === 'borrador').length} Borradores`;
 
   const tesHabilitada = !!ESTADO.tesoreria?.habilitado;
+  _podarSeleccionOC();
+  const pg = _paginar('oc', filtradas, JSON.stringify([q, estado, proy]));
 
   if (!filtradas.length){
     cont.innerHTML = `
@@ -4935,11 +5012,11 @@ function renderOrdenes(){
               ${tesHabilitada ? '<th style="white-space:nowrap">Tesorería</th>' : ''}
             </tr></thead>
             <tbody>
-              ${filtradas.map(o => {
-                const seleccionable = ['aprobada','pagada','entregada','finalizada'].includes(o.estado);
+              ${pg.filas.map(o => {
+                const seleccionable = _ocSeleccionable(o);
                 return `
                 <tr style="cursor:pointer" data-oc-id="${esc(o.id)}" data-oc-proyecto="${esc(o.proyecto || '')}" onclick="verOrden('${esc(o.id)}')">
-                  <td onclick="event.stopPropagation()">${seleccionable ? `<input type="checkbox" class="oc-sel" value="${esc(o.id)}" data-proyecto="${esc(o.proyecto || '')}" onchange="onSeleccionOC()">` : ''}</td>
+                  <td onclick="event.stopPropagation()">${seleccionable ? `<input type="checkbox" class="oc-sel" value="${esc(o.id)}" data-proyecto="${esc(o.proyecto || '')}" ${_ocSeleccion.has(String(o.id)) ? 'checked' : ''} onchange="marcarOC(this)">` : ''}</td>
                   <td class="mono">${esc(o.numeroOC || '—')}</td>
                   <td>${esc(fmtFecha(o.fechaCreacion || o.fechaOC))}</td>
                   <td>${esc(etiquetaProyecto(o.proyecto))}</td>
@@ -4953,19 +5030,38 @@ function renderOrdenes(){
             </tbody>
           </table>
         </div>
+        ${_htmlPaginador('oc', pg)}
       </div>
     </div>`;
   onSeleccionOC();
 }
 
-function toggleSeleccionTodas(checked){
-  document.querySelectorAll('.oc-sel').forEach(cb => { cb.checked = checked; });
+// Selección de OC para la remisión. Antes se leía de los checkbox, pero con la
+// tabla paginada una OC marcada en otra página ya no está en el DOM: la
+// selección se guarda acá (id → proyecto) y sobrevive al cambio de página.
+const _ocSeleccion = new Map();
+function _ocSeleccionable(o) { return ['aprobada','pagada','entregada','finalizada'].includes(o.estado); }
+// Tras un refresco, fuera lo que ya no existe o dejó de ser seleccionable.
+function _podarSeleccionOC() {
+  for (const id of [..._ocSeleccion.keys()]) {
+    const o = ESTADO.ordenes.find(x => String(x.id) === id);
+    if (!o || !_ocSeleccionable(o)) _ocSeleccion.delete(id);
+    else _ocSeleccion.set(id, o.proyecto || '');
+  }
+}
+function marcarOC(cb) {
+  if (cb.checked) _ocSeleccion.set(String(cb.value), cb.dataset.proyecto || '');
+  else _ocSeleccion.delete(String(cb.value));
   onSeleccionOC();
 }
+
+function toggleSeleccionTodas(checked){
+  // Solo la página visible: marcar 300 OC de golpe nunca es lo que se quiere.
+  document.querySelectorAll('.oc-sel').forEach(cb => { cb.checked = checked; marcarOC(cb); });
+}
 function onSeleccionOC(){
-  const sel = [...document.querySelectorAll('.oc-sel:checked')];
-  const cnt = sel.length;
-  const proyectos = [...new Set(sel.map(cb => cb.dataset.proyecto))];
+  const cnt = _ocSeleccion.size;
+  const proyectos = [...new Set(_ocSeleccion.values())];
   const btn = document.getElementById('btn-generar-remision');
   const hint = document.getElementById('oc-sel-hint');
   const countEl = document.getElementById('oc-sel-count');
@@ -4979,7 +5075,7 @@ function onSeleccionOC(){
   }
 }
 function abrirModalRemision(){
-  const ids = [...document.querySelectorAll('.oc-sel:checked')].map(cb => cb.value);
+  const ids = [..._ocSeleccion.keys()];
   if (!ids.length) return;
   const numeros = ids.map(id => {
     const oc = ESTADO.ordenes.find(o => String(o.id) === String(id));
@@ -5026,6 +5122,8 @@ function abrirModalRemision(){
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Error');
       wrap.remove();
+      _ocSeleccion.clear();
+      renderOrdenes();
       avisar.ok(`Remisión ${data.numero} creada`);
       window.open(`/remisiones/${encodeURIComponent(data.id)}/view.html`, '_blank');
     }catch(e){ avisar.error('Error: ' + e.message); }
