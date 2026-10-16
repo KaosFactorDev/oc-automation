@@ -216,7 +216,11 @@ function cerrarVista() {
   setTimeout(function () {
     if (window.closed) return;
     if (history.length > 1) history.back();
-    else alert('Cierra esta pestana con Ctrl+W (el navegador no permite que la pagina se cierre sola).');
+    else {
+      // Sin alert(): el mismo botón dice qué hacer, sin bloquear la página.
+      var b = document.querySelector('.btn-close');
+      if (b) { b.textContent = 'Cierra esta pestaña con Ctrl+W'; b.disabled = true; }
+    }
   }, 120);
 }
 </script>
