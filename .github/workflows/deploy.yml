@@ -40,6 +40,15 @@ name: Deploy a VPS
 #
 # Los archivos que un deploy sobrescriba o borre quedan copiados en
 # ../deploy-backups/<sha-del-commit>/ dentro del VPS.
+#
+# ---------------------------------------------------------------------------
+# Migraciones
+# ---------------------------------------------------------------------------
+# Se aplican solas, entre la sincronizacion y la reconstruccion de los
+# contenedores (deploy/aplicar-migraciones.sh). Ya no hace falta correr
+# `npm run db:push` contra el VPS antes de mergear. Siguen valiendo las reglas
+# de siempre: solo migraciones nuevas, aditivas mientras el codigo viejo siga
+# corriendo, y numeradas por encima de la ultima de main.
 
 on:
   push:
@@ -116,6 +125,17 @@ jobs:
             --exclude 'local.db*' \
             --exclude '_archivo-csv-2026/' \
             ./data/ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_PATH }}/data/"
+
+      # Antes de reconstruir: el código nuevo no debe arrancar contra un esquema
+      # viejo. Si una migración falla, el deploy se detiene acá y los
+      # contenedores siguen con la versión anterior (el código ya sincronizado
+      # no corre hasta reconstruir). Cada migración va en su transacción.
+      # Ver deploy/aplicar-migraciones.sh.
+      - name: Aplicar migraciones de la base
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${{ secrets.VPS_PORT || 22 }}"             "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}"             'set -e
+             cd "${{ secrets.VPS_PATH }}"
+             bash deploy/aplicar-migraciones.sh'
 
       - name: Reconstruir y levantar contenedores
         run: |
