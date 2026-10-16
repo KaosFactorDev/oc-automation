@@ -516,6 +516,75 @@ function renderTabla() {
 }
 
 function esc(s) { return String(s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+
+// ── Avisos y confirmación propios (reemplazan alert() y confirm()) ───────────
+// Versión mínima de los de la consola: esta página no comparte su código.
+// pedirConfirmacion es asíncrona: hay que esperarla con `await`.
+const avisar = (() => {
+  function mostrar(color, ms, mensaje) {
+    let c = document.getElementById('avisos');
+    if (!c) {
+      c = document.createElement('div');
+      c.id = 'avisos';
+      c.setAttribute('aria-live', 'polite');
+      c.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2000;display:flex;flex-direction:column;gap:8px;max-width:min(420px,calc(100vw - 32px))';
+      document.body.appendChild(c);
+    }
+    const el = document.createElement('div');
+    el.setAttribute('role', ms ? 'status' : 'alert');
+    el.style.cssText = 'background:var(--card);color:var(--txt);border:1px solid var(--border);border-left:4px solid ' + color +
+      ';border-radius:var(--r);box-shadow:0 8px 24px rgba(0,0,0,.25);padding:10px 34px 10px 12px;font-size:13px;line-height:1.45;white-space:pre-line;position:relative';
+    el.textContent = String(mensaje ?? '');
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.setAttribute('aria-label', 'Cerrar aviso');
+    x.textContent = '×';
+    x.style.cssText = 'position:absolute;top:4px;right:8px;background:none;border:none;color:var(--txt-2);font-size:18px;cursor:pointer';
+    x.onclick = () => el.remove();
+    el.appendChild(x);
+    c.appendChild(el);
+    if (ms) {
+      let t = setTimeout(() => el.remove(), ms);
+      el.addEventListener('mouseenter', () => clearTimeout(t));
+      el.addEventListener('mouseleave', () => { t = setTimeout(() => el.remove(), 3000); });
+    }
+  }
+  return {
+    atencion: (m) => mostrar('var(--warn)', 8000, m),
+    error:    (m) => mostrar('var(--danger)', 0, m),   // se queda hasta cerrarlo
+  };
+})();
+
+function pedirConfirmacion(titulo, { aceptar = 'Continuar' } = {}) {
+  return new Promise((resolver) => {
+    const previo = document.activeElement;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px';
+    wrap.innerHTML = `
+      <div role="dialog" aria-modal="true" style="background:var(--card);color:var(--txt);border:1px solid var(--border-hi);border-radius:var(--r);padding:20px;max-width:440px;width:100%;font-family:var(--sans)">
+        <h3 style="margin:0 0 16px;font-size:15px;font-weight:600;line-height:1.4">${esc(titulo)}</h3>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button type="button" data-v="0" style="background:none;border:1px solid var(--border-hi);color:var(--txt);border-radius:var(--r);padding:7px 14px;cursor:pointer">Cancelar</button>
+          <button type="button" data-v="1" style="background:var(--accent);border:1px solid var(--accent);color:#fff;border-radius:var(--r);padding:7px 14px;cursor:pointer">${esc(aceptar)}</button>
+        </div>
+      </div>`;
+    function terminar(v) {
+      document.removeEventListener('keydown', tecla, true);
+      wrap.remove();
+      if (previo && previo.isConnected && previo.focus) previo.focus();
+      resolver(v);
+    }
+    function tecla(e) { if (e.key === 'Escape') { e.preventDefault(); terminar(false); } }
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) return terminar(false);            // clic en el fondo = cancelar
+      const b = e.target.closest('[data-v]');
+      if (b) terminar(b.dataset.v === '1');
+    });
+    document.addEventListener('keydown', tecla, true);
+    document.body.appendChild(wrap);
+    wrap.querySelector('[data-v="1"]').focus();
+  });
+}
 function actualizar(idx,campo,valor){itemsExtraidos[idx][campo]=valor;actualizarResumen();}
 function toggleExcluir(idx,excluir){itemsExtraidos[idx].excluir=excluir;document.querySelectorAll('#tabla-cuerpo tr')[idx].classList.toggle('excluida',excluir);actualizarResumen();}
 function agregarFila(){
@@ -582,14 +651,14 @@ function actualizarResumenOC(){
 // ── Generar OC desde cotización ───────────────────────────────────────────────
 async function generarOCdesdeCot() {
   const filas = itemsOC.filter(i => !i.excluir && i.insumo);
-  if (!filas.length) { alert('No hay ítems para incluir en la OC.'); return; }
+  if (!filas.length) { avisar.atencion('No hay ítems para incluir en la OC.'); return; }
 
   const proyecto = document.getElementById('oc-proyecto').value;
-  if (!proyecto) { alert('Selecciona un proyecto.'); return; }
+  if (!proyecto) { avisar.atencion('Selecciona un proyecto.'); return; }
 
   const sinPrecio = filas.filter(i => !i.precio || parseFloat(i.precio) <= 0);
   if (sinPrecio.length > 0) {
-    const ok = confirm(`${sinPrecio.length} ítem(s) no tienen precio. Quedarán marcados como PENDIENTE. ¿Continuar?`);
+    const ok = await pedirConfirmacion(`${sinPrecio.length} ítem(s) no tienen precio. Quedarán marcados como PENDIENTE. ¿Continuar?`);
     if (!ok) return;
   }
 
@@ -617,7 +686,7 @@ async function generarOCdesdeCot() {
     document.getElementById('seccion-oc-exito').scrollIntoView({ behavior:'smooth' });
 
   } catch(err) {
-    alert('Error al generar OC: ' + err.message);
+    avisar.error('Error al generar OC: ' + err.message);
   } finally {
     btn.disabled = false; spin.style.display = 'none';
   }
@@ -626,10 +695,10 @@ async function generarOCdesdeCot() {
 // ── Confirmar precios ─────────────────────────────────────────────────────────
 async function confirmar() {
   const filas = itemsExtraidos.filter(i => !i.excluir && i.insumo);
-  if (!filas.length) { alert('No hay ítems para guardar.'); return; }
+  if (!filas.length) { avisar.atencion('No hay ítems para guardar.'); return; }
   const sinPrecio = filas.filter(i => !i.precio || parseFloat(i.precio) <= 0);
   if (sinPrecio.length) {
-    if (!confirm(`${sinPrecio.length} ítem(s) sin precio. ¿Guardar igualmente?`)) return;
+    if (!(await pedirConfirmacion(`${sinPrecio.length} ítem(s) sin precio. ¿Guardar igualmente?`, { aceptar: 'Guardar' }))) return;
   }
   const btn = document.getElementById('btn-confirmar');
   const spin = document.getElementById('spinner-conf');
@@ -645,7 +714,7 @@ async function confirmar() {
     document.getElementById('exito-sub').textContent = 'compras.csv actualizado. El sistema usará estos precios en la próxima OC.';
     document.getElementById('seccion-exito').scrollIntoView({ behavior:'smooth' });
   } catch(err) {
-    alert('Error: ' + err.message);
+    avisar.error('Error: ' + err.message);
     btn.disabled = false; spin.style.display = 'none';
   }
 }
