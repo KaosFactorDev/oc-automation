@@ -27,6 +27,7 @@
 const pg = require('../pg');
 
 const repoProyecto = require('./_proyecto');
+const { EstadoInvalido } = require('./_estado');
 const CABECERA = `
   o.id, o.numero_oc, o.requerimiento_id, o.requerimiento_origen, o.cotizacion_id,
   o.proveedor_nit, o.proyecto_id, o.subtotal, o.iva, o.total, o.estado,
@@ -214,8 +215,10 @@ async function aprobar(id, { usuario, formatear, cambios = {} }) {
     vals.push(id);
     const r = await c.query(
       `UPDATE erp.ordenes_compra SET ${sets.join(', ')}
-        WHERE id = $${vals.length} RETURNING id`, vals);
-    if (!r.rowCount) throw new Error(`Orden de compra ${id} no existe`);
+        WHERE id = $${vals.length} AND estado = 'borrador' RETURNING id`, vals);
+    // Solo un borrador se aprueba: aprobar dos veces quemaría otro número y
+    // sobrescribiría el que ya tenía. La transacción se deshace y el número no se gasta.
+    if (!r.rowCount) throw new EstadoInvalido(`Orden de compra ${id} no existe o ya no está en borrador`);
     return numero;
   });
 }
