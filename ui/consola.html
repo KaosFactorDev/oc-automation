@@ -1716,7 +1716,7 @@ function limpiarFiltrosCostos(){
 
 function descargarControlCostos(){
   const f = filtrosCostos();
-  if (f.obra === '__sin') { alert('El Excel no filtra por "(sin proyecto)". Quita ese filtro de obra para descargar.'); return; }
+  if (f.obra === '__sin') { avisar.atencion('El Excel no filtra por "(sin proyecto)". Quita ese filtro de obra para descargar.'); return; }
   const qs = new URLSearchParams();
   const desc = [];
   const texto = id => $(id)?.selectedOptions?.[0]?.textContent || '';
@@ -1847,6 +1847,64 @@ document.addEventListener('mousedown', e => {
   if (el.querySelector('input, textarea, select')) return;
   _cerrarModal(el);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Avisos (reemplazan alert())
+// ─────────────────────────────────────────────────────────────────────────────
+// alert() congela la página hasta que alguien aprieta Aceptar, y avisa igual un
+// éxito que un error. Estos no bloquean y se ven distinto según lo que dicen:
+//   avisar.ok(msg)        verde, se va solo a los 5 s
+//   avisar.atencion(msg)  ámbar, 8 s: falta un dato, no se encontró algo
+//   avisar.error(msg)     rojo, se queda hasta cerrarlo: no se debe perder
+// Pasar el mouse encima los detiene, para leerlos con calma. Se apilan abajo a
+// la derecha, el más nuevo abajo.
+const avisar = (() => {
+  const DURACION = { ok: 5000, atencion: 8000, error: 0 };
+  const ESTILO = {
+    ok:       'border-left:4px solid #16a34a',
+    atencion: 'border-left:4px solid #d97706',
+    error:    'border-left:4px solid #dc2626',
+  };
+  function contenedor() {
+    let c = document.getElementById('avisos');
+    if (!c) {
+      c = document.createElement('div');
+      c.id = 'avisos';
+      c.setAttribute('aria-live', 'polite');
+      c.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2000;display:flex;flex-direction:column;gap:8px;max-width:min(420px,calc(100vw - 32px))';
+      document.body.appendChild(c);
+    }
+    return c;
+  }
+  function mostrar(tipo, mensaje) {
+    const el = document.createElement('div');
+    el.setAttribute('role', tipo === 'error' ? 'alert' : 'status');
+    el.style.cssText = 'background:var(--card,var(--bg));color:var(--txt);border:1px solid var(--border);border-radius:var(--r);' +
+      'box-shadow:0 8px 24px rgba(0,0,0,.25);padding:10px 34px 10px 12px;font-size:13px;line-height:1.45;' +
+      'white-space:pre-line;position:relative;' + ESTILO[tipo];
+    el.textContent = String(mensaje ?? '');
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.setAttribute('aria-label', 'Cerrar aviso');
+    x.textContent = '×';
+    x.style.cssText = 'position:absolute;top:4px;right:8px;background:none;border:none;color:var(--txt-2);font-size:18px;cursor:pointer';
+    x.onclick = () => el.remove();
+    el.appendChild(x);
+    contenedor().appendChild(el);
+
+    const ms = DURACION[tipo];
+    if (ms) {
+      let t = setTimeout(() => el.remove(), ms);
+      el.addEventListener('mouseenter', () => clearTimeout(t));
+      el.addEventListener('mouseleave', () => { t = setTimeout(() => el.remove(), 3000); });
+    }
+  }
+  return {
+    ok:       (m) => mostrar('ok', m),
+    atencion: (m) => mostrar('atencion', m),
+    error:    (m) => mostrar('error', m),
+  };
+})();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Ventanas de confirmación propias (reemplazan confirm() y prompt())
@@ -2151,7 +2209,7 @@ async function iniciarLoginMicrosoft(){
     window.location.href = url;
   } catch(e){
     if (btn) btn.disabled = false;
-    alert('No se pudo obtener la URL de inicio de sesión. Verifica la configuración del servidor.');
+    avisar.error('No se pudo obtener la URL de inicio de sesión. Verifica la configuración del servidor.');
   }
 }
 
@@ -2215,7 +2273,7 @@ async function patchUsuario(id, campo, valor){
     // checkbox no se queda marcado engañando al admin.
     await cargarUsuariosAdmin();
   } catch(e) {
-    alert('Error al actualizar usuario: ' + e.message);
+    avisar.error('Error al actualizar usuario: ' + e.message);
     await cargarUsuariosAdmin();
   }
 }
@@ -2676,7 +2734,7 @@ function corregirOrden(recurso, doc) {
     if (!ok) { plan.innerHTML = `<div style="color:var(--danger,#c33)">${esc(data.error || 'Error')}${lista(data.detalles || data.bloqueos || [])}</div>`; return; }
     cerrar();
     const avisos = (data.avisos || []).length ? `\n\nAvisos:\n• ${data.avisos.join('\n• ')}` : '';
-    alert(`Orden corregida.\n\n• ${[...(data.resumen || []), ...(data.hechos || [])].join('\n• ')}${avisos}`);
+    ((data.avisos || []).length ? avisar.atencion : avisar.ok)(`Orden corregida.\n\n• ${[...(data.resumen || []), ...(data.hechos || [])].join('\n• ')}${avisos}`);
     if (esOC) await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
     else await cargarOrdenesServicio();
   };
@@ -2695,7 +2753,7 @@ async function enviarAPapelera(recurso, id, titulo) {
   }).then(async r => ({ ok: r.ok, data: await r.json().catch(() => ({})) }));
   try {
     const vista = await pedir(true);
-    if (!vista.ok) { alert(vista.data.error || 'Error'); return; }
+    if (!vista.ok) { avisar.error(vista.data.error || 'Error'); return; }
     const ef = vista.data.efectos || {};
     const efectos = [
       ef.movimientos?.length ? `• Se anulan los documentos de almacén ${ef.movimientos.join(', ')}` : null,
@@ -2708,10 +2766,10 @@ async function enviarAPapelera(recurso, id, titulo) {
       '\n\nTodo se puede restaurar desde la Papelera.';
     if (!(await pedirConfirmacion(texto, { titulo: `${titulo} va a la papelera`, aceptar: 'Mandar a la papelera', peligro: true }))) return;
     const r = await pedir(false);
-    if (!r.ok) { alert(r.data.error || 'Error'); return; }
+    if (!r.ok) { avisar.error(r.data.error || 'Error'); return; }
     if (recurso === 'ordenes') await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
     else await cargarOrdenesServicio();
-  } catch (e) { alert('Error: ' + e.message); }
+  } catch (e) { avisar.error('Error: ' + e.message); }
 }
 
 async function verPapelera() {
@@ -2772,7 +2830,7 @@ async function verPapelera() {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ motivo }),
       });
       const data = await r.json().catch(() => ({}));
-      if (!r.ok) { alert(data.error || 'Error'); return; }
+      if (!r.ok) { avisar.error(data.error || 'Error'); return; }
       await pintar();
       if (recurso === 'ordenes') await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
       else await cargarOrdenesServicio();
@@ -2971,7 +3029,7 @@ function editarOSModal(id) {
       wrap.remove();
       await cargarOrdenesServicio();
     } catch (e) {
-      alert('Error: ' + e.message);
+      avisar.error('Error: ' + e.message);
       btn.disabled = false; btn.textContent = 'Guardar cambios';
     }
   };
@@ -2983,9 +3041,9 @@ async function aprobarOS(id) {
     const r = await fetch(`/os/${id}/aprobar`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || 'Error al aprobar');
-    alert(`Orden de Servicio aprobada: ${data.numeroOS}`);
+    avisar.ok(`Orden de Servicio aprobada: ${data.numeroOS}`);
     await cargarOrdenesServicio();
-  } catch (e) { alert('Error: ' + e.message); }
+  } catch (e) { avisar.error('Error: ' + e.message); }
 }
 
 async function anularOS(id) {
@@ -3000,7 +3058,7 @@ async function anularOS(id) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || 'Error al anular');
     await cargarOrdenesServicio();
-  } catch (e) { alert('Error: ' + e.message); }
+  } catch (e) { avisar.error('Error: ' + e.message); }
 }
 
 async function pagarOS(id) {
@@ -3010,7 +3068,7 @@ async function pagarOS(id) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || 'Error al marcar como pagada');
     await cargarOrdenesServicio();
-  } catch (e) { alert('Error: ' + e.message); }
+  } catch (e) { avisar.error('Error: ' + e.message); }
 }
 
 async function cumplirOS(id) {
@@ -3020,7 +3078,7 @@ async function cumplirOS(id) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || 'Error al marcar como cumplida');
     await cargarOrdenesServicio();
-  } catch (e) { alert('Error: ' + e.message); }
+  } catch (e) { avisar.error('Error: ' + e.message); }
 }
 
 function toggleOfertaOS() {
@@ -3171,7 +3229,7 @@ function archivoOsSeleccionado() {
 
 async function extraerOS() {
   const inp = $('#input-archivo-os');
-  if (!inp?.files?.length) { alert('Seleccione un archivo.'); return; }
+  if (!inp?.files?.length) { avisar.atencion('Seleccione un archivo.'); return; }
 
   const proveedor = ($('#os-cot-proveedor')?.value || '').trim();
   const proyecto  = ($('#os-cot-proyecto')?.value || '').trim();
@@ -3277,7 +3335,7 @@ function limpiarFormOS() {
 
 async function generarClausulasOS() {
   const tipoServicio = ($('#os-tipo-servicio')?.value || '').trim();
-  if (!tipoServicio) { alert('Describe primero el servicio a contratar.'); return; }
+  if (!tipoServicio) { avisar.atencion('Describe primero el servicio a contratar.'); return; }
   const tieneOferta = $('#os-tiene-oferta')?.checked;
   const ofertaCondiciones = tieneOferta ? ($('#os-oferta-condiciones')?.value || '').trim() : '';
 
@@ -3318,11 +3376,11 @@ async function previsualizarOS() {
     if (!r.ok) throw new Error(await r.text());
     const html = await r.text();
     const win = window.open('', '_blank');
-    if (!win) { alert('Permita las ventanas emergentes para ver la vista previa.'); return; }
+    if (!win) { avisar.atencion('Permita las ventanas emergentes para ver la vista previa.'); return; }
     win.document.open();
     win.document.write(html);
     win.document.close();
-  } catch (e) { alert('Error al previsualizar: ' + e.message); }
+  } catch (e) { avisar.error('Error al previsualizar: ' + e.message); }
 }
 
 function recolectarDatosOS() {
@@ -3332,10 +3390,10 @@ function recolectarDatosOS() {
   const tipoServ = ($('#os-tipo-servicio')?.value || '').trim();
   const tipo     = ($('#os-tipo-contrato')?.value) || 'IVA_PLENO';
 
-  if (!proyecto) { alert('Seleccione el proyecto.'); return null; }
-  if (!provNom)  { alert('Ingrese el proveedor.'); return null; }
-  if (!tipoServ) { alert('Describa el servicio.'); return null; }
-  if (_osItems.length === 0) { alert('Agregue al menos un ítem de servicio.'); return null; }
+  if (!proyecto) { avisar.atencion('Seleccione el proyecto.'); return null; }
+  if (!provNom)  { avisar.atencion('Ingrese el proveedor.'); return null; }
+  if (!tipoServ) { avisar.atencion('Describa el servicio.'); return null; }
+  if (_osItems.length === 0) { avisar.atencion('Agregue al menos un ítem de servicio.'); return null; }
 
   // Compute totals server-side compatible (same logic as osTemplate calcularTotales)
   let subtotal, iva, total, aiuA, aiuI, aiuU;
@@ -3397,7 +3455,7 @@ async function emitirOS() {
     );
     if (!registrado && (nitN || nom)) {
       const label = `${os.proveedorNombre || '(sin nombre)'}${os.proveedorNit ? ' · NIT ' + os.proveedorNit : ''}`;
-      alert(`No se puede crear la OS.\n\nProveedor no registrado en el catálogo:\n• ${label}\n\nInscríbelo en Configuración ERP → Inscribir proveedores y vuelve a intentarlo.`);
+      avisar.error(`No se puede crear la OS.\n\nProveedor no registrado en el catálogo:\n• ${label}\n\nInscríbelo en Configuración ERP → Inscribir proveedores y vuelve a intentarlo.`);
       abrirInscribirProveedor(os.proveedorNit || '', os.proveedorNombre || '');
       return;
     }
@@ -3608,11 +3666,11 @@ async function anularRequerimiento(id, consecutivo){
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Error anulando');
-    alert('Requerimiento anulado');
+    avisar.ok('Requerimiento anulado');
     await cargarRequerimientos();
     renderRequerimientos();
   } catch (err) {
-    alert('No se pudo anular: ' + err.message);
+    avisar.error('No se pudo anular: ' + err.message);
   }
 }
 
@@ -3667,7 +3725,7 @@ function renderEditReqItems() {
 
 async function abrirEditarRequerimiento(id) {
   const r = ESTADO.requerimientos.find(x => String(x.id) === String(id));
-  if (!r) return alert('Requerimiento no encontrado');
+  if (!r) return avisar.atencion('Requerimiento no encontrado');
   _editReqId = id;
   try { _editReqItems = JSON.parse(r.itemsJson || '[]'); } catch { _editReqItems = []; }
   $('#edit-req-titulo').textContent = r.consecutivoSistema || r.consecutivo || id;
@@ -3698,7 +3756,7 @@ async function guardarEdicionRequerimiento() {
     body: JSON.stringify({ proyecto, itemsJson: _editReqItems }),
   });
   const data = await r.json();
-  if (!data.ok) return alert('Error al guardar: ' + (data.error || 'desconocido'));
+  if (!data.ok) return avisar.error('Error al guardar: ' + (data.error || 'desconocido'));
   cerrarEditarRequerimiento();
   await cargarRequerimientos();
   renderRequerimientos();
@@ -3708,7 +3766,7 @@ async function guardarEdicionRequerimiento() {
 
 async function abrirRequerimiento(id){
   const req = ESTADO.requerimientos.find(r => String(r.id) === String(id));
-  if (!req) return alert('Requerimiento no encontrado');
+  if (!req) return avisar.atencion('Requerimiento no encontrado');
   ESTADO.requerimientoActivo = req;
   ESTADO.comparativa = null;
   tab('gen');
@@ -3971,7 +4029,7 @@ async function aplicarHomologacion(idx, nombreHomologado) {
     }
     actualizarResumenSeleccion();
   } catch (e) {
-    alert('Error al homologar: ' + e.message);
+    avisar.error('Error al homologar: ' + e.message);
   }
 }
 
@@ -4248,7 +4306,7 @@ function actualizarResumenSeleccion(){
 
 async function confirmarGenerarOC(){
   const sel = recolectarSelecciones();
-  if (!sel.length) return alert('No hay selecciones válidas. Elige un proveedor por insumo.');
+  if (!sel.length) return avisar.atencion('No hay selecciones válidas. Elige un proveedor por insumo.');
   const req = ESTADO.requerimientoActivo;
   if (!req) return;
 
@@ -4286,7 +4344,7 @@ async function confirmarGenerarOC(){
       });
       if (noReg.length) {
         const lista = noReg.map(p => `• ${p.nombre || '(sin nombre)'}${p.nit ? ' · NIT ' + p.nit : ''}`).join('\n');
-        alert(`No se puede generar la OC.\n\nProveedor(es) no registrado(s):\n${lista}\n\nInscríbelos en Configuración ERP → Inscribir proveedores.`);
+        avisar.error(`No se puede generar la OC.\n\nProveedor(es) no registrado(s):\n${lista}\n\nInscríbelos en Configuración ERP → Inscribir proveedores.`);
         abrirInscribirProveedor(noReg[0].nit || '', noReg[0].nombre || '');
         return;
       }
@@ -4310,12 +4368,12 @@ async function confirmarGenerarOC(){
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
-    alert(`✓ ${data.creadas?.length || 0} OC(s) creadas en borrador.\nRevísalas en la pestaña 1.3 antes de aprobar.`);
+    avisar.ok(`✓ ${data.creadas?.length || 0} OC(s) creadas en borrador.\nRevísalas en la pestaña 1.3 antes de aprobar.`);
     cerrarRequerimientoActivo();
     await refrescarTodo();
     tab('reg');
   } catch (e) {
-    alert(`Error al generar OC: ${e.message}`);
+    avisar.error(`Error al generar OC: ${e.message}`);
     btn.disabled = false;
     btn.innerHTML = '<span>Generar OC(s)</span>';
   }
@@ -4438,7 +4496,7 @@ function _verRequerimientoRender(r) {
   const btnImprimir = wrap.querySelector('#req-ver-imprimir');
   if (btnImprimir) btnImprimir.onclick = () => {
     const seleccionados = getChks().map((c, i) => c.checked ? todosLosItems[i] : null).filter(Boolean);
-    if (!seleccionados.length) return alert('Selecciona al menos un ítem para exportar.');
+    if (!seleccionados.length) return avisar.atencion('Selecciona al menos un ítem para exportar.');
     const fmtWrap = document.createElement('div');
     fmtWrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;z-index:3000';
     fmtWrap.innerHTML = `
@@ -4463,7 +4521,7 @@ function _verRequerimientoRender(r) {
 
 async function verRequerimiento(id) {
   const r = ESTADO.requerimientos.find(x => String(x.id) === String(id));
-  if (!r) return alert('Requerimiento no encontrado');
+  if (!r) return avisar.atencion('Requerimiento no encontrado');
   _verRequerimientoRender(r);
   // Refrescar en segundo plano; si el modal sigue abierto, reemplazarlo con datos frescos
   await Promise.all([cargarRequerimientos(), cargarOrdenes()]);
@@ -4473,7 +4531,7 @@ async function verRequerimiento(id) {
 }
 
 function imprimirRequerimiento(r, items, modo = 'detallado') {
-  if (!items.length) return alert('Selecciona al menos un ítem para exportar.');
+  if (!items.length) return avisar.atencion('Selecciona al menos un ítem para exportar.');
   const fecha  = fmtFecha(r.fechaCorreo || r.fechaSolicitud || '');
   const titulo = `${r.consecutivoSistema || r.consecutivo || 'REQ'} — ${r.proyecto || ''}`;
   const esResumido = modo === 'resumido';
@@ -4540,7 +4598,7 @@ async function abrirCarpetaPdfRequerimientos(){
     }
     window.open(_carpetaPdfReqUrl, '_blank');
   } catch (e) {
-    alert('No se pudo abrir la carpeta de PDFs: ' + e.message);
+    avisar.error('No se pudo abrir la carpeta de PDFs: ' + e.message);
   }
 }
 
@@ -4555,7 +4613,7 @@ async function abrirCarpetaPdfOC(){
     }
     window.open(_carpetaPdfOCUrl, '_blank');
   } catch (e) {
-    alert('No se pudo abrir la carpeta de PDFs: ' + e.message);
+    avisar.error('No se pudo abrir la carpeta de PDFs: ' + e.message);
   }
 }
 
@@ -4570,7 +4628,7 @@ async function abrirCarpetaPdfOS(){
     }
     window.open(_carpetaPdfOSUrl, '_blank');
   } catch (e) {
-    alert('No se pudo abrir la carpeta de PDFs: ' + e.message);
+    avisar.error('No se pudo abrir la carpeta de PDFs: ' + e.message);
   }
 }
 
@@ -4941,9 +4999,9 @@ function abrirModalRemision(){
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Error');
       wrap.remove();
-      alert(`Remisión ${data.numero} creada`);
+      avisar.ok(`Remisión ${data.numero} creada`);
       window.open(`/remisiones/${encodeURIComponent(data.id)}/view.html`, '_blank');
-    }catch(e){ alert('Error: ' + e.message); }
+    }catch(e){ avisar.error('Error: ' + e.message); }
   };
 }
 
@@ -4980,7 +5038,7 @@ async function listarRemisiones(){
       </div>`;
     document.body.appendChild(wrap);
     wrap.querySelector('#rem-list-cerrar').onclick = () => wrap.remove();
-  }catch(e){ alert('No se pudieron cargar las remisiones: ' + e.message); }
+  }catch(e){ avisar.error('No se pudieron cargar las remisiones: ' + e.message); }
 }
 function botonesOC(o){
   const bs = [];
@@ -5246,7 +5304,7 @@ function activarEdicionOC(wrap, o, itemsOrig) {
       wrap.remove();
       await cargarOrdenes();
     } catch (e) {
-      alert('Error: ' + e.message);
+      avisar.error('Error: ' + e.message);
       btn.disabled = false; btn.textContent = 'Guardar cambios';
     }
   };
@@ -5271,7 +5329,7 @@ async function abrirVincularReq(ocId, proyecto) {
     (!proyecto || r.proyecto === proyecto)
   );
   if (!reqs.length) {
-    alert(`No hay requerimientos pendientes${proyecto ? ` para el proyecto ${proyecto}` : ''}.`);
+    avisar.atencion(`No hay requerimientos pendientes${proyecto ? ` para el proyecto ${proyecto}` : ''}.`);
     return;
   }
   const wrap = document.createElement('div');
@@ -5302,10 +5360,10 @@ async function abrirVincularReq(ocId, proyecto) {
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error);
       wrap.remove();
-      alert(`✓ OC vinculada. Requerimiento ahora en estado: ${data.estadoRequerimiento}.`);
+      avisar.ok(`✓ OC vinculada. Requerimiento ahora en estado: ${data.estadoRequerimiento}.`);
       await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
     } catch (e) {
-      alert('Error al vincular: ' + e.message);
+      avisar.error('Error al vincular: ' + e.message);
     }
   };
 }
@@ -5354,7 +5412,7 @@ async function accionOC(id, accion){
         if (r.accion === 'anulada') return `• ${r.numero}: anulada (era su única OC)`;
         return `• ${r.numero}: requiere reemplazo → genera nueva remisión para OC ${(r.ocRestantes || []).join(', ')}`;
       }).join('\n');
-      alert(`OC anulada.\n\nRemisiones afectadas:\n${resumen}`);
+      avisar.atencion(`OC anulada.\n\nRemisiones afectadas:\n${resumen}`);
     }
     if (accion === 'anular' && data.requerimientoRecalculado) {
       const { id: rqId, estadoNuevo } = data.requerimientoRecalculado;
@@ -5365,7 +5423,7 @@ async function accionOC(id, accion){
     }
     await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
   }catch(e){
-    alert('Error: ' + e.message);
+    avisar.error('Error: ' + e.message);
   }
 }
 
@@ -5402,13 +5460,13 @@ async function accionOCEntregar(id) {
       const msg = autoSalida
         ? `OC marcada como entregada.\nEntrada y salida de inventario registradas automáticamente.`
         : `OC marcada como entregada.\nEntrada de inventario registrada. Recuerda registrar la salida cuando consumas los materiales.`;
-      alert(msg);
+      avisar.ok(msg);
     }
     if (data.remisionGenerada) {
-      alert(`✓ Remisión ${data.remisionGenerada.numero} generada automáticamente para esta OC.`);
+      avisar.ok(`✓ Remisión ${data.remisionGenerada.numero} generada automáticamente para esta OC.`);
     }
   } catch(e) {
-    alert('Error: ' + e.message);
+    avisar.error('Error: ' + e.message);
   } finally {
     _entregandoOC = false;
     if (bEntregar) bEntregar.disabled = false;
@@ -5483,7 +5541,7 @@ async function aprobarOCConModal(id){
                 { titulo: `OC ${oAprobada.numeroOC || ''} aprobada. ¿Enviar la solicitud de pago a tesorería ahora?`, aceptar: 'Enviar ahora', cancelar: 'Después' }))) {
         enviarATesoreria(id);
       }
-    }catch(e){ alert('Error: ' + e.message); }
+    }catch(e){ avisar.error('Error: ' + e.message); }
   };
 }
 
@@ -5505,12 +5563,12 @@ async function enviarATesoreria(id){
   const o = ESTADO.ordenes.find(x => String(x.id) === String(id));
   if (!o) return;
   if (!ESTADO.tesoreria?.habilitado) {
-    alert('La integración con tesorería no está configurada en el servidor.');
+    avisar.atencion('La integración con tesorería no está configurada en el servidor.');
     return;
   }
   const t = tesoreriaDeOC(o);
   if (!t.enviable) {
-    alert('Solo se pueden enviar OC aprobadas o finalizadas, con número asignado.');
+    avisar.atencion('Solo se pueden enviar OC aprobadas o finalizadas, con número asignado.');
     return;
   }
   if (t.enviada && t.estado !== 'RECHAZADA' && !(await pedirConfirmacion('No se creará una segunda solicitud.',
@@ -5518,7 +5576,7 @@ async function enviarATesoreria(id){
 
   const proyectos = ESTADO.tesoreria.proyectos || [];
   if (!proyectos.length) {
-    alert('No se pudieron cargar los proyectos de KAOS. Intenta refrescar; si sigue vacío, falta correr kaos:sync en el servidor.');
+    avisar.error('No se pudieron cargar los proyectos de KAOS. Intenta refrescar; si sigue vacío, falta correr kaos:sync en el servidor.');
     return;
   }
 
@@ -5640,8 +5698,8 @@ async function enviarATesoreria(id){
     if (_enviandoTesoreria) return; // guardia anti-doble-clic
     const proyectoId = elegido || sel.value;
     const concepto   = wrap.querySelector('#tes-concepto').value.trim();
-    if (!proyectoId)  { alert('Elige el proyecto de tesorería.'); return; }
-    if (!concepto)    { alert('Escribe el concepto.'); return; }
+    if (!proyectoId)  { avisar.atencion('Elige el proyecto de tesorería.'); return; }
+    if (!concepto)    { avisar.atencion('Escribe el concepto.'); return; }
 
     _enviandoTesoreria = true;
     btnOk.disabled = true;
@@ -5664,12 +5722,12 @@ async function enviarATesoreria(id){
       }
       wrap.remove();
       // duplicado no es error: la idempotencia es justo lo que evita el doble pago
-      alert(data.duplicado
+      avisar.ok(data.duplicado
         ? `Esta OC ya estaba en tesorería como ${data.egreso_id}.\nNo se creó una segunda solicitud.`
         : `Solicitud creada en tesorería: ${data.egreso_id}`);
       await cargarOrdenes();
     } catch(e) {
-      alert('Error: ' + e.message);
+      avisar.error('Error: ' + e.message);
     } finally {
       _enviandoTesoreria = false;
       btnOk.textContent = 'Enviar solicitud';
@@ -5832,7 +5890,7 @@ $('#btn-extraer')?.addEventListener('click', async () => {
 });
 async function confirmar(){
   const filas = ESTADO.itemsExtraidos.filter(i => !i.excluir && i.insumo);
-  if (!filas.length) return alert('No hay ítems para guardar.');
+  if (!filas.length) return avisar.atencion('No hay ítems para guardar.');
   const sinPrecio = filas.filter(i => !i.precio || parseFloat(i.precio) <= 0);
   if (sinPrecio.length && !(await pedirConfirmacion('', { titulo: `${sinPrecio.length} ítem(s) sin precio. ¿Guardar igualmente?`, aceptar: 'Guardar' }))) return;
   const btn = $('#btn-confirmar'); const spin = $('#spinner-conf');
@@ -5847,7 +5905,7 @@ async function confirmar(){
     const msgNuevos = data.insumosNuevos ? ` · ${data.insumosNuevos} insumo(s) nuevos al catálogo` : '';
     $('#exito-txt').textContent = `${data.guardadas} precio(s) actualizados${msgNuevos}`;
     $('#exito-sub').textContent = 'Los precios quedan disponibles para pre-llenar futuras OCs.';
-  }catch(err){ alert('Error: '+err.message); }
+  }catch(err){ avisar.error('Error: '+err.message); }
   finally{ btn.disabled = false; spin.style.display = 'none'; }
 }
 function reiniciar(){
@@ -5973,9 +6031,9 @@ $('#btn-extraer-oc')?.addEventListener('click', async () => {
 });
 async function generarOCdesdeCot(){
   const filas = ESTADO.itemsOC.filter(i => !i.excluir && i.insumo);
-  if (!filas.length) return alert('No hay ítems para incluir en la OC.');
+  if (!filas.length) return avisar.atencion('No hay ítems para incluir en la OC.');
   const proyecto = $('#oc-proyecto').value;
-  if (!proyecto) return alert('Selecciona un proyecto.');
+  if (!proyecto) return avisar.atencion('Selecciona un proyecto.');
 
   // Proveedor desde el header (campos independientes)
   const provNombre = ($('#oc-razon-social')?.value || '').trim();
@@ -5995,7 +6053,7 @@ async function generarOCdesdeCot(){
       (nomN && (_normNom(r.nombre) === nomN || _normNom(r.razonSocial) === nomN))
     );
     if (!registrado) {
-      alert(`No se puede generar la OC.\n\nProveedor no registrado en el catálogo:\n• ${provNombre || '(sin nombre)'}${provNit ? ' · NIT ' + provNit : ''}\n\nInscríbelo en Configuración ERP → Inscribir proveedores y vuelve a intentarlo.`);
+      avisar.error(`No se puede generar la OC.\n\nProveedor no registrado en el catálogo:\n• ${provNombre || '(sin nombre)'}${provNit ? ' · NIT ' + provNit : ''}\n\nInscríbelo en Configuración ERP → Inscribir proveedores y vuelve a intentarlo.`);
       abrirInscribirProveedor(provNit, provNombre);
       return;
     }
@@ -6022,7 +6080,7 @@ async function generarOCdesdeCot(){
     $('#oc-exito-detalle').textContent = detalle;
     await cargarOrdenes();
     if (reqVincular) await cargarRequerimientos();
-  }catch(err){ alert('Error al generar OC: '+err.message); }
+  }catch(err){ avisar.error('Error al generar OC: '+err.message); }
   finally{ btn.disabled = false; spin.style.display = 'none'; }
 }
 function reiniciarOC(){
@@ -6361,7 +6419,7 @@ function editarProyecto(){
 // borrarse, porque puede quedar un onclick viejo en el caché de algún navegador
 // y "toggleProyecto is not defined" no le dice nada a quien lo ve.
 function toggleProyecto(){
-  alert('El estado de los proyectos se administra en KAOS.');
+  avisar.atencion('El estado de los proyectos se administra en KAOS.');
 }
 
 // ── Gestión de proveedores (alta + activar/inactivar) ────────────────────────
@@ -6499,7 +6557,7 @@ async function toggleProveedor(id, estaActivo){
     if (!r.ok) throw new Error(j.error || 'Error');
     cargarProveedoresAdmin();
     cargarAutocompletes();
-  }catch(e){ alert('Error: ' + e.message); }
+  }catch(e){ avisar.error('Error: ' + e.message); }
 }
 
 function abrirInscribirProveedor(nit, nombre){
@@ -6519,7 +6577,7 @@ function limpiarLogo(){ _logoDataUrl = null; renderLogoPreview(); }
 $('#input-logo')?.addEventListener('change', e => {
   const file = e.target.files[0];
   if (!file) return;
-  if (file.size > 500 * 1024) { alert('El logo no puede superar 500 KB'); return; }
+  if (file.size > 500 * 1024) { avisar.atencion('El logo no puede superar 500 KB'); return; }
   const rd = new FileReader();
   rd.onload = ev => { _logoDataUrl = ev.target.result; renderLogoPreview(); };
   rd.readAsDataURL(file);
@@ -6734,7 +6792,7 @@ async function anularDocumentoInv(docRef, tipo) {
     await cargarEntradasInv();
     await cargarSalidasInv();
     await cargarStockInv();
-  } catch(e) { alert('Error al anular: ' + e.message); }
+  } catch(e) { avisar.error('Error al anular: ' + e.message); }
 }
 
 async function cargarEntradasInv() {
@@ -6936,17 +6994,17 @@ async function _invConfirmarDevolucion(docRef, batchId, proyecto) {
     precioUnitario: Number(tr.dataset.precio) || 0,
     cantidad:       Number(tr.querySelector('.inv-dev-qty').value) || 0,
   })).filter(it => it.cantidad > 0);
-  if (!items.length) { alert('Ingrese al menos una cantidad mayor a cero.'); return; }
+  if (!items.length) { avisar.atencion('Ingrese al menos una cantidad mayor a cero.'); return; }
   try {
     const r = await fetch('/inventario/devoluciones', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ docRef, batchId, proyecto, items }),
     }).then(r => r.json());
-    if (!r.ok) { alert('Error: ' + (r.error || 'desconocido')); return; }
-    alert(`Devolución registrada (${r.creados.length} ítem${r.creados.length !== 1 ? 's' : ''}).`);
+    if (!r.ok) { avisar.error('Error: ' + (r.error || 'desconocido')); return; }
+    avisar.ok(`Devolución registrada (${r.creados.length} ítem${r.creados.length !== 1 ? 's' : ''}).`);
     document.querySelector('#modal-inv-doc').style.display = 'none';
     cargarEntradasInv(); cargarSalidasInv(); cargarStockInv();
-  } catch (e) { alert('Error: ' + e.message); }
+  } catch (e) { avisar.error('Error: ' + e.message); }
 }
 
 async function _invAprobarDocumento(batchId, proyecto, tipo) {
@@ -6957,11 +7015,11 @@ async function _invAprobarDocumento(batchId, proyecto, tipo) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ proyecto, tipo }),
     }).then(r => r.json());
-    if (!r.ok) { alert('Error: ' + (r.error || 'desconocido')); return; }
-    alert(`Documento aprobado: ${r.documentoRef}`);
+    if (!r.ok) { avisar.error('Error: ' + (r.error || 'desconocido')); return; }
+    avisar.ok(`Documento aprobado: ${r.documentoRef}`);
     document.querySelector('#modal-inv-doc').style.display = 'none';
     cargarEntradasInv(); cargarSalidasInv(); cargarStockInv();
-  } catch (e) { alert('Error: ' + e.message); }
+  } catch (e) { avisar.error('Error: ' + e.message); }
 }
 
 async function _invAnularDocumento(batchId) {
@@ -6971,11 +7029,11 @@ async function _invAnularDocumento(batchId) {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
     }).then(r => r.json());
-    if (!r.ok) { alert('Error: ' + (r.error || 'desconocido')); return; }
-    alert('Documento anulado.');
+    if (!r.ok) { avisar.error('Error: ' + (r.error || 'desconocido')); return; }
+    avisar.ok('Documento anulado.');
     document.querySelector('#modal-inv-doc').style.display = 'none';
     cargarEntradasInv(); cargarSalidasInv(); cargarStockInv();
-  } catch (e) { alert('Error: ' + e.message); }
+  } catch (e) { avisar.error('Error: ' + e.message); }
 }
 
 function inv_precargarEntradaDesdeOC(ocId) {
