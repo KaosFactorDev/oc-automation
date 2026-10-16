@@ -28,6 +28,7 @@ const CABECERA = `
   o.aprobado_por, o.fecha_aprobacion, o.anulado_por, o.fecha_anulacion,
   o.motivo_anulacion, o.pagado, o.pagado_por, o.fecha_pago,
   o.cumplido, o.cumplido_por, o.fecha_cumplido, o.pdf_url, o.sp_id,
+  o.papelera_en, o.papelera_por, o.papelera_motivo,
   p.codigo AS proyecto,
   pr.razon_social AS proveedor_nombre`;
 
@@ -75,6 +76,10 @@ function mapear(o, items = []) {
     fechaCumplido:               iso(o.fecha_cumplido),
     pdfUrl:                      o.pdf_url || '',
     itemsJson:                   JSON.stringify(items),
+    // En la papelera: no aparece en listados ni en Control de Costos.
+    papeleraEn:                  iso(o.papelera_en),
+    papeleraPor:                 o.papelera_por || '',
+    papeleraMotivo:              o.papelera_motivo || '',
     sp_id:                       o.sp_id,
   };
 }
@@ -113,7 +118,8 @@ async function armar(cabeceras) {
 }
 
 async function listar({ estado = null, proyectoId = null } = {}) {
-  const cond = [];
+  // Lo que está en la papelera no existe para los listados.
+  const cond = ['o.papelera_en IS NULL'];
   const vals = [];
   if (estado)     { vals.push(estado);     cond.push(`o.estado = $${vals.length}`); }
   if (proyectoId) { vals.push(proyectoId); cond.push(`o.proyecto_id = $${vals.length}`); }
@@ -282,8 +288,9 @@ async function crearDesdeApi(datos, items, { aprobar: aprobarla, formatear }) {
 /** Las órdenes de servicio con ese origen_solicitud_id (cero o una). */
 async function porOrigenSolicitud(origenSolicitudId) {
   return pg.rows(
-    `SELECT o.id, o.numero_os, o.estado, o.pagado, o.cumplido,
-            o.valor, o.iva, o.total, o.fecha_creacion,
+    `SELECT o.id, o.numero_os,
+            CASE WHEN o.papelera_en IS NOT NULL THEN 'papelera' ELSE o.estado END AS estado,
+            o.pagado, o.cumplido, o.valor, o.iva, o.total, o.fecha_creacion,
             CASE WHEN p.origen = 'kaos' AND p.nombre <> '' THEN p.nombre ELSE p.codigo END AS proyecto
        FROM erp.ordenes_servicio o
        LEFT JOIN erp.proyectos p ON p.id = o.proyecto_id
@@ -359,7 +366,59 @@ async function resolverProveedor(c, nit, nombre) {
   return clave;
 }
 
+/**
+ * Corrige una orden ya emitida (aprobada o finalizada), en UNA transacción:
+ * cabecera, obra, proveedor e ítems. Lo que cambia y por qué lo decide
+ * src/correcciones.js; acá solo se escribe.
+ *
+ * @param {object} datos
+ * @param {object} [datos.cambios]   columnas de cabecera, con los nombres de COLUMNAS
+ * @param {string} [datos.proyecto]  la obra nueva (código); tiene que estar activa
+ * @param {string} [datos.proveedorNit] y [datos.proveedorNombre]
+ * @param {Array}  [datos.items]     si viene, reemplaza los ítems
+ */
+async function corregir(id, { cambios = {}, proyecto = null, proveedorNit = null, proveedorNombre = null, items = null } = {}) {
+  return pg.tx(async (c) => {
+    // FOR UPDATE: nadie aprueba, anula ni paga esta orden mientras se corrige.
+    const actual = await c.query('SELECT estado FROM erp.ordenes_servicio WHERE id = $1 FOR UPDATE', [id]);
+    if (!actual.rowCount || !['aprobada', 'finalizada'].includes(actual.rows[0].estado)) {
+      throw new EstadoInvalido(`La orden ${id} no existe o no está aprobada ni finalizada`);
+    }
+
+    const sets = [];
+    const vals = [];
+    const poner = (col, valor) => { vals.push(valor); sets.push(`${col} = $${vals.length}`); };
+
+    if (proyecto) {
+      const { proyectoId } = await resolverProyecto(c, proyecto, { exigirActivo: true });
+      if (!proyectoId) throw Object.assign(new Error(`El proyecto "${proyecto}" no está en el catálogo`), { status: 422 });
+      poner('proyecto_id', proyectoId);
+      poner('proyecto_texto', null);
+    }
+    if (proveedorNit) {
+      const nit = await resolverProveedor(c, proveedorNit, proveedorNombre);
+      if (!nit) throw Object.assign(new Error('El NIT del proveedor no es válido'), { status: 422 });
+      poner('proveedor_nit', nit);
+    }
+    for (const [clave, valor] of Object.entries(cambios)) {
+      const col = COLUMNAS[clave];
+      if (col) poner(col, valor);
+    }
+
+    if (items) {
+      await c.query('DELETE FROM erp.orden_servicio_items WHERE orden_servicio_id = $1', [id]);
+      await insertarItems(c, id, items);
+    }
+    if (sets.length) {
+      vals.push(id);
+      await c.query(
+        `UPDATE erp.ordenes_servicio SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+    }
+  });
+}
+
 module.exports = {
+  corregir,
   listar, obtener, crear, aprobar, actualizar,
   crearDesdeApi, porOrigenSolicitud, ProyectoNoEncontrado,
 };

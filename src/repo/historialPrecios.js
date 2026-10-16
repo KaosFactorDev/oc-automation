@@ -68,7 +68,9 @@ function mapear(h) {
  * fecha interpretable van al final: no pueden competir por "más reciente".
  */
 async function listar({ insumo = null, proveedorNit = null, limite = null } = {}) {
-  const cond = [];
+  // Los precios de una compra que se corrigió o se retiró no se sugieren: el
+  // precio bueno es el de la fila nueva. Siguen en la tabla, marcados.
+  const cond = [`COALESCE(h.estado_compra, '') NOT IN ('Corregida', 'Papelera')`];
   const vals = [];
   if (insumo)       { vals.push(insumo);       cond.push(`erp.norm(h.insumo) = erp.norm($${vals.length})`); }
   if (proveedorNit) { vals.push(proveedorNit); cond.push(`h.proveedor_nit = erp.norm_nit($${vals.length})`); }
@@ -150,4 +152,19 @@ async function resolverProveedor(c, nit, nombre) {
   return clave;
 }
 
-module.exports = { listar, agregar };
+/**
+ * Marca los precios que dejó una compra (por su número de OC), para que dejen de
+ * sugerirse. No se borran: el historial dice que esa compra existió.
+ * @returns {Promise<number>} filas marcadas
+ */
+async function marcarDeCompra(numeroCompra, estado) {
+  if (!numeroCompra) return 0;
+  const r = await pg.query(
+    `UPDATE erp.historial_precios SET estado_compra = $2
+      WHERE numero_compra = $1 AND COALESCE(estado_compra, '') NOT IN ('Corregida', 'Papelera')`,
+    [String(numeroCompra), estado]);
+  return r.rowCount;
+}
+
+module.exports = {
+  marcarDeCompra, listar, agregar };

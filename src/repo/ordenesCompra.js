@@ -37,6 +37,7 @@ const CABECERA = `
   o.motivo_anulacion, o.pagado, o.pagado_por, o.fecha_pago,
   o.entregado, o.entregado_por, o.fecha_entrega, o.pdf_url, o.xlsx_url,
   o.solicitud_tesoreria_id, o.solicitud_tesoreria_por, o.fecha_solicitud_tesoreria,
+  o.papelera_en, o.papelera_por, o.papelera_motivo,
   o.sp_id,
   p.codigo AS proyecto,
   pr.razon_social AS proveedor_nombre`;
@@ -83,6 +84,10 @@ function mapear(o, items = []) {
     solicitudTesoreriaId:      o.solicitud_tesoreria_id || '',
     solicitudTesoreriaPor:     o.solicitud_tesoreria_por || '',
     fechaSolicitudTesoreria:   iso(o.fecha_solicitud_tesoreria),
+    // En la papelera: no aparece en listados ni en Control de Costos.
+    papeleraEn:              iso(o.papelera_en),
+    papeleraPor:             o.papelera_por || '',
+    papeleraMotivo:          o.papelera_motivo || '',
     sp_id:                   o.sp_id,
   };
 }
@@ -128,7 +133,9 @@ async function armar(cabeceras) {
 }
 
 async function listar({ estado = null, requerimientoId = null, proyectoId = null } = {}) {
-  const cond = [];
+  // Lo que está en la papelera no existe para los listados: ni para la
+  // consola, ni para la cobertura de requerimientos, ni para los informes.
+  const cond = ['o.papelera_en IS NULL'];
   const vals = [];
   if (estado)          { vals.push(estado);          cond.push(`o.estado = $${vals.length}`); }
   if (requerimientoId) { vals.push(requerimientoId); cond.push(`o.requerimiento_id = $${vals.length}`); }
@@ -314,7 +321,59 @@ async function resolverProveedor(c, nit, nombre) {
   return clave;
 }
 
+/**
+ * Corrige una orden ya emitida (aprobada o finalizada), en UNA transacción:
+ * cabecera, obra, proveedor e ítems. Lo que cambia y por qué lo decide
+ * src/correcciones.js; acá solo se escribe.
+ *
+ * @param {object} datos
+ * @param {object} [datos.cambios]   columnas de cabecera, con los nombres de COLUMNAS
+ * @param {string} [datos.proyecto]  la obra nueva (código); tiene que estar activa
+ * @param {string} [datos.proveedorNit] y [datos.proveedorNombre]
+ * @param {Array}  [datos.items]     si viene, reemplaza los ítems
+ */
+async function corregir(id, { cambios = {}, proyecto = null, proveedorNit = null, proveedorNombre = null, items = null } = {}) {
+  return pg.tx(async (c) => {
+    // FOR UPDATE: nadie aprueba, anula ni paga esta orden mientras se corrige.
+    const actual = await c.query('SELECT estado FROM erp.ordenes_compra WHERE id = $1 FOR UPDATE', [id]);
+    if (!actual.rowCount || !['aprobada', 'finalizada'].includes(actual.rows[0].estado)) {
+      throw new EstadoInvalido(`La orden ${id} no existe o no está aprobada ni finalizada`);
+    }
+
+    const sets = [];
+    const vals = [];
+    const poner = (col, valor) => { vals.push(valor); sets.push(`${col} = $${vals.length}`); };
+
+    if (proyecto) {
+      const { proyectoId } = await resolverProyecto(c, proyecto, { exigirActivo: true });
+      if (!proyectoId) throw Object.assign(new Error(`El proyecto "${proyecto}" no está en el catálogo`), { status: 422 });
+      poner('proyecto_id', proyectoId);
+      poner('proyecto_texto', null);
+    }
+    if (proveedorNit) {
+      const nit = await resolverProveedor(c, proveedorNit, proveedorNombre);
+      if (!nit) throw Object.assign(new Error('El NIT del proveedor no es válido'), { status: 422 });
+      poner('proveedor_nit', nit);
+    }
+    for (const [clave, valor] of Object.entries(cambios)) {
+      const col = COLUMNAS[clave];
+      if (col) poner(col, valor);
+    }
+
+    if (items) {
+      await c.query('DELETE FROM erp.orden_compra_items WHERE orden_compra_id = $1', [id]);
+      await insertarItems(c, id, items);
+    }
+    if (sets.length) {
+      vals.push(id);
+      await c.query(
+        `UPDATE erp.ordenes_compra SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+    }
+  });
+}
+
 module.exports = {
+  corregir,
   listar, obtener, obtenerVarias,
   crear, aprobar, actualizar,
 };

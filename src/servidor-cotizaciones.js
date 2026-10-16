@@ -44,6 +44,8 @@ const tesoreria        = require('./tesoreriaClient');
 const apiRrhh          = require('./apiRrhh');
 const bitacora         = require('./bitacora');
 const repoBitacora     = require('./repo/historial');
+const correcciones     = require('./correcciones');
+const repoPapelera     = require('./repo/papelera');
 const geminiModelos    = require('./geminiModelos');
 const geminiClient     = require('./geminiClient');
 
@@ -114,6 +116,7 @@ async function obtenerOC(id) {
  * consola al mostrar los botones; acá es la que vale.
  */
 function validarAccionOC(accion, oc) {
+  if (oc.papeleraEn) return 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.';
   const e = oc.estado;
   if (accion === 'aprobar' && e !== 'borrador') {
     return `Solo se aprueba un borrador; esta orden está ${e}.`;
@@ -134,6 +137,7 @@ function validarAccionOC(accion, oc) {
 
 /** Lo mismo para una orden de servicio. */
 function validarAccionOS(accion, os) {
+  if (os.papeleraEn) return 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.';
   const e = os.estado;
   if (accion === 'aprobar' && e !== 'borrador') {
     return `Solo se aprueba un borrador; esta orden está ${e}.`;
@@ -150,6 +154,47 @@ function validarAccionOS(accion, os) {
     if (os.cumplido) return 'Esta orden ya está marcada como cumplida.';
   }
   return null;
+}
+
+/**
+ * Las filas que una OC deja en el historial de precios: una por ítem con precio,
+ * con el precio unitario CON IVA, que es lo que se compara al sugerir.
+ */
+function filasHistorialDeOC(oc) {
+  let itemsOC = [];
+  try { itemsOC = JSON.parse(oc.itemsJson || '[]'); } catch {}
+  return itemsOC
+    .filter(it => Number(it.precioUnitario || it.precio || 0) > 0)
+    .map(it => {
+      const base = Number(it.precioUnitario || it.precio || 0);
+      const precioFinal = base * (1 + Number(it.ivaPct || 0) / 100);
+      return {
+        proyecto:        oc.proyecto || '',
+        numCotizacion:   oc.numeroOC || '',
+        nitProveedor:    oc.proveedorNit || '',
+        nombreProveedor: oc.proveedorNombre || '',
+        fechaVigencia:   new Date().toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' }),
+        insumo:          it.descripcion || it.insumo || '',
+        cantidad:        Number(it.cantidad || 1),
+        precio:          precioFinal,
+      };
+    });
+}
+
+/**
+ * Recalcula el estado del requerimiento de una OC que entró o salió de la
+ * papelera: sus cantidades dejan de contar, o vuelven a contar.
+ */
+async function recalcularRequerimientoDe(doc) {
+  if (!doc || !doc.requerimientoId) return;
+  try {
+    const ctx = await ctxSharePoint();
+    const reqItem = await obtenerRequerimiento(doc.requerimientoId);
+    const nuevo = await calcularEstadoRequerimiento(ctx, reqItem);
+    if (nuevo !== ((reqItem.fields || {}).estado || 'pendiente')) {
+      await actualizarRequerimiento(doc.requerimientoId, { estado: nuevo });
+    }
+  } catch (e) { console.warn('No se pudo recalcular el requerimiento:', e.message); }
 }
 
 async function listarOC(filtro) {
@@ -1986,7 +2031,7 @@ const servidor = http.createServer(async (req, res) => {
           // Guardar en SharePoint
           const requerimientos = require('./requerimientos');
           const { item, duplicado, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, {
-            messageId:  `manual:${process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
+            messageId:  `manual:${bitacora.quien(req).usuario}:${Date.now()}`,
             adjuntoUrl: '',
           });
 
@@ -2046,7 +2091,7 @@ const servidor = http.createServer(async (req, res) => {
 
         const requerimientos = require('./requerimientos');
         const { item, consecutivoSistema } = await requerimientos.crearDesdeCorreo(resultado, {
-          messageId:  `manual:${sesion?.email || process.env.USUARIO_EMAIL || 'sistema'}:${Date.now()}`,
+          messageId:  `manual:${bitacora.quien(req).usuario}:${Date.now()}`,
           adjuntoUrl: '',
         });
 
@@ -2106,7 +2151,7 @@ const servidor = http.createServer(async (req, res) => {
 
         const ctx = await ctxSharePoint();
 
-        const usuario = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario = bitacora.quien(req).usuario;
         const { id, numero } = await crearRemisionYGuardar(ctx, ocIds, {
           observaciones:        body.observaciones,
           responsableEntrega:   body.responsableEntrega,
@@ -2191,7 +2236,7 @@ const servidor = http.createServer(async (req, res) => {
         if (estadoActual === 'anulado')   return json({ error: 'Ya está anulado' }, 400);
         if (estadoActual === 'gestionado') return json({ error: 'No se puede anular un requerimiento ya gestionado' }, 400);
         const notasPrev = reqItem.fields?.notas || '';
-        const usuario   = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario   = bitacora.quien(req).usuario;
         const notasNuevas = (notasPrev ? notasPrev + ' | ' : '') +
           `ANULADO por ${usuario} el ${new Date().toLocaleDateString('es-CO')}${motivo ? ` — ${motivo}` : ''}`;
         await actualizarRequerimiento(reqItem.id, {
@@ -2522,6 +2567,7 @@ const servidor = http.createServer(async (req, res) => {
         }
 
         const oc = await repoOrdenesCompra.obtener(itemId);
+        if (oc && oc.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
         if (!oc) return json({ error: 'OC no encontrada' }, 404);
 
         // El documento pide validar 'aprobada'; se acepta también 'finalizada'
@@ -2683,29 +2729,11 @@ const servidor = http.createServer(async (req, res) => {
       // Si se aprueba → ejecutar tareas secundarias en segundo plano (no bloquean la respuesta)
       if (accion === 'aprobar') {
         const oc = actualizado;
-        const itemsJson = oc.itemsJson || '[]';
         (async () => {
           // Ya no se registra el gasto en ninguna parte: erp.vw_gastos lo deriva
           // de la orden aprobada.
           try {
-            let itemsOC = [];
-            try { itemsOC = JSON.parse(itemsJson); } catch {}
-            const filasHist = itemsOC
-              .filter(it => Number(it.precioUnitario || it.precio || 0) > 0)
-              .map(it => {
-                const base = Number(it.precioUnitario || it.precio || 0);
-                const precioFinal = base * (1 + Number(it.ivaPct || 0) / 100);
-                return {
-                  proyecto:        oc.proyecto || '',
-                  numCotizacion:   oc.numeroOC || '',
-                  nitProveedor:    oc.proveedorNit || '',
-                  nombreProveedor: oc.proveedorNombre || '',
-                  fechaVigencia:   new Date().toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' }),
-                  insumo:          it.descripcion || it.insumo || '',
-                  cantidad:        Number(it.cantidad || 1),
-                  precio:          precioFinal,
-                };
-              });
+            const filasHist = filasHistorialDeOC(oc);
             if (filasHist.length) {
               const n = await agregarFilasCompras(filasHist);
               console.log(`[OC ${oc.numeroOC}] ${n} precios añadidos a HistorialPrecios SP`);
@@ -3087,6 +3115,7 @@ const servidor = http.createServer(async (req, res) => {
 
         const ctx = await ctxSharePoint();
         const ocItem  = await obtenerOC(mVincular[1]);
+        if (ocItem.fields.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
         const reqItem = await obtenerRequerimiento(reqId);
 
         // Actualizar OC con el requerimientoId
@@ -3581,6 +3610,210 @@ FORMATO:
     return;
   }
 
+  // ── Papelera ──────────────────────────────────────────────────────────────
+  // POST /ordenes/:id/papelera y /os/:id/papelera (?simular=1 = solo el plan),
+  // POST /ordenes/:id/restaurar y /os/:id/restaurar, GET /papelera.
+  // Solo admin, con motivo. Ver supabase/migrations/20261016140000_papelera_documentos.sql.
+  const mPapelera = url.match(/^\/(ordenes|os)\/([^\/]+)\/(papelera|restaurar)$/);
+  if (req.method === 'POST' && mPapelera) {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        if (!(await correcciones.esAdmin(req))) {
+          return json({ error: 'Solo un administrador puede mandar órdenes a la papelera o restaurarlas.' }, 403);
+        }
+        const [, recurso, id, accion] = mPapelera;
+        const esOC = recurso === 'ordenes';
+        const tipo = esOC ? 'orden_compra' : 'orden_servicio';
+        const repoDoc = esOC ? repoOrdenesCompra : repoOrdenesServicio;
+        const motivo = String(body.motivo || '').trim();
+        if (!motivo) return json({ error: accion === 'papelera' ? 'Mandar a la papelera exige un motivo.' : 'Restaurar exige un motivo.' }, 400);
+
+        const doc = await repoDoc.obtener(id);
+        if (!doc) return json({ error: 'Orden no encontrada' }, 404);
+        const quien = bitacora.quien(req);
+        const numero = (esOC ? doc.numeroOC : doc.numeroOS) || '';
+
+        if (accion === 'papelera') {
+          if (doc.papeleraEn) return json({ error: 'La orden ya está en la papelera.' }, 409);
+          // Salió plata: borrarla dejaría un pago sin documento. Si el pago se
+          // marcó por error, se desmarca primero con «Corregir».
+          if (doc.pagado) {
+            return json({ error: 'La orden está marcada como pagada. Si fue un error, desmárcalo primero con «Corregir»; si se pagó de verdad, no va a la papelera.' }, 409);
+          }
+          if (esOC && doc.solicitudTesoreriaId) {
+            return json({ error: `La orden se envió a tesorería (${doc.solicitudTesoreriaId}): la papelera se habilita con la sincronización de tesorería.` }, 409);
+          }
+
+          if (new URLSearchParams(req.url.split('?')[1] || '').get('simular') === '1') {
+            const efectos = { movimientos: [], remisiones: [], precios: false };
+            if (esOC) {
+              efectos.movimientos = [...new Set((await repoInventario.vigentesDeOC(id)).map(m => m.documentoRef).filter(Boolean))];
+              efectos.remisiones = (await repoRemisiones.porOrdenCompra(id)).filter(r => r.estado !== 'anulada').map(r => r.numero);
+              efectos.precios = !!doc.numeroOC;
+            }
+            return json({ ok: true, simulado: true, efectos });
+          }
+
+          let efectos;
+          await bitacora.conHistorial({ tipo, id, accion: 'papelera', req, motivo },
+            async () => { efectos = await repoPapelera.enviar(tipo, id, { usuario: quien.usuario, motivo }); });
+          const partes = [
+            efectos.movimientos.length ? `almacén anulado: ${efectos.movimientos.join(', ')}` : null,
+            ...efectos.remisiones.map(r => `remisión ${r.numero}: ${r.accion}`),
+            efectos.precios ? `${efectos.precios} precio(s) retirados del historial` : null,
+          ].filter(Boolean);
+          if (partes.length) {
+            await bitacora.anotar({ tipo, id, accion: 'efectos_papelera', numero, usuario: quien.usuario,
+              usuarioNombre: quien.nombre, origen: quien.origen, motivo: partes.join(' · '), antes: null, despues: null });
+          }
+          await recalcularRequerimientoDe(doc);
+          return json({ ok: true, efectos, hechos: partes });
+        }
+
+        // restaurar
+        if (!doc.papeleraEn) return json({ error: 'La orden no está en la papelera.' }, 409);
+        let r;
+        await bitacora.conHistorial({ tipo, id, accion: 'restaurar', req, motivo },
+          async () => { r = await repoPapelera.restaurar(tipo, id); });
+        if (r.revertidos) {
+          await bitacora.anotar({ tipo, id, accion: 'efectos_restaurar', numero, usuario: quien.usuario,
+            usuarioNombre: quien.nombre, origen: quien.origen,
+            motivo: `${r.revertidos} cambio(s) de la papelera revertidos (almacén, remisiones, precios)`, antes: null, despues: null });
+        }
+        await recalcularRequerimientoDe(doc);
+        return json({ ok: true, revertidos: r.revertidos });
+      } catch (err) {
+        return json({ error: err.message }, err.status || 500);
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url === '/papelera') {
+    try {
+      if (!(await correcciones.esAdmin(req))) return json({ error: 'Solo un administrador ve la papelera.' }, 403);
+      return json({ papelera: await repoPapelera.listar() });
+    } catch (err) { return json({ error: err.message }, 500); }
+  }
+
+  // ── POST /ordenes/:id/corregir y /os/:id/corregir → corregir una emitida ──
+  // Solo admin y con motivo. Con ?simular=1 devuelve el plan sin escribir: qué
+  // cambia, qué efectos tiene y qué lo bloquea, para confirmarlo antes. Ver
+  // src/correcciones.js.
+  const mCorregir = url.match(/^\/(ordenes|os)\/([^\/]+)\/corregir$/);
+  if (req.method === 'POST' && mCorregir) {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        if (!(await correcciones.esAdmin(req))) {
+          return json({ error: 'Solo un administrador puede corregir órdenes ya emitidas.' }, 403);
+        }
+        const esOC = mCorregir[1] === 'ordenes';
+        const id = mCorregir[2];
+        const simular = new URLSearchParams(req.url.split('?')[1] || '').get('simular') === '1';
+        const quien = bitacora.quien(req);
+        const tipo = esOC ? 'orden_compra' : 'orden_servicio';
+
+        const previa = esOC ? await repoOrdenesCompra.obtener(id) : await repoOrdenesServicio.obtener(id);
+        if (!previa) return json({ error: 'Orden no encontrada' }, 404);
+        if (previa.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
+
+        let remisiones = [];
+        let plan;
+        if (esOC) {
+          const movimientos = await repoInventario.vigentesDeOC(id);
+          remisiones = (await repoRemisiones.porOrdenCompra(id)).filter(r => r.estado === 'activa');
+          plan = correcciones.planOC(previa, body, { movimientos, remisiones });
+        } else {
+          plan = correcciones.planOS(previa, body);
+        }
+
+        const vista = { resumen: plan.resumen, efectos: plan.efectos, bloqueos: plan.bloqueos };
+        if (simular) return json({ ok: true, simulado: true, ...vista });
+        if (plan.bloqueos.length) return json({ error: 'La corrección está bloqueada.', ...vista }, 409);
+
+        await bitacora.conHistorial({ tipo, id, accion: 'corregir', req, motivo: plan.motivo },
+          () => (esOC ? repoOrdenesCompra : repoOrdenesServicio).corregir(id, plan.escritura));
+        const doc = esOC ? await repoOrdenesCompra.obtener(id) : await repoOrdenesServicio.obtener(id);
+        const numero = (esOC ? doc.numeroOC : doc.numeroOS) || '';
+
+        // Los efectos van después y uno por uno: la orden ya quedó corregida, y un
+        // efecto que falle se informa y queda en la bitácora, sin deshacer el resto.
+        const hechos = [];
+        const avisos = [];
+        const anotar = (accion, motivo) => bitacora.anotar({
+          tipo, id, accion, numero, usuario: quien.usuario, usuarioNombre: quien.nombre,
+          origen: quien.origen, motivo, antes: null, despues: null,
+        });
+
+        if (plan.efectos.almacen) {
+          try {
+            const r = await repoInventario.reemitirDeOC(id,
+              correcciones.movimientosNuevos(doc, plan.efectos.almacen, quien.usuario),
+              `corrección de ${numero}: ${plan.motivo}`);
+            const t = `Almacén: anulados ${r.anulados.join(', ') || '—'}; emitidos ${r.emitidos.join(', ')}`;
+            hechos.push(t); await anotar('ajuste_almacen', t);
+          } catch (e) { avisos.push(`No se pudo ajustar el almacén: ${e.message}`); }
+        }
+
+        if (plan.efectos.remisiones) {
+          const fecha = new Date().toLocaleDateString('es-CO');
+          for (const rem of remisiones) {
+            try {
+              const alerta = `⚠ OC ${numero} se corrigió el ${fecha} (${plan.motivo}): sus ítems cambiaron. Hay que generar una remisión nueva.`;
+              await repoRemisiones.actualizar(rem.id, {
+                estado: 'requiere-reemplazo',
+                alertas: rem.alertas ? `${rem.alertas}\n${alerta}` : alerta,
+              });
+              const t = `Remisión ${rem.numero} marcada para reemplazo`;
+              hechos.push(t); await anotar('remision_reemplazo', t);
+            } catch (e) { avisos.push(`No se pudo marcar la remisión ${rem.numero}: ${e.message}`); }
+          }
+        }
+
+        if (plan.efectos.precios) {
+          try {
+            const viejos = await repoHistorial.marcarDeCompra(numero, 'Corregida');
+            const nuevos = await agregarFilasCompras(filasHistorialDeOC(doc));
+            const t = `Historial de precios: ${viejos} precio(s) marcados como corregidos, ${nuevos} nuevo(s)`;
+            hechos.push(t); await anotar('precios_corregidos', t);
+          } catch (e) { avisos.push(`No se pudo actualizar el historial de precios: ${e.message}`); }
+        }
+
+        if (plan.efectos.requerimiento) {
+          try {
+            const ctx = await ctxSharePoint();
+            const reqItem = await obtenerRequerimiento(plan.efectos.requerimiento);
+            const nuevoEstado = await calcularEstadoRequerimiento(ctx, reqItem);
+            if (nuevoEstado !== ((reqItem.fields || {}).estado || 'pendiente')) {
+              await actualizarRequerimiento(plan.efectos.requerimiento, { estado: nuevoEstado });
+              hechos.push(`Requerimiento recalculado: ${nuevoEstado}`);
+            }
+          } catch (e) { avisos.push(`No se pudo recalcular el requerimiento: ${e.message}`); }
+        }
+
+        if (plan.efectos.pdf) {
+          try {
+            const ctx = await ctxSharePoint();
+            if (esOC) await guardarPdfOCEnSharePoint(ctx, id, req._sesion);
+            else await guardarPdfOSEnSharePoint(ctx, id, req._sesion);
+            hechos.push('PDF regenerado');
+          } catch (e) { avisos.push(`No se pudo regenerar el PDF: ${e.message}`); }
+        }
+
+        return json({ ok: true, resumen: plan.resumen, hechos, avisos });
+      } catch (err) {
+        return json({ error: err.message, detalles: err.detalles }, err.status || 500);
+      }
+    });
+    return;
+  }
+
   // ── PATCH /ordenes/:id/editar ─────────────────────────────────────────────
   const mOCEditar = url.match(/^\/ordenes\/([^\/]+)\/editar$/);
   if (req.method === 'PATCH' && mOCEditar) {
@@ -3593,6 +3826,7 @@ FORMATO:
         const ocId = mOCEditar[1];
         const item = await obtenerOC(ocId);
         const f    = item?.fields || {};
+        if (f.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
         if (f.estado !== 'borrador') return json({ error: 'Solo se pueden editar borradores' }, 400);
 
         const items = (body.items || []).map(it => ({
@@ -3642,6 +3876,7 @@ FORMATO:
         const osId = mOSEditar[1];
         const item = await obtenerOS(osId);
         const f    = item?.fields || {};
+        if (f.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
         if (f.estado !== 'borrador') return json({ error: 'Solo se pueden editar borradores' }, 400);
 
         const items = (body.items || []).map(it => ({
@@ -3738,7 +3973,7 @@ FORMATO:
           }
         }
         const ctx = await ctxSharePoint();
-        const usuario = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario = bitacora.quien(req).usuario;
         const now     = new Date().toISOString();
         const creados = [];
         const batchId = `BORR-EA-${Date.now()}`;
@@ -3783,7 +4018,7 @@ FORMATO:
       try {
         const body    = JSON.parse(Buffer.concat(chunks).toString());
         const ctx     = await ctxSharePoint();
-        const usuario = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario = bitacora.quien(req).usuario;
         const now     = new Date().toISOString();
         // Aceptar tanto { items: [...] } como objeto simple (retrocompat)
         const items   = Array.isArray(body.items) ? body.items : [body];
@@ -3840,7 +4075,7 @@ FORMATO:
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString());
         const ctx  = await ctxSharePoint();
-        const usuario  = process.env.USUARIO_EMAIL || 'sistema';
+        const usuario  = bitacora.quien(req).usuario;
         const now      = new Date().toISOString();
         const devBatchId = `BORR-DEV-${Date.now()}`;
         const creados  = [];
