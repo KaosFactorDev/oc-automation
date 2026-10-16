@@ -28,6 +28,7 @@
  */
 
 const pg = require('../pg');
+const { EstadoInvalido } = require('./_estado');
 
 /** Se intentó usar para algo nuevo un proyecto que KAOS tiene inactivo. */
 class ProyectoInactivo extends Error {
@@ -222,11 +223,24 @@ async function asignar(tipo, id, codigo) {
     const { proyectoId } = await resolver(c, codigo, { exigirActivo: true });
     if (!proyectoId) throw new Error(`El proyecto "${codigo}" no está en el catálogo`);
 
+    // Solo documentos que de verdad no tienen proyecto, que es lo único que la
+    // bandeja lista. Cambiar la obra de uno que ya la tiene —sobre todo una
+    // orden emitida— va por «Corregir» (src/correcciones.js): exige admin y
+    // motivo, reemite el almacén y sincroniza tesorería. Sin esta condición, la
+    // bandeja era una puerta para saltarse todo eso. Una orden en la papelera
+    // tampoco se toca.
+    const enPapelera = ['ordenes_compra', 'ordenes_servicio'].includes(tabla) ? ' AND papelera_en IS NULL' : '';
     // proyecto_texto se limpia: era la pista para asignarlo, y ya se asignó.
     const r = await c.query(
-      `UPDATE erp.${tabla} SET proyecto_id = $1, proyecto_texto = NULL WHERE id = $2`,
+      `UPDATE erp.${tabla} SET proyecto_id = $1, proyecto_texto = NULL
+        WHERE id = $2 AND proyecto_id IS NULL${enPapelera}`,
       [proyectoId, id]);
-    return r.rowCount > 0;
+    if (r.rowCount) return true;
+
+    const existe = await c.query(`SELECT 1 FROM erp.${tabla} WHERE id = $1`, [id]);
+    if (!existe.rowCount) return false;
+    throw new EstadoInvalido(
+      'Ese documento ya tiene proyecto (o está en la papelera). Para cambiar la obra de una orden, usa «Corregir».');
   });
 }
 
