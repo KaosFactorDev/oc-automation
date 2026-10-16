@@ -22,9 +22,10 @@
  *    reemplazo», como cuando se anula una de sus órdenes.
  *  · PRECIOS. Los que la orden dejó en el historial se marcan «Corregida» y
  *    dejan de sugerirse; entran los corregidos.
- *  · TESORERÍA. Si la orden se envió a Cash_Flow, cambiar total, proveedor u
- *    obra dejaría la solicitud de pago con otros datos. Hasta que exista la
- *    sincronización con tesorería, esos cambios se bloquean.
+ *  · TESORERÍA. Si la orden se envió a Cash_Flow y cambian total, proveedor u
+ *    obra, la solicitud de pago se actualiza (vuelve a aprobación y se avisa a
+ *    los pagadores). Si tesorería ya la pagó, o no se puede consultar, se
+ *    bloquea: lo que salió de la caja se arregla con tesorería.
  */
 
 const repoCatalogos = require('./repo/catalogos');
@@ -136,10 +137,11 @@ function cabeceraCambiada(campos, previa, pedida = {}) {
  *
  * @param {object} previa       la orden como la devuelve repoOrdenesCompra.obtener
  * @param {object} pedido       { motivo, cabecera, proyecto, proveedorNit, proveedorNombre, items, desmarcarPago }
- * @param {object} contexto     { movimientos (vigentes de la OC), remisiones (activas de la OC) }
+ * @param {object} contexto     { movimientos (vigentes de la OC), remisiones (activas de la OC),
+ *                               tesoreria: { solicitud: {egreso_id, estado, retirada}|null, error } }
  * @returns {{ escritura, efectos, bloqueos, resumen }}
  */
-function planOC(previa, pedido, { movimientos = [], remisiones = [] } = {}) {
+function planOC(previa, pedido, { movimientos = [], remisiones = [], tesoreria = null } = {}) {
   const motivo = String(pedido.motivo || '').trim();
   if (!motivo) throw error(400, 'Corregir exige un motivo.');
   if (!['aprobada', 'finalizada'].includes(previa.estado)) {
@@ -194,9 +196,20 @@ function planOC(previa, pedido, { movimientos = [], remisiones = [] } = {}) {
   // ── Efectos ──
   const efectos = {};
 
+  // Tesorería: la solicitud de pago lleva total, proveedor y obra. Si no está
+  // pagada se actualiza con la orden; si ya se pagó, lo que salió de la caja no
+  // se reescribe desde acá.
   if (previa.solicitudTesoreriaId && (totalCambia || proveedorCambia || proyectoCambia)) {
-    bloqueos.push(`La orden se envió a tesorería (${previa.solicitudTesoreriaId}). Cambiar total, proveedor u obra ` +
-      'dejaría la solicitud de pago con otros datos; se habilita con la sincronización de tesorería.');
+    const t = tesoreria || {};
+    if (t.error) {
+      bloqueos.push(`No se pudo consultar la solicitud de tesorería (${previa.solicitudTesoreriaId}): ${t.error}. ` +
+        'Sin saber si está pagada, no se cambian total, proveedor ni obra.');
+    } else if (t.solicitud && t.solicitud.estado === 'PAGADO') {
+      bloqueos.push(`Tesorería ya pagó la solicitud ${t.solicitud.egreso_id}. Cambiar total, proveedor u obra ` +
+        'se arregla con tesorería (un ajuste o un reintegro), no corrigiendo la orden.');
+    } else if (t.solicitud && !t.solicitud.retirada && t.solicitud.estado !== 'RECHAZADA') {
+      efectos.tesoreria = { accion: 'actualizar', egresoId: t.solicitud.egreso_id, estado: t.solicitud.estado };
+    }
   }
 
   if (movimientos.length && (itemsCambian || proyectoCambia)) {

@@ -197,6 +197,37 @@ async function recalcularRequerimientoDe(doc) {
   } catch (e) { console.warn('No se pudo recalcular el requerimiento:', e.message); }
 }
 
+/**
+ * La solicitud de tesorería de una OC enviada: { solicitud } o { error }. Para
+ * corregir, anular o mandar a la papelera hace falta saber si ya se pagó; si no
+ * se puede saber, quien llama bloquea.
+ */
+async function consultarTesoreria(oc) {
+  if (!oc || !oc.solicitudTesoreriaId) return { solicitud: null };
+  if (!tesoreria.habilitado()) return { error: 'la integración con tesorería no está configurada' };
+  try {
+    return { solicitud: await tesoreria.solicitudDe(oc.numeroOC) };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+/**
+ * ¿Hay que retirar la solicitud antes de anular o mandar a la papelera? Devuelve
+ * { retirar: solicitud | null } o { error, status } si no se puede seguir.
+ */
+async function planRetiroTesoreria(oc) {
+  const t = await consultarTesoreria(oc);
+  if (t.error) {
+    return { status: 409, error: `No se pudo consultar la solicitud de tesorería (${oc.solicitudTesoreriaId}): ${t.error}. Sin saber si está pagada, no se sigue.` };
+  }
+  const s = t.solicitud;
+  if (s && s.estado === 'PAGADO') {
+    return { status: 409, error: `Tesorería ya pagó la solicitud ${s.egreso_id}: la orden no se anula ni va a la papelera. Se arregla con tesorería (un reintegro).` };
+  }
+  return { retirar: s && !s.retirada && s.estado !== 'RECHAZADA' ? s : null };
+}
+
 async function listarOC(filtro) {
   const os = await repoOrdenesCompra.listar(filtro || {});
   return os.map(o => ({ id: o.id, fields: o }));
@@ -2678,6 +2709,24 @@ const servidor = http.createServer(async (req, res) => {
         return json({ error: 'Anular exige un motivo.' }, 400);
       }
 
+      // Una OC anulada no se paga: si se envió a tesorería, la solicitud se
+      // retira ANTES de anular. Si ya se pagó, o no se sabe, no se anula.
+      let retiradaTesoreria = null;
+      if (accion === 'anular' && previa.solicitudTesoreriaId) {
+        const plan = await planRetiroTesoreria(previa);
+        if (plan.error) return json({ error: plan.error }, plan.status);
+        if (plan.retirar) {
+          try {
+            await tesoreria.retirarSolicitud({
+              orden_compra: previa.numeroOC, motivo: `Orden anulada en el ERP: ${motivo}`, solicitado_por: usuario,
+            });
+            retiradaTesoreria = plan.retirar.egreso_id;
+          } catch (e) {
+            return json({ error: `No se pudo retirar la solicitud de tesorería (${plan.retirar.egreso_id}): ${e.message}. La orden no se anuló.` }, 502);
+          }
+        }
+      }
+
       if (accion === 'aprobar')  {
         // Condiciones comerciales estructuradas (tipo + días si aplica) + observaciones separadas.
         // El número NO se pone acá: lo emite repoOrdenesCompra.aprobar() dentro
@@ -2725,6 +2774,12 @@ const servidor = http.createServer(async (req, res) => {
         }
       });
       if (!actualizado) return json({ error: 'Orden de compra no encontrada' }, 404);
+      if (retiradaTesoreria) {
+        const q = bitacora.quien(req);
+        await bitacora.anotar({ tipo: 'orden_compra', id: itemId, accion: 'tesoreria_retirada',
+          numero: actualizado.numeroOC, usuario: q.usuario, usuarioNombre: q.nombre, origen: q.origen,
+          motivo: `Solicitud ${retiradaTesoreria} retirada en tesorería (queda RECHAZADA)`, antes: null, despues: null });
+      }
 
       // Si se aprueba → ejecutar tareas secundarias en segundo plano (no bloquean la respuesta)
       if (accion === 'aprobar') {
@@ -3643,18 +3698,34 @@ FORMATO:
           if (doc.pagado) {
             return json({ error: 'La orden está marcada como pagada. Si fue un error, desmárcalo primero con «Corregir»; si se pagó de verdad, no va a la papelera.' }, 409);
           }
+          // Enviada a tesorería: la solicitud se retira antes. Si ya se pagó, o no
+          // se puede consultar, no va a la papelera.
+          let retiro = null;
           if (esOC && doc.solicitudTesoreriaId) {
-            return json({ error: `La orden se envió a tesorería (${doc.solicitudTesoreriaId}): la papelera se habilita con la sincronización de tesorería.` }, 409);
+            const plan = await planRetiroTesoreria(doc);
+            if (plan.error) return json({ error: plan.error }, plan.status);
+            retiro = plan.retirar;
           }
 
           if (new URLSearchParams(req.url.split('?')[1] || '').get('simular') === '1') {
-            const efectos = { movimientos: [], remisiones: [], precios: false };
+            const efectos = { movimientos: [], remisiones: [], precios: false,
+                              tesoreria: retiro ? { accion: 'retirar', egresoId: retiro.egreso_id } : null };
             if (esOC) {
               efectos.movimientos = [...new Set((await repoInventario.vigentesDeOC(id)).map(m => m.documentoRef).filter(Boolean))];
               efectos.remisiones = (await repoRemisiones.porOrdenCompra(id)).filter(r => r.estado !== 'anulada').map(r => r.numero);
               efectos.precios = !!doc.numeroOC;
             }
             return json({ ok: true, simulado: true, efectos });
+          }
+
+          if (retiro) {
+            try {
+              await tesoreria.retirarSolicitud({
+                orden_compra: numero, motivo: `Orden enviada a la papelera del ERP: ${motivo}`, solicitado_por: quien.usuario,
+              });
+            } catch (e) {
+              return json({ error: `No se pudo retirar la solicitud de tesorería (${retiro.egreso_id}): ${e.message}. La orden no fue a la papelera.` }, 502);
+            }
           }
 
           let efectos;
@@ -3664,6 +3735,7 @@ FORMATO:
             efectos.movimientos.length ? `almacén anulado: ${efectos.movimientos.join(', ')}` : null,
             ...efectos.remisiones.map(r => `remisión ${r.numero}: ${r.accion}`),
             efectos.precios ? `${efectos.precios} precio(s) retirados del historial` : null,
+            retiro ? `solicitud de tesorería ${retiro.egreso_id} retirada (queda RECHAZADA)` : null,
           ].filter(Boolean);
           if (partes.length) {
             await bitacora.anotar({ tipo, id, accion: 'efectos_papelera', numero, usuario: quien.usuario,
@@ -3728,7 +3800,8 @@ FORMATO:
         if (esOC) {
           const movimientos = await repoInventario.vigentesDeOC(id);
           remisiones = (await repoRemisiones.porOrdenCompra(id)).filter(r => r.estado === 'activa');
-          plan = correcciones.planOC(previa, body, { movimientos, remisiones });
+          const tes = await consultarTesoreria(previa);
+          plan = correcciones.planOC(previa, body, { movimientos, remisiones, tesoreria: tes });
         } else {
           plan = correcciones.planOS(previa, body);
         }
@@ -3759,6 +3832,27 @@ FORMATO:
             const t = `Almacén: anulados ${r.anulados.join(', ') || '—'}; emitidos ${r.emitidos.join(', ')}`;
             hechos.push(t); await anotar('ajuste_almacen', t);
           } catch (e) { avisos.push(`No se pudo ajustar el almacén: ${e.message}`); }
+        }
+
+        if (plan.efectos.tesoreria) {
+          try {
+            const kaos = await repoProyectosKaos.deProyectoErp(doc.proyecto);
+            const r = await tesoreria.actualizarSolicitud({
+              orden_compra: numero,
+              total: Number(doc.total),
+              nit: doc.proveedorNit,
+              nombre: doc.proveedorNombre,
+              ...(kaos ? { proyecto_id: kaos.id } : {}),
+              motivo: `Orden corregida en el ERP: ${plan.motivo}`,
+              solicitado_por: quien.usuario,
+            });
+            const t = `Tesorería: solicitud ${plan.efectos.tesoreria.egresoId} actualizada` +
+              (r.vuelve_a_aprobacion ? ' (vuelve a aprobación)' : '');
+            hechos.push(t); await anotar('tesoreria_actualizada', t);
+          } catch (e) {
+            const t = `La solicitud de tesorería ${plan.efectos.tesoreria.egresoId} NO se actualizó: ${e.message}. Hay que avisarle a tesorería.`;
+            avisos.push(t); await anotar('tesoreria_pendiente', t);
+          }
         }
 
         if (plan.efectos.remisiones) {

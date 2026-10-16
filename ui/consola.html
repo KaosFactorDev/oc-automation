@@ -2335,6 +2335,8 @@ const ACCIONES_HISTORIAL = {
   asignar_proyecto: 'Proyecto asignado', corregir: 'Corregida',
   papelera: 'Enviada a la papelera', restaurar: 'Restaurada de la papelera',
   efectos_papelera: 'Deshecho por la papelera', efectos_restaurar: 'Rehecho al restaurar',
+  tesoreria_actualizada: 'Solicitud de tesorería actualizada', tesoreria_retirada: 'Solicitud de tesorería retirada',
+  tesoreria_pendiente: 'Tesorería sin actualizar',
   ajuste_almacen: 'Almacén ajustado', remision_reemplazo: 'Remisión marcada para reemplazo',
   precios_corregidos: 'Historial de precios corregido',
 };
@@ -2507,6 +2509,7 @@ function corregirOrden(recurso, doc) {
       ef.precios ? 'Historial de precios: los de esta orden se marcan como corregidos y entran los nuevos' : null,
       ef.requerimiento ? 'Se recalcula el estado del requerimiento' : null,
       ef.pdf ? 'Se regenera el PDF' : null,
+      ef.tesoreria ? `Tesorería: la solicitud ${ef.tesoreria.egresoId} se actualiza con los datos nuevos y se avisa a los pagadores${['APROBADO', 'URGENTE'].includes(ef.tesoreria.estado) ? ' (estaba aprobada: vuelve a aprobación)' : ''}` : null,
     ].filter(Boolean);
     plan.innerHTML = `
       <strong>Cambios:</strong>${lista(data.resumen || [])}
@@ -2547,6 +2550,7 @@ async function enviarAPapelera(recurso, id, titulo) {
       ef.movimientos?.length ? `• Se anulan los documentos de almacén ${ef.movimientos.join(', ')}` : null,
       ef.remisiones?.length ? `• Remisión ${ef.remisiones.join(', ')}: se anula (o queda para reemplazo si tiene otras órdenes)` : null,
       ef.precios ? '• Sus precios dejan de sugerirse' : null,
+      ef.tesoreria ? `• Su solicitud de pago ${ef.tesoreria.egresoId} se retira en tesorería (queda RECHAZADA y se avisa a los pagadores)` : null,
     ].filter(Boolean);
     const texto = `${titulo} va a la papelera.\n\nDeja de aparecer en listados y en Control de Costos.` +
       (efectos.length ? `\n\nTambién:\n${efectos.join('\n')}` : '') +
@@ -4850,7 +4854,9 @@ function verOrden(id) {
   const puedeEntregar = o.estado === 'aprobada' && !o.entregado;
   const puedeVincular = (o.estado === 'borrador' || o.estado === 'aprobada') && !o.requerimientoId;
   const tes           = tesoreriaDeOC(o);
-  const puedeEnviarTes = !!ESTADO.tesoreria?.habilitado && tes.enviable && !tes.enviada;
+  // También se reenvía una retirada (RECHAZADA): tesorería reactiva la misma
+  // solicitud con los datos actuales de la orden.
+  const puedeEnviarTes = !!ESTADO.tesoreria?.habilitado && tes.enviable && (!tes.enviada || tes.estado === 'RECHAZADA');
 
   let itemsOC = [];
   try { itemsOC = JSON.parse(o.itemsJson || '[]'); } catch {}

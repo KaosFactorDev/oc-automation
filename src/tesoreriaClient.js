@@ -158,16 +158,24 @@ async function probarLogin() {
  * @returns {Promise<{id, egreso_id, estado, duplicado, mes?, orden_compra?}>}
  * @throws {Error} con .status y, en 422, .detalles
  */
-async function crearSolicitud(payload) {
-  // Tesorería es producción incluso desde desarrollo: una solicitud de pago
-  // creada al probar es una solicitud de pago real.
+/**
+ * Tesorería es producción incluso desde desarrollo: una solicitud de pago creada
+ * o retirada al probar es real. Con MODO_PRUEBA solo se habla con un Cash_Flow
+ * LOCAL (localhost), que es como se prueba la integración.
+ */
+function exigirNoProduccionEnPrueba(que) {
   const prueba = require('./modoPrueba');
-  if (prueba.activo) {
-    console.log(`[MODO_PRUEBA] solicitud de tesorería NO enviada (${payload?.orden_compra || 'sin OC'})`);
-    const err = new Error('MODO_PRUEBA activo: no se envían solicitudes de pago.');
-    err.status = 503;
-    throw err;
-  }
+  if (!prueba.activo) return;
+  const local = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(cfg().url);
+  if (local) return;
+  console.log(`[MODO_PRUEBA] ${que} NO enviado a tesorería`);
+  const err = new Error('MODO_PRUEBA activo: no se envían cambios a tesorería.');
+  err.status = 503;
+  throw err;
+}
+
+async function crearSolicitud(payload) {
+  exigirNoProduccionEnPrueba(`solicitud de ${payload?.orden_compra || 'sin OC'}`);
   const res  = await pedir('/functions/v1/solicitudes-externas', { method: 'POST', body: payload });
   const data = await res.json().catch(() => ({}));
 
@@ -216,7 +224,63 @@ async function consultarEnviadas(numerosOC) {
   }
 }
 
+// ── §4 Una sola solicitud, actualizarla y retirarla ───────────────────────────
+//
+// Las usan corregir, anular y la papelera de una OC ya enviada. A diferencia de
+// consultarEnviadas, estas NO son best-effort: si tesorería no responde, lanzan,
+// y quien llama bloquea el cambio en vez de dejar una solicitud con datos viejos.
+
+/**
+ * El estado vivo de la solicitud de una OC, o null si no tiene.
+ * @returns {Promise<{egreso_id, estado, retirada: boolean}|null>}
+ */
+async function solicitudDe(numeroOC) {
+  const oc = String(numeroOC || '').trim();
+  if (!oc) return null;
+  const res = await pedir(
+    '/rest/v1/solicitudes_pago?select=orden_compra,egreso_id,estado,retirada_en' +
+    `&origen_externo=eq.oc-automation&orden_compra=eq.${encodeURIComponent(oc)}`);
+  if (!res.ok) {
+    const err = new Error(`Tesorería respondió HTTP ${res.status} al consultar ${oc}`);
+    err.status = 502;
+    throw err;
+  }
+  const [f] = await res.json();
+  return f ? { egreso_id: f.egreso_id, estado: f.estado, retirada: !!f.retirada_en } : null;
+}
+
+async function operacion(method, body, que) {
+  exigirNoProduccionEnPrueba(que);
+  const res  = await pedir('/functions/v1/solicitudes-externas', { method, body });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) return data;
+  const err = new Error(data.error || `Tesorería respondió HTTP ${res.status}`);
+  err.status = res.status;
+  if (Array.isArray(data.detalles)) err.detalles = data.detalles;
+  throw err;
+}
+
+/**
+ * Actualiza una solicitud no pagada (total, NIT, proveedor, proyecto). Si estaba
+ * aprobada, vuelve a SOLICITUD y tesorería la aprueba otra vez.
+ * @throws {Error} .status 409 si ya está pagada o retirada
+ */
+function actualizarSolicitud(payload) {
+  return operacion('PATCH', payload, `actualización de ${payload?.orden_compra}`);
+}
+
+/**
+ * Retira la solicitud (queda RECHAZADA con el motivo). Reenviar la OC después la
+ * reactiva: la misma solicitud, con su mismo egreso_id.
+ * @throws {Error} .status 409 si ya está pagada
+ */
+function retirarSolicitud({ orden_compra, motivo, solicitado_por }) {
+  return operacion('POST', { accion: 'retirar', orden_compra, motivo, solicitado_por },
+    `retiro de ${orden_compra}`);
+}
+
 module.exports = {
+  solicitudDe, actualizarSolicitud, retirarSolicitud,
   habilitado,
   probarLogin,
   crearSolicitud,
