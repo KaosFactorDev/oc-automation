@@ -37,8 +37,91 @@
 [data-theme="light"] .nav{box-shadow:0 1px 2px rgba(0,0,0,.04)}
 [data-theme="light"] .modal-backdrop{background:rgba(0,0,0,.4)}
 [data-theme="light"] .modal-card{box-shadow:0 8px 30px rgba(0,0,0,.12)}
-/* En oscuro el logo del login va en blanco: el «KAOS» navy no se lee sobre navy */
-:root:not([data-theme="light"]) .login-logo{filter:brightness(0) invert(1)}
+
+/* ── Login ─────────────────────────────────────────────────────────────────── */
+body.con-login{overflow:hidden}
+#login-overlay{position:fixed;inset:0;z-index:9999;display:grid;grid-template-columns:1.15fr 1fr;background:var(--bg);overflow:auto}
+.lg-marca{position:relative;overflow:hidden;display:flex;flex-direction:column;justify-content:space-between;gap:40px;
+  padding:48px 56px;color:#fff;background:hsl(217 68% 13%);
+  /* El naranja de KAOS muy bajo, en franjas rectas arriba y abajo, para que el
+     navy no quede plano */
+  background-image:linear-gradient(180deg,hsl(21 89% 52% / .09),transparent 18%),
+    linear-gradient(0deg,hsl(21 89% 52% / .06),transparent 18%),
+    linear-gradient(180deg,hsl(217 68% 15%),hsl(217 70% 10%))}
+/* Rejilla tenue, como papel de plano */
+.lg-marca::before{content:'';position:absolute;inset:0;pointer-events:none;opacity:.07;
+  background-image:linear-gradient(#fff 1px,transparent 1px),linear-gradient(90deg,#fff 1px,transparent 1px);background-size:44px 44px;
+  mask-image:radial-gradient(ellipse at 30% 40%,#000 20%,transparent 75%);-webkit-mask-image:radial-gradient(ellipse at 30% 40%,#000 20%,transparent 75%)}
+.lg-logo{position:relative;height:44px;width:auto;align-self:flex-start;filter:brightness(0) invert(1)}
+.lg-mensaje{position:relative;max-width:600px;animation:lg-subir .6s ease-out both}
+.lg-chip{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:hsl(21 95% 70%);
+  border:1px solid hsl(21 89% 52% / .45);background:hsl(21 89% 52% / .1);padding:5px 12px;border-radius:999px;margin-bottom:22px}
+.lg-mensaje h1{font-family:var(--titulo);font-size:clamp(28px,3.2vw,42px);line-height:1.12;font-weight:700;letter-spacing:-.01em;margin-bottom:16px}
+.lg-mensaje h1 em{font-style:normal;color:hsl(21 92% 58%)}
+.lg-mensaje p{font-size:15px;line-height:1.6;color:hsl(215 30% 80%);margin-bottom:30px}
+/* Recorrido como línea de tiempo: 4 columnas iguales unidas por una línea, la
+   última (el costo, que es a donde llega todo) en naranja. Cabe a cualquier ancho. */
+.lg-flujo{list-style:none;display:grid;grid-template-columns:repeat(4,1fr);margin-bottom:34px;position:relative}
+.lg-flujo li{position:relative;display:flex;flex-direction:column;gap:10px;font-size:13px;font-weight:500;color:hsl(215 30% 88%);padding-right:8px}
+.lg-flujo li::before{content:'';position:absolute;top:13px;left:28px;right:0;height:2px;
+  background:linear-gradient(90deg,hsl(0 0% 100% / .28),hsl(0 0% 100% / .1))}
+.lg-flujo li:last-child::before{display:none}
+.lg-flujo li span{position:relative;display:grid;place-items:center;width:28px;height:28px;border-radius:50%;
+  font-family:var(--mono);font-size:11px;color:#fff;background:hsl(217 60% 22%);border:1px solid hsl(0 0% 100% / .25)}
+.lg-flujo li:last-child span{background:var(--kaos-naranja);border-color:var(--kaos-naranja);box-shadow:0 0 0 5px hsl(21 89% 52% / .2)}
+.lg-flujo li:last-child{color:hsl(21 95% 70%)}
+.lg-puntos{list-style:none;display:grid;gap:14px}
+.lg-puntos li{display:flex;align-items:center;gap:12px;font-size:14px;color:hsl(215 30% 86%)}
+.lg-puntos b{flex-shrink:0;display:grid;place-items:center;width:32px;height:32px;border-radius:9px;font-family:var(--mono);font-size:11px;
+  background:hsl(0 0% 100% / .08);border:1px solid hsl(0 0% 100% / .14);color:#fff}
+.lg-pie{position:relative;font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:hsl(215 20% 62%)}
+
+/* Panel de acceso: no plano. Puntos tenues y un brillo detrás de la tarjeta
+   la despegan del fondo, y la tarjeta lleva el filo naranja de la marca. */
+.lg-acceso{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:56px 24px 32px;
+  background-color:var(--bg);
+  background-image:radial-gradient(circle at 50% 46%,hsl(21 89% 52% / .1),transparent 38%),
+    radial-gradient(hsl(217 40% 50% / .16) 1px,transparent 1.2px);
+  background-size:100% 100%,22px 22px}
+.lg-tarjeta{position:relative;width:100%;max-width:420px;padding:36px 34px 30px;border-radius:18px;overflow:hidden;
+  background:var(--card);border:1px solid var(--border);
+  box-shadow:0 1px 2px hsl(217 45% 20% / .06),0 24px 48px -20px hsl(217 45% 20% / .28);
+  animation:lg-subir .6s .1s ease-out both}
+:root:not([data-theme="light"]) .lg-tarjeta{box-shadow:0 1px 2px hsl(220 70% 3% / .5),0 28px 56px -24px hsl(220 70% 3% / .9)}
+.lg-tarjeta::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;
+  background:linear-gradient(90deg,var(--kaos-naranja),hsl(32 95% 58%) 55%,hsl(217 68% 30%))}
+.lg-icono{display:grid;place-items:center;width:48px;height:48px;border-radius:14px;margin-bottom:20px;color:#fff;
+  background:linear-gradient(140deg,hsl(21 92% 56%),hsl(14 85% 48%));box-shadow:0 10px 22px -8px hsl(21 89% 52% / .7)}
+.lg-tarjeta h2{font-family:var(--titulo);font-size:28px;font-weight:700;letter-spacing:-.01em;margin-bottom:6px}
+.lg-sub{font-size:14px;line-height:1.55;color:var(--txt-2);margin-bottom:26px}
+.lg-seguro{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--txt-3)}
+/* Botón al estilo de Microsoft: superficie neutra, su logo y texto oscuro */
+.lg-btn-ms{width:100%;display:flex;align-items:center;justify-content:center;gap:12px;padding:13px 18px;border-radius:10px;cursor:pointer;
+  background:#fff;color:#1b1b1b;border:1px solid hsl(220 13% 80%);font-family:var(--sans);font-size:15px;font-weight:600;
+  box-shadow:0 1px 2px hsl(217 45% 20% / .08),0 8px 24px -12px hsl(217 45% 20% / .35);transition:transform .12s,box-shadow .15s,border-color .15s}
+.lg-btn-ms:hover{border-color:var(--kaos-naranja);box-shadow:0 0 0 4px hsl(21 89% 52% / .18),0 10px 28px -12px hsl(217 45% 20% / .45)}
+.lg-btn-ms:active{transform:scale(.985)}
+.lg-btn-ms:focus-visible{outline:none;box-shadow:0 0 0 4px hsl(21 89% 52% / .4)}
+.lg-btn-ms:disabled{cursor:progress;opacity:.75}
+.lg-btn-ms .spinner{display:block;border-color:hsl(0 0% 0% / .15);border-top-color:#1b1b1b;width:16px;height:16px}
+.lg-aviso{margin-bottom:16px;padding:10px 12px;border-radius:10px;font-size:13px;line-height:1.45;
+  background:var(--warn-lo);border:1px solid var(--warn);color:var(--txt)}
+.lg-nota{display:flex;align-items:flex-start;gap:10px;margin-top:22px;padding:12px 14px;border-radius:12px;font-size:12.5px;line-height:1.5;color:var(--txt-2);background:var(--accent-lo);border:1px solid var(--border)}
+.lg-nota b{color:var(--txt);font-weight:600}
+.lg-nota-ico{flex-shrink:0;display:grid;place-items:center;width:24px;height:24px;border-radius:7px;color:var(--accent);background:var(--card);border:1px solid var(--border)}
+@keyframes lg-subir{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.lg-mensaje,.lg-tarjeta{animation:none}}
+/* Angosto: la marca pasa a ser una franja arriba con el logo y el titular */
+@media (max-width:900px){
+  #login-overlay{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+  .lg-marca{padding:28px 24px;gap:18px}
+  .lg-flujo,.lg-puntos,.lg-pie,.lg-mensaje p{display:none}
+  .lg-mensaje h1{font-size:24px;margin-bottom:0}
+  .lg-chip{margin-bottom:12px}
+  .lg-logo{height:34px}
+  .lg-acceso{justify-content:flex-start;padding-top:28px}
+  .lg-tarjeta{padding:28px 22px 24px}
+  }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--txt);font-family:var(--sans);font-size:14px;min-height:100vh}
 
@@ -255,18 +338,64 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
   </div>
 </header>
 
-<!-- ── Login overlay ──────────────────────────────────────────────────────── -->
-<div id="login-overlay" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:9999;align-items:center;justify-content:center;flex-direction:column;gap:20px">
-  <div style="text-align:center;max-width:400px;padding:40px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
-    <img class="login-logo" src="/marca/kaos-logo.png" width="493" height="177" alt="KAOS" style="height:56px;width:auto;margin:0 auto 14px;display:block">
-    <h2 style="font-family:var(--titulo);font-size:18px;font-weight:600;margin-bottom:6px">ERP</h2>
-    <p style="font-size:12px;color:var(--txt-2);margin-bottom:24px">Inicia sesión con tu cuenta corporativa de Microsoft para continuar.</p>
-    <button id="btn-ms-login" class="btn btn-primary" style="width:100%;justify-content:center;gap:8px" onclick="iniciarLoginMicrosoft()">
-      <svg width="16" height="16" viewBox="0 0 21 21" fill="none"><rect x="1" y="1" width="9" height="9" fill="#f25022"/><rect x="11" y="1" width="9" height="9" fill="#7fba00"/><rect x="1" y="11" width="9" height="9" fill="#00a4ef"/><rect x="11" y="11" width="9" height="9" fill="#ffb900"/></svg>
-      Iniciar sesión con Microsoft
-    </button>
-    <div id="login-msg" style="margin-top:14px;font-size:11px;color:var(--txt-2);display:none"></div>
-  </div>
+<!-- ── Login ──────────────────────────────────────────────────────────────── -->
+<!-- Dos paneles, como el login de G-activos: la marca a la izquierda (siempre
+     navy) y el acceso a la derecha (sigue el tema). En pantallas angostas el
+     panel de marca se reduce a una franja con el logo. -->
+<div id="login-overlay" style="display:none">
+  <aside class="lg-marca">
+    <img class="lg-logo" src="/marca/kaos-logo.png" width="493" height="177" alt="KAOS">
+
+    <div class="lg-mensaje">
+      <span class="lg-chip">ERP · Compras y costos de obra</span>
+      <h1>Del requerimiento al costo de la obra, <em>sin perder el hilo.</em></h1>
+      <p>Requerimientos, cotizaciones, órdenes de compra y de servicio, almacén y costos por proyecto, conectados en un solo lugar.</p>
+
+      <ol class="lg-flujo" aria-label="Recorrido de una compra">
+        <li><span>01</span>Requerimiento</li>
+        <li><span>02</span>Orden de compra</li>
+        <li><span>03</span>Almacén</li>
+        <li><span>04</span>Costo de obra</li>
+      </ol>
+
+      <ul class="lg-puntos">
+        <li><b>IA</b>Lee cotizaciones y órdenes de servicio y arma la orden por ti.</li>
+        <li><b>✓</b>Cada cambio queda en la bitácora: quién, cuándo y qué.</li>
+        <li><b>$</b>Control de costos por obra, con los proyectos de KAOS.</li>
+      </ul>
+    </div>
+
+    <div class="lg-pie">KAOS · Plataforma de gestión para construcción</div>
+  </aside>
+
+  <main class="lg-acceso">
+    <div class="lg-tarjeta">
+      <div class="lg-icono" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.4" fill="currentColor"/></svg>
+      </div>
+      <h2>Bienvenido</h2>
+      <p class="lg-sub">Inicia sesión con tu cuenta corporativa de Microsoft para entrar al ERP.</p>
+
+      <div id="login-msg" class="lg-aviso" role="alert" style="display:none"></div>
+
+      <button id="btn-ms-login" class="lg-btn-ms" onclick="iniciarLoginMicrosoft()">
+        <svg width="18" height="18" viewBox="0 0 21 21" fill="none" aria-hidden="true"><rect x="1" y="1" width="9" height="9" fill="#f25022"/><rect x="11" y="1" width="9" height="9" fill="#7fba00"/><rect x="1" y="11" width="9" height="9" fill="#00a4ef"/><rect x="11" y="11" width="9" height="9" fill="#ffb900"/></svg>
+        <span>Continuar con Microsoft</span>
+      </button>
+
+      <div class="lg-nota">
+        <span class="lg-nota-ico" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+        </span>
+        <span><b>¿Primera vez?</b> Tu cuenta queda registrada al entrar y un administrador del ERP la aprueba.</span>
+      </div>
+    </div>
+
+    <div class="lg-seguro">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z"/><path d="M9 12l2 2 4-4"/></svg>
+      Conexión segura · Microsoft Entra ID
+    </div>
+  </main>
 </div>
 
 <nav class="nav">
@@ -2222,6 +2351,7 @@ async function cargarUsuario(){
     if ($('#btn-papelera')) $('#btn-papelera').style.display = u?.rol === 'admin' ? '' : 'none';
     if ($('#btn-logout')) $('#btn-logout').style.display = '';
     if ($('#login-overlay')) $('#login-overlay').style.display = 'none';
+    document.body.classList.remove('con-login');
     return true;
   } catch { mostrarLoginOverlay(); return false; }
 }
@@ -2229,13 +2359,14 @@ async function cargarUsuario(){
 function mostrarLoginOverlay(){
   const overlay = $('#login-overlay');
   if (!overlay) return;
-  overlay.style.display = 'flex';
+  overlay.style.display = 'grid';
+  document.body.classList.add('con-login');
   // Mostrar mensaje si redirigido desde callback con error
   const params = new URLSearchParams(location.search);
   const err = params.get('auth_error');
   if (err) {
     const msg = err === 'pendiente'
-      ? 'Tu cuenta está pendiente de aprobación. Contacta al administrador del ERP.'
+      ? 'Tu cuenta quedó registrada y está pendiente de aprobación. Avísale al administrador del ERP.'
       : `Error de autenticación: ${err}`;
     const el = $('#login-msg');
     if (el) { el.textContent = msg; el.style.display = 'block'; }
@@ -2245,12 +2376,16 @@ function mostrarLoginOverlay(){
 
 async function iniciarLoginMicrosoft(){
   const btn = $('#btn-ms-login');
-  if (btn) btn.disabled = true;
+  const original = btn?.innerHTML;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span><span>Abriendo Microsoft…</span>';
+  }
   try{
     const { url } = await fetch('/auth/login-url').then(r => r.json());
     window.location.href = url;
   } catch(e){
-    if (btn) btn.disabled = false;
+    if (btn) { btn.disabled = false; btn.innerHTML = original; }
     avisar.error('No se pudo obtener la URL de inicio de sesión. Verifica la configuración del servidor.');
   }
 }
