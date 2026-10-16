@@ -202,46 +202,93 @@ const COLUMNAS = {
  */
 async function crearLote(movimientos, { emitirDocumento = false } = {}) {
   if (!movimientos.length) return { ids: [], documentoRef: null };
+  return pg.tx((c) => insertarLote(c, movimientos, { emitirDocumento }));
+}
 
+/** El cuerpo de crearLote(), dentro de la transacción del llamador. */
+async function insertarLote(c, movimientos, { emitirDocumento = false } = {}) {
+  let documentoRef = null;
+  if (emitirDocumento) {
+    const r = await c.query('SELECT erp.siguiente_documento_almacen($1) AS ref',
+                            [movimientos[0].tipo]);
+    documentoRef = r.rows[0].ref;
+  }
+
+  const ids = [];
+  for (const m of movimientos) {
+    // Una entrada que recibe una OC ya emitida completa ese documento, aunque
+    // la obra se haya cerrado después: se deja pasar. Todo lo demás —salidas,
+    // ajustes, entradas sueltas— usa la obra y exige que esté activa.
+    const { proyectoId, proyectoTexto } = await resolverProyecto(c, m.proyecto, { exigirActivo: !m.ocId });
+    const r = await c.query(
+      `INSERT INTO erp.movimientos_inventario
+         (tipo, fecha, proyecto_id, orden_compra_id, insumo, unidad, cantidad,
+          precio_unitario, responsable, notas, estado, documento_ref,
+          estado_doc, batch_id, creado_por, fecha_creacion, proyecto_texto)
+       VALUES ($1, COALESCE($2, now()), $3, $4, $5, COALESCE($6,'UND'), $7, $8,
+               $9, $10, COALESCE($11,'activo'), $12, COALESCE($13,'borrador'),
+               $14, $15, COALESCE($16, now()), $17)
+       RETURNING id`,
+      [
+        m.tipo, m.fecha || null, proyectoId,
+        m.ocId ? Number(m.ocId) : null,
+        String(m.insumo || '').trim(), String(m.unidad || '').trim() || null,
+        // El signo lo lleva `tipo`; el CHECK rechaza negativos.
+        Math.abs(Number(m.cantidad) || 0),
+        Number(m.precioUnitario) || 0,
+        m.responsable || null, m.notas || null, m.estado || null,
+        documentoRef || m.documentoRef || null,
+        documentoRef ? 'aprobado' : (m.estadoDoc || null),
+        m.batchId || null, m.creadoPor || null, m.fechaCreacion || null,
+        proyectoTexto,
+      ]);
+    ids.push(String(r.rows[0].id));
+  }
+  return { ids, documentoRef };
+}
+
+/** Los movimientos vigentes que salieron de una OC, para corregirla o retirarla. */
+async function vigentesDeOC(ocId) {
+  const filas = await pg.rows(
+    `SELECT ${CAMPOS} ${DESDE}
+      WHERE m.orden_compra_id = $1 AND m.estado <> 'anulado'
+      ORDER BY m.id`, [Number(ocId)]);
+  return filas.map(mapear);
+}
+
+/**
+ * Reemplaza los movimientos vigentes de una OC por otros, en UNA transacción:
+ * anula los viejos —no los borra ni los reescribe: quedan con su documento y una
+ * nota que dice qué los reemplazó— y emite documentos nuevos con lo corregido.
+ *
+ * Si algo falla no queda nada a medias: ni un documento anulado sin su
+ * reemplazo, ni un consecutivo gastado.
+ *
+ * @param {string} ocId
+ * @param {object} nuevos  { entrada: [movimientos], salida: [movimientos] }
+ * @param {string} nota    se agrega a los anulados y a los nuevos
+ * @returns {Promise<{anulados: string[], emitidos: string[]}>} consecutivos
+ */
+async function reemitirDeOC(ocId, nuevos, nota) {
   return pg.tx(async (c) => {
-    let documentoRef = null;
-    if (emitirDocumento) {
-      const r = await c.query('SELECT erp.siguiente_documento_almacen($1) AS ref',
-                              [movimientos[0].tipo]);
-      documentoRef = r.rows[0].ref;
-    }
+    const viejos = await c.query(
+      `UPDATE erp.movimientos_inventario
+          SET estado = 'anulado', estado_doc = 'anulado',
+              notas = concat_ws(' · ', nullif(notas, ''), $2::text)
+        WHERE orden_compra_id = $1 AND estado <> 'anulado'
+        RETURNING documento_ref`, [Number(ocId), `Anulado: ${nota}`]);
+    const anulados = [...new Set(viejos.rows.map(r => r.documento_ref).filter(Boolean))];
 
-    const ids = [];
-    for (const m of movimientos) {
-      // Una entrada que recibe una OC ya emitida completa ese documento, aunque
-      // la obra se haya cerrado después: se deja pasar. Todo lo demás —salidas,
-      // ajustes, entradas sueltas— usa la obra y exige que esté activa.
-      const { proyectoId, proyectoTexto } = await resolverProyecto(c, m.proyecto, { exigirActivo: !m.ocId });
-      const r = await c.query(
-        `INSERT INTO erp.movimientos_inventario
-           (tipo, fecha, proyecto_id, orden_compra_id, insumo, unidad, cantidad,
-            precio_unitario, responsable, notas, estado, documento_ref,
-            estado_doc, batch_id, creado_por, fecha_creacion, proyecto_texto)
-         VALUES ($1, COALESCE($2, now()), $3, $4, $5, COALESCE($6,'UND'), $7, $8,
-                 $9, $10, COALESCE($11,'activo'), $12, COALESCE($13,'borrador'),
-                 $14, $15, COALESCE($16, now()), $17)
-         RETURNING id`,
-        [
-          m.tipo, m.fecha || null, proyectoId,
-          m.ocId ? Number(m.ocId) : null,
-          String(m.insumo || '').trim(), String(m.unidad || '').trim() || null,
-          // El signo lo lleva `tipo`; el CHECK rechaza negativos.
-          Math.abs(Number(m.cantidad) || 0),
-          Number(m.precioUnitario) || 0,
-          m.responsable || null, m.notas || null, m.estado || null,
-          documentoRef || m.documentoRef || null,
-          documentoRef ? 'aprobado' : (m.estadoDoc || null),
-          m.batchId || null, m.creadoPor || null, m.fechaCreacion || null,
-          proyectoTexto,
-        ]);
-      ids.push(String(r.rows[0].id));
+    const emitidos = [];
+    for (const tipo of ['entrada', 'salida']) {
+      const movs = (nuevos[tipo] || []).map(m => ({
+        ...m, notas: [m.notas, `Reemplaza ${anulados.join(', ') || 'movimientos sin documento'}: ${nota}`].filter(Boolean).join(' · '),
+      }));
+      if (!movs.length) continue;
+      const { documentoRef } = await insertarLote(c, movs, { emitirDocumento: true });
+      emitidos.push(documentoRef);
     }
-    return { ids, documentoRef };
+    return { anulados, emitidos };
   });
 }
 
@@ -323,6 +370,6 @@ async function documentos({ tipo = null } = {}) {
 
 module.exports = {
   listar, obtener, stock, documentos, porLote, hayEntradaReciente,
-  ocIdsConEntrada, siguienteDocumentoRef,
-  crear, crearLote, actualizar, aprobarLote, anular,
+  ocIdsConEntrada, siguienteDocumentoRef, vigentesDeOC,
+  crear, crearLote, actualizar, aprobarLote, anular, reemitirDeOC,
 };
