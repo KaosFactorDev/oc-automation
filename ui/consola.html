@@ -217,6 +217,7 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
       <span>Actualizar</span>
     </button>
     <button class="btn-refresh" onclick="abrirConfig()" title="Configuración">⚙</button>
+    <button class="btn-refresh" id="btn-papelera" onclick="verPapelera()" title="Órdenes en la papelera" style="display:none">🗑 Papelera</button>
     <button class="btn-tema" id="btn-tema" onclick="toggleTema()" title="Cambiar tema"></button>
     <div class="user-chip" id="user-chip">—</div>
     <button id="btn-logout" class="btn btn-ghost btn-sm" onclick="cerrarSesion()" title="Cerrar sesión" style="display:none;font-size:11px;padding:4px 8px">Salir</button>
@@ -1967,6 +1968,7 @@ async function cargarUsuario(){
     const u = await r.json();
     ESTADO.usuario = u;
     $('#user-chip').textContent = u?.nombre || u?.email || '—';
+    if ($('#btn-papelera')) $('#btn-papelera').style.display = u?.rol === 'admin' ? '' : 'none';
     if ($('#btn-logout')) $('#btn-logout').style.display = '';
     if ($('#login-overlay')) $('#login-overlay').style.display = 'none';
     return true;
@@ -2293,6 +2295,7 @@ function verOS(id) {
         ${os.pdfUrl ? `<a class="btn btn-ghost" href="${esc(os.pdfUrl)}" target="_blank" rel="noopener">☁️ PDF SharePoint</a>` : ''}
         <button class="btn btn-ghost btn-sm" id="os-ver-historial">Historial</button>
         ${esAdminConsola() && ['aprobada', 'finalizada'].includes(os.estado) ? `<button class="btn btn-ghost btn-sm" id="os-ver-corregir">Corregir</button>` : ''}
+        ${esAdminConsola() ? `<button class="btn btn-ghost btn-sm" id="os-ver-papelera" title="Para una orden que no debía existir: se puede restaurar">🗑 Papelera</button>` : ''}
         ${puedeAnular  ? `<button class="btn btn-danger btn-sm"  id="os-ver-anular">Anular</button>` : ''}
         ${puedeEditar  ? `<button class="btn btn-ghost btn-sm"   id="os-ver-editar">Editar borrador</button>` : ''}
         ${puedePagar   ? `<button class="btn btn-primary"        id="os-ver-pagar">Pagada</button>` : ''}
@@ -2317,6 +2320,8 @@ function verOS(id) {
     verHistorial('os', id, os.numeroOS || 'OS en borrador');
   const bCorregirOS = wrap.querySelector('#os-ver-corregir');
   if (bCorregirOS) bCorregirOS.onclick = () => { wrap.remove(); corregirOrden('os', os); };
+  const bPapeleraOS = wrap.querySelector('#os-ver-papelera');
+  if (bPapeleraOS) bPapeleraOS.onclick = () => { wrap.remove(); enviarAPapelera('os', os.id, os.numeroOS || 'OS en borrador'); };
 }
 
 // ─── Historial de una orden (bitácora) ───────────────────────────────────────
@@ -2328,6 +2333,10 @@ const ACCIONES_HISTORIAL = {
   pagar: 'Marcada como pagada', entregar: 'Marcada como entregada', cumplir: 'Marcada como cumplida',
   enviar_tesoreria: 'Enviada a tesorería', vincular_requerimiento: 'Vinculada a un requerimiento',
   asignar_proyecto: 'Proyecto asignado', corregir: 'Corregida',
+  papelera: 'Enviada a la papelera', restaurar: 'Restaurada de la papelera',
+  efectos_papelera: 'Deshecho por la papelera', efectos_restaurar: 'Rehecho al restaurar',
+  tesoreria_actualizada: 'Solicitud de tesorería actualizada', tesoreria_retirada: 'Solicitud de tesorería retirada',
+  tesoreria_pendiente: 'Tesorería sin actualizar',
   ajuste_almacen: 'Almacén ajustado', remision_reemplazo: 'Remisión marcada para reemplazo',
   precios_corregidos: 'Historial de precios corregido',
 };
@@ -2500,6 +2509,7 @@ function corregirOrden(recurso, doc) {
       ef.precios ? 'Historial de precios: los de esta orden se marcan como corregidos y entran los nuevos' : null,
       ef.requerimiento ? 'Se recalcula el estado del requerimiento' : null,
       ef.pdf ? 'Se regenera el PDF' : null,
+      ef.tesoreria ? `Tesorería: la solicitud ${ef.tesoreria.egresoId} se actualiza con los datos nuevos y se avisa a los pagadores${['APROBADO', 'URGENTE'].includes(ef.tesoreria.estado) ? ' (estaba aprobada: vuelve a aprobación)' : ''}` : null,
     ].filter(Boolean);
     plan.innerHTML = `
       <strong>Cambios:</strong>${lista(data.resumen || [])}
@@ -2519,6 +2529,105 @@ function corregirOrden(recurso, doc) {
     if (esOC) await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
     else await cargarOrdenesServicio();
   };
+}
+
+// ─── Papelera ────────────────────────────────────────────────────────────────
+// Para lo que no debía existir (un duplicado, un error). Distinto de anular: la
+// orden desaparece de todo, lo que generó se deshace, y se puede restaurar.
+async function enviarAPapelera(recurso, id, titulo) {
+  const motivo = prompt(`¿Por qué va ${titulo} a la papelera?\n\nÚsala para lo que no debía existir (un duplicado, un error). Si la orden existió y no sigue, anúlala.`);
+  if (motivo === null) return;
+  if (!motivo.trim()) { alert('La papelera exige un motivo.'); return; }
+  const url = `/${recurso}/${encodeURIComponent(id)}/papelera`;
+  const pedir = (simular) => fetch(url + (simular ? '?simular=1' : ''), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ motivo: motivo.trim() }),
+  }).then(async r => ({ ok: r.ok, data: await r.json().catch(() => ({})) }));
+  try {
+    const vista = await pedir(true);
+    if (!vista.ok) { alert(vista.data.error || 'Error'); return; }
+    const ef = vista.data.efectos || {};
+    const efectos = [
+      ef.movimientos?.length ? `• Se anulan los documentos de almacén ${ef.movimientos.join(', ')}` : null,
+      ef.remisiones?.length ? `• Remisión ${ef.remisiones.join(', ')}: se anula (o queda para reemplazo si tiene otras órdenes)` : null,
+      ef.precios ? '• Sus precios dejan de sugerirse' : null,
+      ef.tesoreria ? `• Su solicitud de pago ${ef.tesoreria.egresoId} se retira en tesorería (queda RECHAZADA y se avisa a los pagadores)` : null,
+    ].filter(Boolean);
+    const texto = `${titulo} va a la papelera.\n\nDeja de aparecer en listados y en Control de Costos.` +
+      (efectos.length ? `\n\nTambién:\n${efectos.join('\n')}` : '') +
+      '\n\nTodo se puede restaurar desde la Papelera. ¿Continuar?';
+    if (!confirm(texto)) return;
+    const r = await pedir(false);
+    if (!r.ok) { alert(r.data.error || 'Error'); return; }
+    if (recurso === 'ordenes') await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
+    else await cargarOrdenesServicio();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function verPapelera() {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal-card" style="max-width:900px;position:relative">
+      <button class="modal-x" title="Cerrar" aria-label="Cerrar">&times;</button>
+      <h3 style="padding-right:28px">Papelera</h3>
+      <p class="text-muted" style="margin:4px 0 10px;font-size:12px">Órdenes retiradas por error o duplicadas. Restaurar devuelve la orden y todo lo que la papelera deshizo, tal como estaba.</p>
+      <div id="pap-cuerpo" style="max-height:60vh;overflow-y:auto"><p class="text-muted">Cargando…</p></div>
+      <div class="modal-actions"><button class="btn btn-ghost">Cerrar</button></div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.querySelectorAll('.modal-x, .modal-actions .btn').forEach(b => b.onclick = () => wrap.remove());
+  const cuerpo = wrap.querySelector('#pap-cuerpo');
+
+  const pintar = async () => {
+    try {
+      const r = await fetch('/papelera');
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Error');
+      const filas = data.papelera || [];
+      if (!filas.length) { cuerpo.innerHTML = '<p class="text-muted">La papelera está vacía.</p>'; return; }
+      cuerpo.innerHTML = `
+        <table style="width:100%;font-size:12px;border-collapse:collapse">
+          <thead><tr>
+            <th style="text-align:left">Orden</th><th style="text-align:left">Obra · proveedor</th>
+            <th style="text-align:right">Total</th><th style="text-align:left">Retirada</th><th></th>
+          </tr></thead>
+          <tbody>${filas.map(f => `
+            <tr style="border-top:1px solid var(--border)">
+              <td style="padding:6px 4px"><strong>${esc(f.numero || 'Borrador')}</strong><div class="text-muted">${f.tipo === 'orden_compra' ? 'Compra' : 'Servicio'} · ${esc(f.estado)}</div></td>
+              <td style="padding:6px 4px">${esc(etiquetaProyecto(f.proyecto || ''))}<div class="text-muted">${esc(f.proveedor || '—')}</div></td>
+              <td style="padding:6px 4px;text-align:right" class="mono">${fmt$(f.total)}</td>
+              <td style="padding:6px 4px">${esc(new Date(f.papelera_en).toLocaleString('es-CO'))}<div class="text-muted">${esc(f.papelera_por)} · ${esc(f.papelera_motivo)}</div></td>
+              <td style="padding:6px 4px;white-space:nowrap">
+                <button class="btn btn-ghost btn-sm" data-hist="${f.tipo}|${f.id}|${esc(f.numero || '')}">Historial</button>
+                <button class="btn btn-primary btn-sm" data-rest="${f.tipo}|${f.id}|${esc(f.numero || '')}">Restaurar</button>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+    } catch (e) {
+      cuerpo.innerHTML = `<p style="color:var(--danger,#c33)">No se pudo cargar la papelera: ${esc(e.message)}</p>`;
+    }
+  };
+  cuerpo.addEventListener('click', async (e) => {
+    const h = e.target.dataset.hist, rs = e.target.dataset.rest;
+    if (h) { const [t, id, n] = h.split('|'); verHistorial(t === 'orden_compra' ? 'ordenes' : 'os', id, n || 'Borrador'); }
+    if (rs) {
+      const [t, id, n] = rs.split('|');
+      const motivo = prompt(`¿Por qué se restaura ${n || 'esta orden'}?`);
+      if (motivo === null) return;
+      if (!motivo.trim()) { alert('Restaurar exige un motivo.'); return; }
+      const recurso = t === 'orden_compra' ? 'ordenes' : 'os';
+      const r = await fetch(`/${recurso}/${encodeURIComponent(id)}/restaurar`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ motivo: motivo.trim() }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(data.error || 'Error'); return; }
+      await pintar();
+      if (recurso === 'ordenes') await Promise.all([cargarOrdenes(), cargarRequerimientos()]);
+      else await cargarOrdenesServicio();
+    }
+  });
+  await pintar();
 }
 
 async function verHistorial(recurso, id, titulo) {
@@ -4745,7 +4854,9 @@ function verOrden(id) {
   const puedeEntregar = o.estado === 'aprobada' && !o.entregado;
   const puedeVincular = (o.estado === 'borrador' || o.estado === 'aprobada') && !o.requerimientoId;
   const tes           = tesoreriaDeOC(o);
-  const puedeEnviarTes = !!ESTADO.tesoreria?.habilitado && tes.enviable && !tes.enviada;
+  // También se reenvía una retirada (RECHAZADA): tesorería reactiva la misma
+  // solicitud con los datos actuales de la orden.
+  const puedeEnviarTes = !!ESTADO.tesoreria?.habilitado && tes.enviable && (!tes.enviada || tes.estado === 'RECHAZADA');
 
   let itemsOC = [];
   try { itemsOC = JSON.parse(o.itemsJson || '[]'); } catch {}
@@ -4820,6 +4931,7 @@ function verOrden(id) {
         ${o.pdfUrl ? `<a class="btn btn-ghost" href="${esc(o.pdfUrl)}" target="_blank" rel="noopener">☁️ PDF SharePoint</a>` : ''}
         <button class="btn btn-ghost btn-sm" id="oc-ver-historial">Historial</button>
         ${esAdminConsola() && ['aprobada', 'finalizada'].includes(o.estado) ? `<button class="btn btn-ghost btn-sm" id="oc-ver-corregir">Corregir</button>` : ''}
+        ${esAdminConsola() ? `<button class="btn btn-ghost btn-sm" id="oc-ver-papelera" title="Para una orden que no debía existir: se puede restaurar">🗑 Papelera</button>` : ''}
         ${puedeVincular  ? `<button class="btn btn-ghost btn-sm" id="oc-ver-vincular">Vincular req.</button>` : ''}
         ${puedeAnular    ? `<button class="btn btn-danger"  id="oc-ver-anular">Anular</button>` : ''}
         ${puedeEnviarTes ? `<button class="btn btn-primary" id="oc-ver-tesoreria">Enviar a tesorería</button>` : ''}
@@ -4853,6 +4965,8 @@ function verOrden(id) {
     verHistorial('ordenes', id, o.numeroOC || 'OC en borrador');
   const bCorregir = wrap.querySelector('#oc-ver-corregir');
   if (bCorregir) bCorregir.onclick = () => { cerrar(); corregirOrden('ordenes', o); };
+  const bPapelera = wrap.querySelector('#oc-ver-papelera');
+  if (bPapelera) bPapelera.onclick = () => { cerrar(); enviarAPapelera('ordenes', o.id, o.numeroOC || 'OC en borrador'); };
 }
 
 // ─── OC: edición de borrador ──────────────────────────────────────────────────

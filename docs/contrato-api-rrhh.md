@@ -416,6 +416,8 @@ x-api-key: <RRHH_API_KEY>
 }
 ```
 
+**Una orden de servicio en la papelera** del ERP (un admin la retiró por error o duplicada) aparece con `"estado": "papelera"`. Sigue existiendo: un `POST` con el mismo `origenSolicitudId` devuelve esa misma orden como duplicada, y no crea otra. Si compras la restaura, vuelve a su estado anterior. KAOS debe mostrarla como retirada en el ERP.
+
 **Si no hay ninguno: `200` con la lista vacía, nunca `404`.** KAOS necesita distinguir «el ERP dice que no existe» de «falló la consulta». Un `404` mezcla las dos cosas y rompe la reconciliación.
 
 ### Por qué existen: el problema del timeout

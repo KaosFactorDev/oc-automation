@@ -37,6 +37,7 @@ const CABECERA = `
   o.motivo_anulacion, o.pagado, o.pagado_por, o.fecha_pago,
   o.entregado, o.entregado_por, o.fecha_entrega, o.pdf_url, o.xlsx_url,
   o.solicitud_tesoreria_id, o.solicitud_tesoreria_por, o.fecha_solicitud_tesoreria,
+  o.papelera_en, o.papelera_por, o.papelera_motivo,
   o.sp_id,
   p.codigo AS proyecto,
   pr.razon_social AS proveedor_nombre`;
@@ -83,6 +84,10 @@ function mapear(o, items = []) {
     solicitudTesoreriaId:      o.solicitud_tesoreria_id || '',
     solicitudTesoreriaPor:     o.solicitud_tesoreria_por || '',
     fechaSolicitudTesoreria:   iso(o.fecha_solicitud_tesoreria),
+    // En la papelera: no aparece en listados ni en Control de Costos.
+    papeleraEn:              iso(o.papelera_en),
+    papeleraPor:             o.papelera_por || '',
+    papeleraMotivo:          o.papelera_motivo || '',
     sp_id:                   o.sp_id,
   };
 }
@@ -128,7 +133,9 @@ async function armar(cabeceras) {
 }
 
 async function listar({ estado = null, requerimientoId = null, proyectoId = null } = {}) {
-  const cond = [];
+  // Lo que está en la papelera no existe para los listados: ni para la
+  // consola, ni para la cobertura de requerimientos, ni para los informes.
+  const cond = ['o.papelera_en IS NULL'];
   const vals = [];
   if (estado)          { vals.push(estado);          cond.push(`o.estado = $${vals.length}`); }
   if (requerimientoId) { vals.push(requerimientoId); cond.push(`o.requerimiento_id = $${vals.length}`); }

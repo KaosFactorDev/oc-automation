@@ -45,6 +45,7 @@ const apiRrhh          = require('./apiRrhh');
 const bitacora         = require('./bitacora');
 const repoBitacora     = require('./repo/historial');
 const correcciones     = require('./correcciones');
+const repoPapelera     = require('./repo/papelera');
 const geminiModelos    = require('./geminiModelos');
 const geminiClient     = require('./geminiClient');
 
@@ -115,6 +116,7 @@ async function obtenerOC(id) {
  * consola al mostrar los botones; acá es la que vale.
  */
 function validarAccionOC(accion, oc) {
+  if (oc.papeleraEn) return 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.';
   const e = oc.estado;
   if (accion === 'aprobar' && e !== 'borrador') {
     return `Solo se aprueba un borrador; esta orden está ${e}.`;
@@ -135,6 +137,7 @@ function validarAccionOC(accion, oc) {
 
 /** Lo mismo para una orden de servicio. */
 function validarAccionOS(accion, os) {
+  if (os.papeleraEn) return 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.';
   const e = os.estado;
   if (accion === 'aprobar' && e !== 'borrador') {
     return `Solo se aprueba un borrador; esta orden está ${e}.`;
@@ -176,6 +179,53 @@ function filasHistorialDeOC(oc) {
         precio:          precioFinal,
       };
     });
+}
+
+/**
+ * Recalcula el estado del requerimiento de una OC que entró o salió de la
+ * papelera: sus cantidades dejan de contar, o vuelven a contar.
+ */
+async function recalcularRequerimientoDe(doc) {
+  if (!doc || !doc.requerimientoId) return;
+  try {
+    const ctx = await ctxSharePoint();
+    const reqItem = await obtenerRequerimiento(doc.requerimientoId);
+    const nuevo = await calcularEstadoRequerimiento(ctx, reqItem);
+    if (nuevo !== ((reqItem.fields || {}).estado || 'pendiente')) {
+      await actualizarRequerimiento(doc.requerimientoId, { estado: nuevo });
+    }
+  } catch (e) { console.warn('No se pudo recalcular el requerimiento:', e.message); }
+}
+
+/**
+ * La solicitud de tesorería de una OC enviada: { solicitud } o { error }. Para
+ * corregir, anular o mandar a la papelera hace falta saber si ya se pagó; si no
+ * se puede saber, quien llama bloquea.
+ */
+async function consultarTesoreria(oc) {
+  if (!oc || !oc.solicitudTesoreriaId) return { solicitud: null };
+  if (!tesoreria.habilitado()) return { error: 'la integración con tesorería no está configurada' };
+  try {
+    return { solicitud: await tesoreria.solicitudDe(oc.numeroOC) };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+/**
+ * ¿Hay que retirar la solicitud antes de anular o mandar a la papelera? Devuelve
+ * { retirar: solicitud | null } o { error, status } si no se puede seguir.
+ */
+async function planRetiroTesoreria(oc) {
+  const t = await consultarTesoreria(oc);
+  if (t.error) {
+    return { status: 409, error: `No se pudo consultar la solicitud de tesorería (${oc.solicitudTesoreriaId}): ${t.error}. Sin saber si está pagada, no se sigue.` };
+  }
+  const s = t.solicitud;
+  if (s && s.estado === 'PAGADO') {
+    return { status: 409, error: `Tesorería ya pagó la solicitud ${s.egreso_id}: la orden no se anula ni va a la papelera. Se arregla con tesorería (un reintegro).` };
+  }
+  return { retirar: s && !s.retirada && s.estado !== 'RECHAZADA' ? s : null };
 }
 
 async function listarOC(filtro) {
@@ -2548,6 +2598,7 @@ const servidor = http.createServer(async (req, res) => {
         }
 
         const oc = await repoOrdenesCompra.obtener(itemId);
+        if (oc && oc.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
         if (!oc) return json({ error: 'OC no encontrada' }, 404);
 
         // El documento pide validar 'aprobada'; se acepta también 'finalizada'
@@ -2658,6 +2709,24 @@ const servidor = http.createServer(async (req, res) => {
         return json({ error: 'Anular exige un motivo.' }, 400);
       }
 
+      // Una OC anulada no se paga: si se envió a tesorería, la solicitud se
+      // retira ANTES de anular. Si ya se pagó, o no se sabe, no se anula.
+      let retiradaTesoreria = null;
+      if (accion === 'anular' && previa.solicitudTesoreriaId) {
+        const plan = await planRetiroTesoreria(previa);
+        if (plan.error) return json({ error: plan.error }, plan.status);
+        if (plan.retirar) {
+          try {
+            await tesoreria.retirarSolicitud({
+              orden_compra: previa.numeroOC, motivo: `Orden anulada en el ERP: ${motivo}`, solicitado_por: usuario,
+            });
+            retiradaTesoreria = plan.retirar.egreso_id;
+          } catch (e) {
+            return json({ error: `No se pudo retirar la solicitud de tesorería (${plan.retirar.egreso_id}): ${e.message}. La orden no se anuló.` }, 502);
+          }
+        }
+      }
+
       if (accion === 'aprobar')  {
         // Condiciones comerciales estructuradas (tipo + días si aplica) + observaciones separadas.
         // El número NO se pone acá: lo emite repoOrdenesCompra.aprobar() dentro
@@ -2705,6 +2774,12 @@ const servidor = http.createServer(async (req, res) => {
         }
       });
       if (!actualizado) return json({ error: 'Orden de compra no encontrada' }, 404);
+      if (retiradaTesoreria) {
+        const q = bitacora.quien(req);
+        await bitacora.anotar({ tipo: 'orden_compra', id: itemId, accion: 'tesoreria_retirada',
+          numero: actualizado.numeroOC, usuario: q.usuario, usuarioNombre: q.nombre, origen: q.origen,
+          motivo: `Solicitud ${retiradaTesoreria} retirada en tesorería (queda RECHAZADA)`, antes: null, despues: null });
+      }
 
       // Si se aprueba → ejecutar tareas secundarias en segundo plano (no bloquean la respuesta)
       if (accion === 'aprobar') {
@@ -3095,6 +3170,7 @@ const servidor = http.createServer(async (req, res) => {
 
         const ctx = await ctxSharePoint();
         const ocItem  = await obtenerOC(mVincular[1]);
+        if (ocItem.fields.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
         const reqItem = await obtenerRequerimiento(reqId);
 
         // Actualizar OC con el requerimientoId
@@ -3589,6 +3665,112 @@ FORMATO:
     return;
   }
 
+  // ── Papelera ──────────────────────────────────────────────────────────────
+  // POST /ordenes/:id/papelera y /os/:id/papelera (?simular=1 = solo el plan),
+  // POST /ordenes/:id/restaurar y /os/:id/restaurar, GET /papelera.
+  // Solo admin, con motivo. Ver supabase/migrations/20261016140000_papelera_documentos.sql.
+  const mPapelera = url.match(/^\/(ordenes|os)\/([^\/]+)\/(papelera|restaurar)$/);
+  if (req.method === 'POST' && mPapelera) {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', async () => {
+      try {
+        const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        if (!(await correcciones.esAdmin(req))) {
+          return json({ error: 'Solo un administrador puede mandar órdenes a la papelera o restaurarlas.' }, 403);
+        }
+        const [, recurso, id, accion] = mPapelera;
+        const esOC = recurso === 'ordenes';
+        const tipo = esOC ? 'orden_compra' : 'orden_servicio';
+        const repoDoc = esOC ? repoOrdenesCompra : repoOrdenesServicio;
+        const motivo = String(body.motivo || '').trim();
+        if (!motivo) return json({ error: accion === 'papelera' ? 'Mandar a la papelera exige un motivo.' : 'Restaurar exige un motivo.' }, 400);
+
+        const doc = await repoDoc.obtener(id);
+        if (!doc) return json({ error: 'Orden no encontrada' }, 404);
+        const quien = bitacora.quien(req);
+        const numero = (esOC ? doc.numeroOC : doc.numeroOS) || '';
+
+        if (accion === 'papelera') {
+          if (doc.papeleraEn) return json({ error: 'La orden ya está en la papelera.' }, 409);
+          // Salió plata: borrarla dejaría un pago sin documento. Si el pago se
+          // marcó por error, se desmarca primero con «Corregir».
+          if (doc.pagado) {
+            return json({ error: 'La orden está marcada como pagada. Si fue un error, desmárcalo primero con «Corregir»; si se pagó de verdad, no va a la papelera.' }, 409);
+          }
+          // Enviada a tesorería: la solicitud se retira antes. Si ya se pagó, o no
+          // se puede consultar, no va a la papelera.
+          let retiro = null;
+          if (esOC && doc.solicitudTesoreriaId) {
+            const plan = await planRetiroTesoreria(doc);
+            if (plan.error) return json({ error: plan.error }, plan.status);
+            retiro = plan.retirar;
+          }
+
+          if (new URLSearchParams(req.url.split('?')[1] || '').get('simular') === '1') {
+            const efectos = { movimientos: [], remisiones: [], precios: false,
+                              tesoreria: retiro ? { accion: 'retirar', egresoId: retiro.egreso_id } : null };
+            if (esOC) {
+              efectos.movimientos = [...new Set((await repoInventario.vigentesDeOC(id)).map(m => m.documentoRef).filter(Boolean))];
+              efectos.remisiones = (await repoRemisiones.porOrdenCompra(id)).filter(r => r.estado !== 'anulada').map(r => r.numero);
+              efectos.precios = !!doc.numeroOC;
+            }
+            return json({ ok: true, simulado: true, efectos });
+          }
+
+          if (retiro) {
+            try {
+              await tesoreria.retirarSolicitud({
+                orden_compra: numero, motivo: `Orden enviada a la papelera del ERP: ${motivo}`, solicitado_por: quien.usuario,
+              });
+            } catch (e) {
+              return json({ error: `No se pudo retirar la solicitud de tesorería (${retiro.egreso_id}): ${e.message}. La orden no fue a la papelera.` }, 502);
+            }
+          }
+
+          let efectos;
+          await bitacora.conHistorial({ tipo, id, accion: 'papelera', req, motivo },
+            async () => { efectos = await repoPapelera.enviar(tipo, id, { usuario: quien.usuario, motivo }); });
+          const partes = [
+            efectos.movimientos.length ? `almacén anulado: ${efectos.movimientos.join(', ')}` : null,
+            ...efectos.remisiones.map(r => `remisión ${r.numero}: ${r.accion}`),
+            efectos.precios ? `${efectos.precios} precio(s) retirados del historial` : null,
+            retiro ? `solicitud de tesorería ${retiro.egreso_id} retirada (queda RECHAZADA)` : null,
+          ].filter(Boolean);
+          if (partes.length) {
+            await bitacora.anotar({ tipo, id, accion: 'efectos_papelera', numero, usuario: quien.usuario,
+              usuarioNombre: quien.nombre, origen: quien.origen, motivo: partes.join(' · '), antes: null, despues: null });
+          }
+          await recalcularRequerimientoDe(doc);
+          return json({ ok: true, efectos, hechos: partes });
+        }
+
+        // restaurar
+        if (!doc.papeleraEn) return json({ error: 'La orden no está en la papelera.' }, 409);
+        let r;
+        await bitacora.conHistorial({ tipo, id, accion: 'restaurar', req, motivo },
+          async () => { r = await repoPapelera.restaurar(tipo, id); });
+        if (r.revertidos) {
+          await bitacora.anotar({ tipo, id, accion: 'efectos_restaurar', numero, usuario: quien.usuario,
+            usuarioNombre: quien.nombre, origen: quien.origen,
+            motivo: `${r.revertidos} cambio(s) de la papelera revertidos (almacén, remisiones, precios)`, antes: null, despues: null });
+        }
+        await recalcularRequerimientoDe(doc);
+        return json({ ok: true, revertidos: r.revertidos });
+      } catch (err) {
+        return json({ error: err.message }, err.status || 500);
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url === '/papelera') {
+    try {
+      if (!(await correcciones.esAdmin(req))) return json({ error: 'Solo un administrador ve la papelera.' }, 403);
+      return json({ papelera: await repoPapelera.listar() });
+    } catch (err) { return json({ error: err.message }, 500); }
+  }
+
   // ── POST /ordenes/:id/corregir y /os/:id/corregir → corregir una emitida ──
   // Solo admin y con motivo. Con ?simular=1 devuelve el plan sin escribir: qué
   // cambia, qué efectos tiene y qué lo bloquea, para confirmarlo antes. Ver
@@ -3611,13 +3793,15 @@ FORMATO:
 
         const previa = esOC ? await repoOrdenesCompra.obtener(id) : await repoOrdenesServicio.obtener(id);
         if (!previa) return json({ error: 'Orden no encontrada' }, 404);
+        if (previa.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
 
         let remisiones = [];
         let plan;
         if (esOC) {
           const movimientos = await repoInventario.vigentesDeOC(id);
           remisiones = (await repoRemisiones.porOrdenCompra(id)).filter(r => r.estado === 'activa');
-          plan = correcciones.planOC(previa, body, { movimientos, remisiones });
+          const tes = await consultarTesoreria(previa);
+          plan = correcciones.planOC(previa, body, { movimientos, remisiones, tesoreria: tes });
         } else {
           plan = correcciones.planOS(previa, body);
         }
@@ -3648,6 +3832,27 @@ FORMATO:
             const t = `Almacén: anulados ${r.anulados.join(', ') || '—'}; emitidos ${r.emitidos.join(', ')}`;
             hechos.push(t); await anotar('ajuste_almacen', t);
           } catch (e) { avisos.push(`No se pudo ajustar el almacén: ${e.message}`); }
+        }
+
+        if (plan.efectos.tesoreria) {
+          try {
+            const kaos = await repoProyectosKaos.deProyectoErp(doc.proyecto);
+            const r = await tesoreria.actualizarSolicitud({
+              orden_compra: numero,
+              total: Number(doc.total),
+              nit: doc.proveedorNit,
+              nombre: doc.proveedorNombre,
+              ...(kaos ? { proyecto_id: kaos.id } : {}),
+              motivo: `Orden corregida en el ERP: ${plan.motivo}`,
+              solicitado_por: quien.usuario,
+            });
+            const t = `Tesorería: solicitud ${plan.efectos.tesoreria.egresoId} actualizada` +
+              (r.vuelve_a_aprobacion ? ' (vuelve a aprobación)' : '');
+            hechos.push(t); await anotar('tesoreria_actualizada', t);
+          } catch (e) {
+            const t = `La solicitud de tesorería ${plan.efectos.tesoreria.egresoId} NO se actualizó: ${e.message}. Hay que avisarle a tesorería.`;
+            avisos.push(t); await anotar('tesoreria_pendiente', t);
+          }
         }
 
         if (plan.efectos.remisiones) {
@@ -3715,6 +3920,7 @@ FORMATO:
         const ocId = mOCEditar[1];
         const item = await obtenerOC(ocId);
         const f    = item?.fields || {};
+        if (f.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
         if (f.estado !== 'borrador') return json({ error: 'Solo se pueden editar borradores' }, 400);
 
         const items = (body.items || []).map(it => ({
@@ -3764,6 +3970,7 @@ FORMATO:
         const osId = mOSEditar[1];
         const item = await obtenerOS(osId);
         const f    = item?.fields || {};
+        if (f.papeleraEn) return json({ error: 'La orden está en la papelera: hay que restaurarla antes de hacer cualquier cosa con ella.' }, 409);
         if (f.estado !== 'borrador') return json({ error: 'Solo se pueden editar borradores' }, 400);
 
         const items = (body.items || []).map(it => ({
