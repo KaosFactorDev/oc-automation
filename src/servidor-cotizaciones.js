@@ -1892,6 +1892,10 @@ const servidor = http.createServer(async (req, res) => {
         if (itemsSinPrecio.length) {
           return json({ error: `Los siguientes ítems no tienen precio unitario: ${itemsSinPrecio.map(it => it.insumo || it.descripcion).join(', ')}` }, 400);
         }
+        const itemsSinCantidad = selecciones.filter(it => !(Number(it.cantidad) > 0));
+        if (itemsSinCantidad.length) {
+          return json({ error: `Los siguientes ítems no tienen cantidad: ${itemsSinCantidad.map(it => it.insumo || it.descripcion).join(', ')}` }, 400);
+        }
 
         const ctx = await ctxSharePoint();
         const reqItem = await obtenerRequerimiento(mGenReq[1]);
@@ -2314,6 +2318,12 @@ const servidor = http.createServer(async (req, res) => {
           campos.proyecto = String(body.proyecto).trim();
         }
         if (Array.isArray(body.itemsJson)) {
+          // La cantidad se puede corregir desde la consola. Un ítem vigente en
+          // cero no tiene sentido: si ya no se necesita, se descarta.
+          const sinCantidad = body.itemsJson.filter(it => !it.descartado && !(Number(it.cantidad) > 0));
+          if (sinCantidad.length) {
+            return json({ error: `La cantidad debe ser mayor a cero en: ${sinCantidad.map(it => it.insumo || it.descripcion || '—').join(', ')}` }, 400);
+          }
           campos.itemsJson = JSON.stringify(body.itemsJson);
         }
         if (!Object.keys(campos).length) return json({ error: 'Nada que actualizar' }, 400);
