@@ -29,3 +29,7 @@ respaldos/
 
 # Archivos archivados
 _archivo/
+
+# Graphify — grafo de conocimiento local (politica G3)
+graphify-out/
+.graphify/

@@ -1,0 +1,47 @@
+# .graphifyignore — plantilla canonica TKF (politica G3)
+# La exclusion de secretos de Graphify es por NOMBRE de archivo, no por
+# contenido. Segunda capa de defensa: ver kaos-report/docs/graphify-policy.md
+.env
+.env.*
+!.env.example
+**/secrets/**
+**/credentials/**
+*.pem
+*.key
+*.p12
+*.pfx
+*-deploy-key.json
+# Dumps y datos
+*.dump
+*.bak
+*_backup.sql
+# Build y dependencias
+node_modules/
+dist/
+dist-ssr/
+build/
+.next/
+coverage/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+# Assets binarios — ruido puro
+public/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+*.woff
+*.woff2
+*.ttf
+*.mp3
+*.mp4
+*.pdf
+# Salida de Graphify
+graphify-out/
+.graphify/
+# Notebooks: guardan outputs con datos reales dentro del archivo
+*.ipynb
+.ipynb_checkpoints/
