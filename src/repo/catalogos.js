@@ -306,8 +306,16 @@ async function guardarInsumo(datos) {
 }
 
 // ── Usuarios ────────────────────────────────────────────────────────────────
+//
+// Los roles están en erp.usuario_roles (catálogo erp.roles). La columna vieja
+// erp.usuarios.rol quedó OBSOLETA: no se lee ni se escribe desde acá.
 
-const USUARIO_COLS = 'id, email, nombre, cargo, rol, activo, sp_id';
+const { EstadoInvalido } = require('./_estado');
+
+// Los roles de cada usuario, en el orden del catálogo.
+const USUARIO_COLS = `u.id, u.email, u.nombre, u.cargo, u.activo, u.sp_id,
+  ARRAY(SELECT ur.rol FROM erp.usuario_roles ur JOIN erp.roles r ON r.codigo = ur.rol
+         WHERE ur.usuario_id = u.id ORDER BY r.orden) AS roles`;
 
 function mapUsuario(r) {
   return {
@@ -315,61 +323,121 @@ function mapUsuario(r) {
     email:  r.email,
     nombre: r.nombre,
     cargo:  r.cargo,
-    rol:    r.rol,
     activo: r.activo,
+    roles:  r.roles || [],
     sp_id:  r.sp_id,
   };
 }
 
+/** El catálogo de roles, para la pantalla de usuarios. */
+async function getRoles() {
+  return pg.rows('SELECT codigo, nombre, descripcion FROM erp.roles ORDER BY orden');
+}
+
 async function getUsuarios() {
   const filas = await pg.rows(
-    `SELECT ${USUARIO_COLS} FROM erp.usuarios ORDER BY activo DESC, nombre`);
+    `SELECT ${USUARIO_COLS} FROM erp.usuarios u ORDER BY u.activo DESC, u.nombre`);
   return filas.map(mapUsuario);
+}
+
+async function getUsuario(id) {
+  const r = await pg.one(`SELECT ${USUARIO_COLS} FROM erp.usuarios u WHERE u.id = $1`, [id]);
+  return r ? mapUsuario(r) : null;
 }
 
 async function getUsuarioByEmail(email) {
   const r = await pg.one(
-    `SELECT ${USUARIO_COLS} FROM erp.usuarios WHERE email = lower(btrim($1))`,
+    `SELECT ${USUARIO_COLS} FROM erp.usuarios u WHERE u.email = lower(btrim($1))`,
     [String(email || '')]);
   return r ? mapUsuario(r) : null;
 }
 
-/** El correo es la clave: siempre en minúsculas, como exige el CHECK. */
+/**
+ * Alta o actualización por correo (el correo es la clave, en minúsculas como
+ * exige el CHECK). Los roles se asignan aparte, con asignarRoles.
+ */
 async function guardarUsuario(datos) {
   const r = await pg.one(
-    `INSERT INTO erp.usuarios (email, nombre, cargo, rol, activo)
-     VALUES (lower(btrim($1)), $2, $3, $4, $5)
+    `INSERT INTO erp.usuarios AS x (email, nombre, cargo, activo)
+     VALUES (lower(btrim($1)), $2, $3, $4)
      ON CONFLICT (email) DO UPDATE SET
-       nombre = COALESCE(EXCLUDED.nombre, erp.usuarios.nombre),
-       cargo  = COALESCE(EXCLUDED.cargo,  erp.usuarios.cargo),
-       rol    = COALESCE(EXCLUDED.rol,    erp.usuarios.rol),
+       nombre = COALESCE(EXCLUDED.nombre, x.nombre),
+       cargo  = COALESCE(EXCLUDED.cargo,  x.cargo),
        activo = EXCLUDED.activo
-     RETURNING ${USUARIO_COLS}`,
+     RETURNING id`,
     [
       datos.email, datos.nombre ?? '', datos.cargo ?? '',
-      ['admin', 'operador'].includes(datos.rol) ? datos.rol : 'operador',
       datos.activo === undefined ? false : !!datos.activo,
     ]);
-  return mapUsuario(r);
+  return getUsuario(r.id);
 }
 
-async function actualizarUsuario(id, cambios) {
-  const MAPA = { nombre: 'nombre', cargo: 'cargo', rol: 'rol', activo: 'activo' };
-  const sets = [];
-  const vals = [];
-  for (const [clave, valor] of Object.entries(cambios)) {
-    const col = MAPA[clave];
-    if (!col) continue;
-    vals.push(valor);
-    sets.push(`${col} = $${vals.length}`);
-  }
-  if (!sets.length) return null;
+/**
+ * Cambia datos, estado y/o roles de un usuario en una sola transacción.
+ *
+ * Reglas que no dependen de la pantalla:
+ *   · nadie se desactiva a sí mismo ni se quita su propio rol de administrador;
+ *   · siempre queda al menos un administrador activo.
+ * `porEmail` es quien hace el cambio (queda en usuario_roles.asignado_por).
+ */
+async function actualizarUsuario(id, cambios, porEmail = null) {
+  return pg.tx(async (c) => {
+    const { rows: [actual] } = await c.query(
+      'SELECT id, email FROM erp.usuarios WHERE id = $1 FOR UPDATE', [id]);
+    if (!actual) return null;
+    const esUnoMismo = porEmail && actual.email === String(porEmail).toLowerCase();
 
-  vals.push(id);
-  const r = await pg.one(
-    `UPDATE erp.usuarios SET ${sets.join(', ')}
-      WHERE id = $${vals.length} RETURNING ${USUARIO_COLS}`, vals);
-  return r ? mapUsuario(r) : null;
+    const MAPA = { nombre: 'nombre', cargo: 'cargo', activo: 'activo' };
+    const sets = [];
+    const vals = [];
+    for (const [clave, valor] of Object.entries(cambios)) {
+      const col = MAPA[clave];
+      if (!col) continue;
+      vals.push(valor);
+      sets.push(`${col} = $${vals.length}`);
+    }
+    if (esUnoMismo && cambios.activo === false) {
+      throw new EstadoInvalido('No puedes desactivar tu propia cuenta.');
+    }
+    if (sets.length) {
+      vals.push(id);
+      await c.query(`UPDATE erp.usuarios SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+    }
+
+    if (Array.isArray(cambios.roles)) {
+      const roles = [...new Set(cambios.roles.map(String))];
+      const { rows: validos } = await c.query(
+        'SELECT codigo FROM erp.roles WHERE codigo = ANY($1::text[])', [roles]);
+      const desconocidos = roles.filter((r) => !validos.some((v) => v.codigo === r));
+      if (desconocidos.length) throw new EstadoInvalido(`Rol desconocido: ${desconocidos.join(', ')}`);
+      if (esUnoMismo && !roles.includes('admin')) {
+        throw new EstadoInvalido('No puedes quitarte el rol de administrador a ti mismo.');
+      }
+      await c.query(
+        'DELETE FROM erp.usuario_roles WHERE usuario_id = $1 AND NOT (rol = ANY($2::text[]))', [id, roles]);
+      await c.query(
+        `INSERT INTO erp.usuario_roles (usuario_id, rol, asignado_por)
+         SELECT $1, r, $3 FROM unnest($2::text[]) r
+         ON CONFLICT (usuario_id, rol) DO NOTHING`, [id, roles, porEmail]);
+    }
+
+    const { rows: [admins] } = await c.query(
+      `SELECT count(*)::int AS n FROM erp.usuarios u
+         JOIN erp.usuario_roles ur ON ur.usuario_id = u.id AND ur.rol = 'admin'
+        WHERE u.activo`);
+    if (admins.n === 0) throw new EstadoInvalido('Debe quedar al menos un administrador activo.');
+
+    const { rows: [fila] } = await c.query(`SELECT ${USUARIO_COLS} FROM erp.usuarios u WHERE u.id = $1`, [id]);
+    return mapUsuario(fila);
+  });
+}
+
+/** Solo para el arranque (bootstrapAdmin): sin las reglas de quién asigna. */
+async function asignarRolesIniciales(id, roles) {
+  await pg.query(
+    `INSERT INTO erp.usuario_roles (usuario_id, rol, asignado_por)
+     SELECT $1, r, 'arranque' FROM unnest($2::text[]) r
+     ON CONFLICT (usuario_id, rol) DO NOTHING`, [id, roles]);
 }
 
 async function contarUsuarios() {
@@ -381,5 +449,6 @@ module.exports = {
   getProveedores, getProveedorPorNit, guardarProveedor, actualizarProveedor,
   getProyectos, getProyecto, getProyectoPorCodigo, crearProyecto, actualizarProyecto,
   getInsumos, guardarInsumo,
-  getUsuarios, getUsuarioByEmail, guardarUsuario, actualizarUsuario, contarUsuarios,
+  getRoles, getUsuarios, getUsuario, getUsuarioByEmail, guardarUsuario, actualizarUsuario,
+  asignarRolesIniciales, contarUsuarios,
 };

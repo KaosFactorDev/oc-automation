@@ -77,11 +77,16 @@ function deleteSesion(id) {
   db().prepare('DELETE FROM sesiones WHERE id=?').run(id);
 }
 
+/** Cierra todas las sesiones de una persona (al desactivarla o quitarle acceso). */
+function deleteSesionesDe(email) {
+  return db().prepare('DELETE FROM sesiones WHERE email=?').run(String(email || '').toLowerCase()).changes;
+}
+
 function cleanExpiredSesiones() {
   db().prepare('DELETE FROM sesiones WHERE expires_at<?').run(new Date().toISOString());
 }
 
 module.exports = {
   db,
-  upsertSesion, getSesion, deleteSesion, cleanExpiredSesiones,
+  upsertSesion, getSesion, deleteSesion, deleteSesionesDe, cleanExpiredSesiones,
 };
