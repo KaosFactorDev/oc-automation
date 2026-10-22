@@ -25,6 +25,11 @@ const db = require('./db');
 const COOKIE_NAME     = 'erp_session';
 const SESSION_TTL_MS  = 8  * 60 * 60 * 1000; // 8 horas
 const SESSION_RENEW_MS = 30 * 60 * 1000;      // renovar si quedan < 30 min
+// Tope absoluto desde el login. La ventana deslizante renovaba la sesión con cada
+// uso y, con uso diario, no vencía nunca: una cuenta desactivada podía seguir
+// entrando con su cookie vieja. Ahora, pase lo que pase, a las 12 h hay que
+// volver a iniciar sesión.
+const SESSION_MAX_MS  = 12 * 60 * 60 * 1000;
 const STATE_TTL_MS    = 5  * 60 * 1000;        // 5 min para completar el login
 
 // ── In-memory state store (CSRF) ──────────────────────────────────────────────
@@ -129,10 +134,13 @@ function _httpPost(url, body, headers = {}) {
 
 // ── Sesiones ──────────────────────────────────────────────────────────────────
 
-function createSession(email, nombre, rol) {
+// La sesión NO guarda el rol: guardarlo congelaba el permiso del momento del
+// login. Quién es y qué puede hacer se lee de erp.usuarios en cada petición
+// (ver usuarioVigente en servidor-cotizaciones.js).
+function createSession(email, nombre) {
   const id         = crypto.randomUUID();
   const expires_at = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-  db.upsertSesion({ id, email, nombre, rol, expires_at });
+  db.upsertSesion({ id, email: String(email || '').toLowerCase(), nombre, rol: '', expires_at });
   return id;
 }
 
@@ -140,19 +148,26 @@ function validateSession(sessionId) {
   if (!sessionId) return null;
   const s = db.getSesion(sessionId);
   if (!s) return null;
-  if (new Date(s.expires_at) < new Date()) {
+  const limite = new Date(s.created_at).getTime() + SESSION_MAX_MS;
+  if (new Date(s.expires_at) < new Date() || Date.now() >= limite) {
     db.deleteSesion(sessionId);
     return null;
   }
-  // Sliding window: renovar si quedan menos de 30 min
+  // Ventana deslizante: renovar si quedan menos de 30 min, sin pasar del tope.
   if (new Date(s.expires_at) - new Date() < SESSION_RENEW_MS) {
-    db.upsertSesion({ ...s, expires_at: new Date(Date.now() + SESSION_TTL_MS).toISOString() });
+    const nuevo = Math.min(Date.now() + SESSION_TTL_MS, limite);
+    db.upsertSesion({ ...s, expires_at: new Date(nuevo).toISOString() });
   }
-  return { email: s.email, nombre: s.nombre, rol: s.rol };
+  return { id: s.id, email: s.email, nombre: s.nombre };
 }
 
 function deleteSession(sessionId) {
   if (sessionId) db.deleteSesion(sessionId);
+}
+
+/** Cierra todas las sesiones de un correo. Devuelve cuántas cerró. */
+function deleteSessionsOf(email) {
+  return db.deleteSesionesDe(email);
 }
 
 // ── Cookie helpers ────────────────────────────────────────────────────────────
@@ -183,6 +198,7 @@ module.exports = {
   createSession,
   validateSession,
   deleteSession,
+  deleteSessionsOf,
   parseCookies,
   buildSessionCookie,
   clearSessionCookie,

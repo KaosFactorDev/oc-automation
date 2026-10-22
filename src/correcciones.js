@@ -40,7 +40,7 @@ async function esAdmin(req) {
   const email = req && req._sesion && req._sesion.email;
   if (!email) return false;
   const u = await repoCatalogos.getUsuarioByEmail(email);
-  return !!(u && u.activo && u.rol === 'admin');
+  return !!(u && u.activo && u.roles.includes('admin'));
 }
 
 const error = (status, message) => Object.assign(new Error(message), { status });
