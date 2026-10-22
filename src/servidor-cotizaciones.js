@@ -620,11 +620,11 @@ async function bootstrapAdmin() {
     email,
     nombre: email,
     cargo:  'Administrador',
-    rol:    'admin',
     activo: true,
   };
   try {
-    await repoCatalogos.guardarUsuario(adminData);
+    const admin = await repoCatalogos.guardarUsuario(adminData);
+    await repoCatalogos.asignarRolesIniciales(admin.id, ['admin']);
     console.log(`[bootstrap] Admin inicial creado: ${email}`);
   } catch (e) {
     console.warn('[bootstrap] Error al crear admin:', e.message);
@@ -657,6 +657,62 @@ const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${P
 
 // Rutas que no requieren sesión activa
 const RUTAS_PUBLICAS = ['/', '/legacy', '/auth/login-url', '/auth/callback', '/auth/logout', '/me'];
+
+// Lo mínimo para que un valor de configuración no rompa los PDF ni el tope.
+function validarConfig(clave, valor) {
+  const vacio = valor === null || valor === undefined || valor === '';
+  switch (clave) {
+    case 'logo':
+      if (vacio) return null;
+      if (typeof valor !== 'string' || !/^data:image\/(png|jpeg|svg\+xml|webp);base64,/.test(valor)) {
+        return 'El logo debe ser una imagen PNG, JPG, SVG o WebP.';
+      }
+      return valor.length > 700 * 1024 ? 'El logo no puede pasar de 500 KB.' : null;
+    case 'ivaDefault': {
+      const n = Number(valor);
+      return Number.isFinite(n) && n >= 0 && n <= 100 ? null : 'El IVA debe estar entre 0 y 100.';
+    }
+    case 'rrhhTopeAprobacionOS': {
+      if (vacio) return null;
+      const n = Number(valor);
+      return Number.isFinite(n) && n >= 0 ? null : 'El tope de RRHH debe ser un número mayor o igual a 0, o quedar vacío.';
+    }
+    case 'emisor':
+    case 'firmante':
+      return valor && typeof valor === 'object' && !Array.isArray(valor) ? null : 'Formato inválido.';
+    case 'observacionesDefault':
+      return typeof valor === 'string' && valor.length <= 5000 ? null : 'Las observaciones no pueden pasar de 5000 caracteres.';
+    default:
+      return 'Clave desconocida.';
+  }
+}
+
+// ── Usuario vigente ─────────────────────────────────────────────────────────
+// La sesión solo dice QUIÉN es (correo). Si sigue activo y qué roles tiene se
+// lee de erp.usuarios en cada petición: antes la sesión guardaba el rol del
+// login y no volvía a mirar la base, así que una cuenta desactivada seguía
+// operando hasta que su cookie venciera (y con uso diario no vencía nunca).
+//
+// Caché corta para no ir a la base en cada petición. Al cambiar un usuario
+// desde /usuarios se invalida en el acto, así que los 15 s solo cuentan para
+// cambios hechos por fuera de la app (SQL directo).
+const USUARIO_CACHE_MS = 15 * 1000;
+const _usuarioCache = new Map(); // email → { usuario, en }
+
+async function usuarioVigente(email) {
+  const clave = String(email || '').toLowerCase();
+  const hit = _usuarioCache.get(clave);
+  if (hit && Date.now() - hit.en < USUARIO_CACHE_MS) return hit.usuario;
+  const usuario = await repoCatalogos.getUsuarioByEmail(clave);
+  _usuarioCache.set(clave, { usuario, en: Date.now() });
+  return usuario;
+}
+
+function invalidarUsuario(email) {
+  _usuarioCache.delete(String(email || '').toLowerCase());
+}
+
+const esAdminSesion = (req) => !!req._sesion?.roles?.includes('admin');
 
 // Tope de ítems al crear un requerimiento digitándolo en la consola
 const MAX_ITEMS_REQ_MANUAL = 100;
@@ -1159,7 +1215,29 @@ const servidor = http.createServer(async (req, res) => {
   // ── Middleware de autenticación ──────────────────────────────────────────
   const esPublica = RUTAS_PUBLICAS.includes(url);
   const cookies   = auth.parseCookies(req.headers.cookie);
-  const sesion    = auth.validateSession(cookies[auth.COOKIE_NAME]);
+  let   sesion    = auth.validateSession(cookies[auth.COOKIE_NAME]);
+
+  // Una cookie válida no basta: la cuenta tiene que seguir existiendo y activa.
+  // Si no, la sesión se borra y la petición sigue como anónima (401 abajo).
+  if (sesion) {
+    let usuario;
+    try { usuario = await usuarioVigente(sesion.email); }
+    catch (err) {
+      console.error('[auth] No se pudo verificar el usuario:', err.message);
+      return json({ error: 'No se pudo verificar la sesión. Reintenta.' }, 503);
+    }
+    if (!usuario || !usuario.activo) {
+      auth.deleteSession(sesion.id);
+      sesion = null;
+    } else {
+      sesion = {
+        email:     usuario.email,
+        nombre:    sesion.nombre || usuario.nombre,
+        usuarioId: usuario.id,
+        roles:     usuario.roles,
+      };
+    }
+  }
 
   if (!esPublica && !sesion) {
     return json({ error: 'no_session' }, 401);
@@ -1181,7 +1259,12 @@ const servidor = http.createServer(async (req, res) => {
   // ── GET /me → info de la sesión activa ──────────────────────────────────
   if (req.method === 'GET' && url === '/me') {
     if (!sesion) return json({ error: 'no_session' }, 401);
-    return json({ email: sesion.email, nombre: sesion.nombre, rol: sesion.rol });
+    return json({ email: sesion.email, nombre: sesion.nombre, roles: sesion.roles, esAdmin: sesion.roles.includes('admin') });
+  }
+
+  // ── GET /roles → catálogo de roles (para la pantalla de usuarios) ──────────
+  if (req.method === 'GET' && url === '/roles') {
+    return json(await repoCatalogos.getRoles());
   }
 
   // ── GET /diag/stream → comprobar que el reverse proxy no buffera ─────────
@@ -1226,7 +1309,8 @@ const servidor = http.createServer(async (req, res) => {
       if (!usuario) {
         // Auto-registrar como pendiente de aprobación
         try {
-          await repoCatalogos.guardarUsuario({ email, nombre, cargo: '', rol: 'operador', activo: false });
+          // Sin roles: los asigna un administrador al activar la cuenta.
+          await repoCatalogos.guardarUsuario({ email, nombre, cargo: '', activo: false });
         } catch (e) {
           console.warn('[auth] No se pudo registrar el usuario pendiente:', e.message);
         }
@@ -1243,7 +1327,8 @@ const servidor = http.createServer(async (req, res) => {
         return;
       }
 
-      const sessionId = auth.createSession(email, nombre, usuario.rol);
+      const sessionId = auth.createSession(email, nombre);
+      invalidarUsuario(email);
       res.writeHead(302, {
         'Set-Cookie': auth.buildSessionCookie(sessionId, AUTH_REDIRECT_URI),
         'Location':   '/',
@@ -1892,6 +1977,10 @@ const servidor = http.createServer(async (req, res) => {
         if (itemsSinPrecio.length) {
           return json({ error: `Los siguientes ítems no tienen precio unitario: ${itemsSinPrecio.map(it => it.insumo || it.descripcion).join(', ')}` }, 400);
         }
+        const itemsSinCantidad = selecciones.filter(it => !(Number(it.cantidad) > 0));
+        if (itemsSinCantidad.length) {
+          return json({ error: `Los siguientes ítems no tienen cantidad: ${itemsSinCantidad.map(it => it.insumo || it.descripcion).join(', ')}` }, 400);
+        }
 
         const ctx = await ctxSharePoint();
         const reqItem = await obtenerRequerimiento(mGenReq[1]);
@@ -2314,6 +2403,12 @@ const servidor = http.createServer(async (req, res) => {
           campos.proyecto = String(body.proyecto).trim();
         }
         if (Array.isArray(body.itemsJson)) {
+          // La cantidad se puede corregir desde la consola. Un ítem vigente en
+          // cero no tiene sentido: si ya no se necesita, se descarta.
+          const sinCantidad = body.itemsJson.filter(it => !it.descartado && !(Number(it.cantidad) > 0));
+          if (sinCantidad.length) {
+            return json({ error: `La cantidad debe ser mayor a cero en: ${sinCantidad.map(it => it.insumo || it.descripcion || '—').join(', ')}` }, 400);
+          }
           campos.itemsJson = JSON.stringify(body.itemsJson);
         }
         if (!Object.keys(campos).length) return json({ error: 'Nada que actualizar' }, 400);
@@ -2525,13 +2620,24 @@ const servidor = http.createServer(async (req, res) => {
 
   // ── POST /config/:clave → actualizar (body = JSON { valor }) ────────────
   const mConf = url.match(/^\/config\/(logo|emisor|firmante|observacionesDefault|ivaDefault|rrhhTopeAprobacionOS)$/);
+  // Solo un administrador: esto es lo que sale impreso en cada OC/OS (emisor,
+  // firmante, logo) y el tope con el que las OS de RRHH se aprueban solas.
+  // Antes cualquier sesión podía cambiarlo. Leerlo (GET /config) sigue abierto.
   if (req.method === 'POST' && mConf) {
+    if (!esAdminSesion(req)) {
+      return json({ error: 'Solo un administrador puede cambiar la configuración de la empresa.' }, 403);
+    }
     const chunks = [];
-    req.on('data', c => chunks.push(c));
+    let tam = 0;
+    req.on('data', c => { tam += c.length; if (tam <= 2 * 1024 * 1024) chunks.push(c); });
     req.on('end', async () => {
       try {
+        if (tam > 2 * 1024 * 1024) return json({ error: 'La configuración enviada es demasiado grande.' }, 413);
         const { valor } = JSON.parse(Buffer.concat(chunks).toString());
+        const problema = validarConfig(mConf[1], valor);
+        if (problema) return json({ error: problema }, 400);
         await configApp.set(mConf[1], valor);
+        console.log(`[config] ${req._sesion.email} cambió «${mConf[1]}»`);
         json({ ok: true });
       } catch (err) { json({ error: err.message }, 500); }
     });
@@ -4325,7 +4431,7 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
 
   // ── GET /usuarios → lista de usuarios (solo admin) ──────────────────────
   if (req.method === 'GET' && url === '/usuarios') {
-    if (req._sesion?.rol !== 'admin') return json({ error: 'Acceso denegado' }, 403);
+    if (!esAdminSesion(req)) return json({ error: 'Solo un administrador ve los usuarios.' }, 403);
     return json(await repoCatalogos.getUsuarios());
   }
 
@@ -4335,7 +4441,7 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
   // el sp_id en la ruta el UPDATE no encontraba a nadie.
   const mUsrId = url.match(/^\/usuarios\/(\d+)$/);
   if (req.method === 'PATCH' && mUsrId) {
-    if (req._sesion?.rol !== 'admin') return json({ error: 'Acceso denegado' }, 403);
+    if (!esAdminSesion(req)) return json({ error: 'Solo un administrador administra usuarios.' }, 403);
     const usrId = mUsrId[1];
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -4345,14 +4451,25 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
 
         const fields = {};
         if (data.activo !== undefined) fields.activo = Boolean(data.activo);
-        if (data.rol    !== undefined) fields.rol    = String(data.rol);
         if (data.nombre !== undefined) fields.nombre = String(data.nombre);
         if (data.cargo  !== undefined) fields.cargo  = String(data.cargo);
+        if (data.roles  !== undefined) {
+          if (!Array.isArray(data.roles)) return json({ error: 'roles debe ser una lista.' }, 400);
+          fields.roles = data.roles;
+        }
 
-        const actualizado = await repoCatalogos.actualizarUsuario(usrId, fields);
+        const actualizado = await repoCatalogos.actualizarUsuario(usrId, fields, req._sesion.email);
         if (!actualizado) return json({ error: 'Usuario no encontrado' }, 404);
-        return json({ ok: true });
-      } catch (e) { return json({ error: e.message }, 500); }
+
+        // Que el cambio valga YA, no al vencer la caché ni la cookie.
+        invalidarUsuario(actualizado.email);
+        let sesionesCerradas = 0;
+        if (!actualizado.activo) sesionesCerradas = auth.deleteSessionsOf(actualizado.email);
+        console.log(`[usuarios] ${req._sesion.email} cambió a ${actualizado.email}: ` +
+          JSON.stringify({ activo: actualizado.activo, roles: actualizado.roles }) +
+          (sesionesCerradas ? ` · ${sesionesCerradas} sesión(es) cerrada(s)` : ''));
+        return json({ ok: true, usuario: actualizado });
+      } catch (e) { return json({ error: e.message }, e.status || 500); }
     });
     return;
   }

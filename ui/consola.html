@@ -216,6 +216,8 @@ main{max-width:1400px;margin:0 auto;padding:28px 24px}
 .modal-x{position:absolute;top:12px;right:14px;background:none;border:none;color:var(--txt-2);
   font-size:22px;line-height:1;cursor:pointer;padding:2px 6px;border-radius:6px}
 .modal-x:hover{background:var(--surface);color:var(--txt)}
+/* Configuración de la empresa en solo lectura (quien no es admin): que no parezca editable */
+#modal-config input[readonly],#modal-config textarea[readonly]{background:transparent!important;border-style:dashed!important;cursor:default;color:var(--txt-2)!important;resize:none}
 .modal-card label{display:block;margin:12px 0 5px;font-size:12px;font-weight:500;color:var(--txt-2);text-transform:uppercase;letter-spacing:.04em}
 .modal-card input,.modal-card select,.modal-card textarea{width:100%;padding:8px 10px;background:var(--surface);color:var(--txt);border:1px solid var(--border);border-radius:6px;font-family:var(--sans);font-size:13px;box-sizing:border-box}
 .modal-card textarea{resize:vertical;min-height:70px}
@@ -1345,8 +1347,8 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
           <div id="logo-preview" style="width:160px;height:60px;border:1px dashed var(--border-hi);border-radius:4px;display:grid;place-items:center;color:var(--txt-3);font-size:11px;overflow:hidden;background:var(--surface)">sin logo</div>
           <div>
             <input type="file" id="input-logo" accept="image/png,image/jpeg,image/svg+xml" style="display:none">
-            <button class="btn btn-primary btn-sm" onclick="document.getElementById('input-logo').click()">Cargar imagen</button>
-            <button class="btn btn-ghost btn-sm" onclick="limpiarLogo()" style="margin-left:6px">Quitar</button>
+            <button class="btn btn-primary btn-sm cfg-editable" onclick="document.getElementById('input-logo').click()">Cargar imagen</button>
+            <button class="btn btn-ghost btn-sm cfg-editable" onclick="limpiarLogo()" style="margin-left:6px">Quitar</button>
             <div style="font-size:10px;color:var(--txt-3);margin-top:4px">PNG/JPG/SVG. Recomendado 400×120px.</div>
           </div>
         </div>
@@ -1385,7 +1387,11 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
         </div>
       </div>
 
-      <div style="display:flex;gap:10px;align-items:center">
+      <div id="cfg-solo-lectura" style="display:none;font-size:12px;color:var(--txt-2);background:var(--accent-lo);border:1px solid var(--border);border-radius:var(--r);padding:8px 12px">
+        Solo un administrador puede cambiar la configuración de la empresa. Aquí la ves tal como sale en las órdenes.
+      </div>
+
+      <div style="display:flex;gap:10px;align-items:center" id="cfg-acciones">
         <button class="btn btn-success" onclick="guardarConfig()" id="btn-guardar-cfg">
           <div class="spinner" id="spinner-cfg"></div>
           <span>Guardar configuración</span>
@@ -1641,13 +1647,13 @@ tbody tr:hover td{background:var(--card-hi);transition:background .1s}
           <span>&#9654;</span> Usuarios del ERP
         </summary>
         <div style="margin-top:16px">
-          <div class="desc" style="margin-bottom:14px">Aprueba o desactiva cuentas de usuarios. Solo los usuarios con estado Activo pueden iniciar sesión.</div>
+          <div class="desc" style="margin-bottom:14px">Activa o desactiva cuentas y asigna roles; una persona puede tener varios. Solo las cuentas activas entran, y desactivar a alguien le cierra la sesión en el acto. Por ahora el único rol que restringe es Administrador (usuarios, configuración de la empresa, papelera y correcciones); los demás quedan asignados para cuando se activen sus permisos.</div>
           <button class="btn btn-ghost btn-sm" onclick="(async()=>{await fetch('/sync').catch(()=>{});await cargarUsuariosAdmin();})()" style="margin-bottom:12px">Actualizar lista</button>
           <div id="usuarios-loading" style="font-size:12px;color:var(--txt-3);display:none">Cargando...</div>
           <div class="tabla-wrap" id="usuarios-tabla-wrap" style="display:none">
             <table id="tabla-usuarios">
               <thead><tr>
-                <th>Correo</th><th>Nombre</th><th>Cargo</th><th>Rol</th><th>Estado</th><th></th>
+                <th>Correo</th><th>Nombre</th><th>Cargo</th><th>Roles</th><th>Estado</th>
               </tr></thead>
               <tbody id="tbody-usuarios"></tbody>
             </table>
@@ -2341,6 +2347,23 @@ document.addEventListener('visibilitychange', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Carga de datos desde backend
 // ─────────────────────────────────────────────────────────────────────────────
+// Cualquier respuesta 401 de la API es «tu sesión ya no vale»: se muestra el
+// login. Antes solo /me lo atendía y el resto de la consola seguía como si
+// nada, con listas vacías o «Error: no_session».
+(() => {
+  const fetchOriginal = window.fetch.bind(window);
+  window.fetch = async (...args) => {
+    const res = await fetchOriginal(...args);
+    const url = String(args[0]?.url || args[0] || '');
+    if (res.status === 401 && !url.includes('/auth/') && ESTADO.usuario) {
+      ESTADO.usuario = null;
+      mostrarLoginOverlay();
+      avisar.atencion('Tu sesión terminó. Vuelve a iniciar sesión.');
+    }
+    return res;
+  };
+})();
+
 async function cargarUsuario(){
   try{
     const r = await fetch('/me');
@@ -2348,7 +2371,7 @@ async function cargarUsuario(){
     const u = await r.json();
     ESTADO.usuario = u;
     $('#user-chip').textContent = u?.nombre || u?.email || '—';
-    if ($('#btn-papelera')) $('#btn-papelera').style.display = u?.rol === 'admin' ? '' : 'none';
+    if ($('#btn-papelera')) $('#btn-papelera').style.display = u?.roles?.includes('admin') ? '' : 'none';
     if ($('#btn-logout')) $('#btn-logout').style.display = '';
     if ($('#login-overlay')) $('#login-overlay').style.display = 'none';
     document.body.classList.remove('con-login');
@@ -2396,45 +2419,63 @@ async function cerrarSesion(){
   if ($('#btn-logout')) $('#btn-logout').style.display = 'none';
   if ($('#user-chip')) $('#user-chip').textContent = '—';
 }
+let _rolesCatalogo = null;
+
 async function cargarUsuariosAdmin(){
   const tbody  = $('#tbody-usuarios');
   const wrap   = $('#usuarios-tabla-wrap');
   const loading = $('#usuarios-loading');
   if (!tbody) return;
-  if (loading) loading.style.display = 'block';
+  if (loading) { loading.style.display = 'block'; loading.textContent = 'Cargando...'; }
   if (wrap)   wrap.style.display = 'none';
   try {
-    const lista = await fetch('/usuarios').then(r => r.json());
+    const [lista, roles] = await Promise.all([
+      fetch('/usuarios').then(r => r.json()),
+      _rolesCatalogo ? _rolesCatalogo : fetch('/roles').then(r => r.json()),
+    ]);
     if (lista.error) { if (loading) loading.textContent = lista.error; return; }
-    tbody.innerHTML = lista.map(u => `
+    if (Array.isArray(roles)) _rolesCatalogo = roles;
+    const yo = (ESTADO.usuario?.email || '').toLowerCase();
+    tbody.innerHTML = lista.map(u => {
+      const soyYo = (u.email || '').toLowerCase() === yo;
+      const casillas = (_rolesCatalogo || []).map(r => {
+        const marcado = (u.roles || []).includes(r.codigo);
+        // Nadie se quita su propio admin (el servidor también lo impide).
+        const fijo = soyYo && r.codigo === 'admin';
+        return `<label title="${esc(r.descripcion)}" style="display:inline-flex;align-items:center;gap:4px;margin:2px 8px 2px 0;font-size:11px;white-space:nowrap;cursor:${fijo ? 'not-allowed' : 'pointer'}">
+            <input type="checkbox" data-usuario="${esc(u.id)}" data-rol="${esc(r.codigo)}" ${marcado ? 'checked' : ''} ${fijo ? 'disabled' : ''}
+              onchange="cambiarRolUsuario(${Number(u.id)})">${esc(r.nombre)}</label>`;
+      }).join('');
+      return `
       <tr>
-        <td class="mono" style="font-size:11px">${esc(u.email)}</td>
+        <td class="mono" style="font-size:11px">${esc(u.email)}${soyYo ? ' <span class="tag tag-borrador">tú</span>' : ''}</td>
         <td>${esc(u.nombre || '')}</td>
         <td>
-          <input class="td-input" style="border:1px solid var(--border);padding:4px 8px;font-size:11px;width:100%"
+          <input class="td-input" aria-label="Cargo de ${esc(u.email)}" style="border:1px solid var(--border);padding:4px 8px;font-size:11px;width:100%"
             value="${esc(u.cargo || '')}"
-            onchange="patchUsuario('${u.id}','cargo',this.value)">
+            onchange="patchUsuario(${Number(u.id)},'cargo',this.value)">
         </td>
+        <td style="min-width:260px">${casillas}${(u.roles || []).length ? '' : '<div style="font-size:10px;color:var(--warn)">Sin roles</div>'}</td>
         <td>
-          <select class="td-input" style="border:1px solid var(--border);padding:4px 8px;font-size:11px"
-            onchange="patchUsuario('${u.id}','rol',this.value)">
-            <option value="operador" ${u.rol==='operador'?'selected':''}>Operador</option>
-            <option value="admin"    ${u.rol==='admin'   ?'selected':''}>Admin</option>
-          </select>
-        </td>
-        <td>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
-            <input type="checkbox" ${u.activo?'checked':''} onchange="patchUsuario('${u.id}','activo',this.checked)">
-            <span class="tag ${u.activo?'tag-aprobada':'tag-borrador'}">${u.activo?'Activo':'Pendiente'}</span>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:${soyYo ? 'not-allowed' : 'pointer'}" title="${soyYo ? 'No puedes desactivar tu propia cuenta' : ''}">
+            <input type="checkbox" ${u.activo ? 'checked' : ''} ${soyYo ? 'disabled' : ''} onchange="patchUsuario(${Number(u.id)},'activo',this.checked)">
+            <span class="tag ${u.activo ? 'tag-aprobada' : 'tag-borrador'}">${u.activo ? 'Activo' : 'Inactivo'}</span>
           </label>
         </td>
-        <td style="font-size:10px;color:var(--txt-3)">${u.id}</td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
     if (loading) loading.style.display = 'none';
     if (wrap)   wrap.style.display = '';
   } catch(e) {
     if (loading) { loading.textContent = 'Error: ' + e.message; }
   }
+}
+
+// Los roles de la fila, tal como quedaron marcados, en una sola petición.
+function cambiarRolUsuario(id){
+  const roles = [...document.querySelectorAll(`#tbody-usuarios input[data-usuario="${id}"][data-rol]`)]
+    .filter(cb => cb.checked).map(cb => cb.dataset.rol);
+  return patchUsuario(id, 'roles', roles);
 }
 
 async function patchUsuario(id, campo, valor){
@@ -2446,11 +2487,12 @@ async function patchUsuario(id, campo, valor){
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    if (campo === 'activo' && valor === false) avisar.ok(`${data.usuario?.email || 'La cuenta'} quedó desactivada y se cerró su sesión.`);
     // Repintar con lo que quedó guardado: si el PATCH no cambió nada, el
     // checkbox no se queda marcado engañando al admin.
     await cargarUsuariosAdmin();
   } catch(e) {
-    avisar.error('Error al actualizar usuario: ' + e.message);
+    avisar.error('No se pudo actualizar el usuario: ' + e.message);
     await cargarUsuariosAdmin();
   }
 }
@@ -2806,7 +2848,7 @@ function lineaItemHistorial(it) {
 // ─── Corregir una orden ya emitida (solo admin) ──────────────────────────────
 // La consola solo esconde el botón: el servidor vuelve a comprobar que quien
 // corrige es admin, leyendo su rol de la base en cada corrección.
-function esAdminConsola() { return ESTADO.usuario?.rol === 'admin'; }
+function esAdminConsola() { return !!ESTADO.usuario?.roles?.includes('admin'); }
 
 const fechaInput = (v) => (v ? String(v).slice(0, 10) : '');
 
@@ -3951,7 +3993,10 @@ function renderEditReqItems() {
     <tr style="${it.descartado ? 'opacity:0.5' : ''}">
       <td style="text-align:right;color:var(--txt-3)">${i + 1}</td>
       <td>${esc(it.insumo || it.descripcion || '—')}</td>
-      <td class="mono" style="text-align:right">${it.cantidad || 0}</td>
+      <td style="text-align:right">
+        <input class="td-input mono" type="number" min="0" step="any" value="${Number(it.cantidad) || 0}"
+          oninput="_editReqItems[${i}].cantidad=Number(this.value)" style="width:80px;text-align:right">
+      </td>
       <td>${esc(it.unidad || 'UND')}</td>
       <td style="text-align:center">
         <input type="checkbox" id="edit-item-desc-${i}" ${it.descartado ? 'checked' : ''}
@@ -3986,6 +4031,10 @@ function cerrarEditarRequerimiento() {
 
 async function guardarEdicionRequerimiento() {
   if (!_editReqId) return;
+  const sinCantidad = _editReqItems.filter(it => !it.descartado && !(Number(it.cantidad) > 0));
+  if (sinCantidad.length) {
+    return avisar.atencion(`La cantidad debe ser mayor a cero en:\n${sinCantidad.map(it => `• ${it.insumo || it.descripcion || '—'}`).join('\n')}\n\nSi un insumo ya no se necesita, márcalo como descartado.`);
+  }
   const proyecto = $('#edit-req-proyecto').value;
   const r = await fetch(`/requerimientos/${encodeURIComponent(_editReqId)}/editar`, {
     method: 'PATCH',
@@ -4087,6 +4136,8 @@ function renderItemComparativa(it, idx){
   const cantidad = Number(it.cantidad) || 0;
   const cubierta = Number(it.cantidadCubierta || 0);
   const restante = Number(it.cantidadRestante != null ? it.cantidadRestante : cantidad);
+  // Lo que se va a pedir arranca en lo que falta cubrir; el usuario lo ajusta.
+  const cantidadInicial = restante > 0 ? restante : cantidad;
   const yaGestionado = !!it.yaGestionado;
 
   const sinProveedores = !it.proveedores || !it.proveedores.length;
@@ -4116,7 +4167,7 @@ function renderItemComparativa(it, idx){
   } else {
     filasProv = it.proveedores.map((p, j) => {
       const esRecomendado = it.recomendado && p.nit === it.recomendado.nit;
-      const total = (p.ultimoPrecio || 0) * cantidad;
+      const total = (p.ultimoPrecio || 0) * cantidadInicial;
       return `
         <tr${esRecomendado ? ' style="background:rgba(46,184,126,.06)"' : ''}>
           <td style="width:28px">
@@ -4134,7 +4185,7 @@ function renderItemComparativa(it, idx){
           <td class="mono" style="color:var(--txt-2)">${fmt$(p.precioMinimo)}</td>
           <td class="mono" style="color:var(--txt-2);font-size:12px">${esc(fmtFechaLarga(p.fechaUltima))}</td>
           <td class="mono" style="font-size:11px;color:var(--txt-3)">${esc(p.documento || '—')} · ${p.cantidadCompras || 0}x</td>
-          <td class="mono" style="text-align:right">${fmt$(total)}</td>
+          <td class="mono ${seleccionId}-total" data-precio="${p.ultimoPrecio || 0}" style="text-align:right">${fmt$(total)}</td>
         </tr>`;
     }).join('');
   }
@@ -4189,6 +4240,13 @@ function renderItemComparativa(it, idx){
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:10px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end">
+          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--txt-2)"
+                 title="Cantidad que irá en la OC. Arranca en lo pendiente por cubrir.">
+            Cant. a pedir
+            <input type="number" id="${seleccionId}-cant" class="td-input mono" min="0" step="any"
+              value="${cantidadInicial}" style="width:80px;padding:3px 5px;text-align:right"
+              ${yaGestionado ? 'disabled' : ''} oninput="cambiarCantidadComparativa(${idx})">
+          </label>
           <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--txt-2)">
             IVA %
             <input type="number" id="${seleccionId}-iva" class="td-input mono" min="0" max="100" step="0.01"
@@ -4217,13 +4275,33 @@ function renderItemComparativa(it, idx){
               <th style="width:110px">Precio mín.</th>
               <th style="width:100px">Fecha</th>
               <th>Documento · #compras</th>
-              <th style="width:120px;text-align:right">Total (${restante || cantidad} ${esc(it.unidad || '')})</th>
+              <th style="width:120px;text-align:right">Total (<span id="${seleccionId}-cant-lbl">${cantidadInicial}</span> ${esc(it.unidad || '')})</th>
             </tr></thead>
             <tbody>${filasProv}</tbody>
           </table>
         </div>
       </div>
     </div>`;
+}
+
+function cantidadComparativa(idx){
+  const input = document.getElementById(`cmp-${idx}-cant`);
+  if (input) return Number(input.value);
+  const it = ESTADO.comparativa?.items[idx] || {};
+  const solicitada = Number(it.cantidad) || 0;
+  const restante = it.cantidadRestante != null ? Number(it.cantidadRestante) : solicitada;
+  return restante > 0 ? restante : solicitada;
+}
+
+function cambiarCantidadComparativa(idx){
+  const cant = cantidadComparativa(idx);
+  const valida = cant > 0 ? cant : 0;
+  const lbl = document.getElementById(`cmp-${idx}-cant-lbl`);
+  if (lbl) lbl.textContent = valida;
+  document.querySelectorAll(`.cmp-${idx}-total`).forEach(td => {
+    td.textContent = fmt$(Number(td.dataset.precio || 0) * valida);
+  });
+  actualizarResumenSeleccion();
 }
 
 function toggleComparativa(idx){
@@ -4256,6 +4334,7 @@ async function aplicarHomologacion(idx, nombreHomologado) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const cantPrevia = document.getElementById(`cmp-${idx}-cant`)?.value;
     ESTADO.comparativa.items[idx] = data;
     // Re-renderizar solo esta card
     const cont = $('#comparativa-contenido');
@@ -4264,7 +4343,10 @@ async function aplicarHomologacion(idx, nombreHomologado) {
       if (cards[idx]) cards[idx].outerHTML = renderItemComparativa(data, idx);
       else cont.innerHTML = ESTADO.comparativa.items.map((it2, i) => renderItemComparativa(it2, i)).join('');
     }
-    actualizarResumenSeleccion();
+    // Homologar cambia el insumo, no lo que el usuario decidió pedir.
+    const inputCant = document.getElementById(`cmp-${idx}-cant`);
+    if (inputCant && cantPrevia != null && !inputCant.disabled) inputCant.value = cantPrevia;
+    cambiarCantidadComparativa(idx);
   } catch (e) {
     avisar.error('Error al homologar: ' + e.message);
   }
@@ -4408,9 +4490,8 @@ function recolectarSelecciones(){
       proveedorNombre = radio.dataset.nombre || '';
       precio          = Number(radio.dataset.precio) || 0;
     }
-    const cantidadSolicitada = Number(it.cantidad) || 0;
-    const cantidadRestante = it.cantidadRestante != null ? Number(it.cantidadRestante) : cantidadSolicitada;
-    const cantidadAUsar = cantidadRestante > 0 ? cantidadRestante : cantidadSolicitada;
+    const cantidadAUsar = cantidadComparativa(idx);
+    if (!(cantidadAUsar > 0)) return;
     const ivaInput   = document.querySelector(`#cmp-${idx}-iva`);
     const ivaPct     = ivaInput ? (Number(ivaInput.value) || 0) : (Number(window.IVA_DEFAULT) || 19);
     const inclInput  = document.querySelector(`#cmp-${idx}-iva-incl`);
@@ -4542,6 +4623,16 @@ function actualizarResumenSeleccion(){
 }
 
 async function confirmarGenerarOC(){
+  // Un ítem incluido con la cantidad vacía o en cero se caería en silencio de
+  // la selección; mejor avisar que generar la OC sin él.
+  const sinCantidad = (ESTADO.comparativa?.items || []).filter((it, idx) => {
+    const skip = document.querySelector(`[data-skip-idx="${idx}"]`);
+    if (skip && !skip.checked) return false;
+    return !(cantidadComparativa(idx) > 0);
+  });
+  if (sinCantidad.length) {
+    return avisar.atencion(`Ingresa una cantidad mayor a cero en:\n${sinCantidad.map(it => `• ${it.insumo}`).join('\n')}\n\nO desmarca "incluir en OC" para dejarlo por fuera.`);
+  }
   const sel = recolectarSelecciones();
   if (!sel.length) return avisar.atencion('No hay selecciones válidas. Elige un proveedor por insumo.');
   const req = ESTADO.requerimientoActivo;
@@ -6365,13 +6456,19 @@ async function abrirConfig(){
   refrescarContadorSinProyecto();
   cargarProyectosAdmin();
   cargarProveedoresAdmin();
-  // Mostrar sección de usuarios solo a admins
+  // Usuarios: solo admins. Configuración de la empresa: todos la ven, solo
+  // admins la cambian (el servidor responde 403 a cualquier otro).
+  const esAdmin = esAdminConsola();
   const secUsuarios = $('#cfg-usuarios');
   if (secUsuarios) {
-    const esAdmin = ESTADO.usuario?.rol === 'admin';
     secUsuarios.style.display = esAdmin ? '' : 'none';
     if (esAdmin) cargarUsuariosAdmin();
   }
+  ['#cfg-razon', '#cfg-nit', '#cfg-direccion', '#cfg-ciudad', '#cfg-telefono', '#cfg-correo',
+   '#cfg-condiciones', '#cfg-iva', '#cfg-tope-rrhh'].forEach(sel => { const el = $(sel); if (el) el.readOnly = !esAdmin; });
+  $$('.cfg-editable').forEach(b => { b.style.display = esAdmin ? '' : 'none'; });
+  if ($('#cfg-acciones'))    $('#cfg-acciones').style.display    = esAdmin ? 'flex' : 'none';
+  if ($('#cfg-solo-lectura')) $('#cfg-solo-lectura').style.display = esAdmin ? 'none' : 'block';
   try{
     const cfg = await fetch('/config').then(r => r.json());
     _logoDataUrl = cfg.logo || null;
@@ -6865,13 +6962,21 @@ async function guardarConfig(){
     if (tope === null) throw new Error('El tope de RRHH debe ser un número mayor o igual a 0, o quedar vacío.');
     const body = (valor) => JSON.stringify({ valor });
     const hdr  = { 'Content-Type':'application/json' };
-    await Promise.all([
+    // Cada respuesta se revisa: antes un rechazo del servidor (403, 400) se
+    // anunciaba igual como «✓ Guardado».
+    const respuestas = await Promise.all([
       fetch('/config/rrhhTopeAprobacionOS', { method:'POST', headers:hdr, body: body(tope) }),
       fetch('/config/logo',      { method:'POST', headers:hdr, body: body(_logoDataUrl || '') }),
       fetch('/config/emisor',    { method:'POST', headers:hdr, body: body(emisor) }),
       fetch('/config/observacionesDefault', { method:'POST', headers:hdr, body: body(condiciones) }),
       fetch('/config/ivaDefault', { method:'POST', headers:hdr, body: body(iva) }),
     ]);
+    for (const r of respuestas) {
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+    }
     _aplicarLogoHeader(_logoDataUrl);
     $('#msg-cfg').textContent = '✓ Guardado';
     setTimeout(cerrarConfig, 900);
@@ -7532,13 +7637,13 @@ function _invMsg(el, type, text) {
 
     <div>
       <h4 style="margin:0 0 6px">Insumos</h4>
-      <p style="margin:0 0 8px;font-size:12px;color:var(--txt-2)">Marcar "Descartar" excluye el insumo de la comparativa y del cálculo de cobertura.</p>
+      <p style="margin:0 0 8px;font-size:12px;color:var(--txt-2)">Puedes corregir la cantidad solicitada. Marcar "Descartar" excluye el insumo de la comparativa y del cálculo de cobertura.</p>
       <div style="border:1px solid var(--border);border-radius:6px;overflow:auto;max-height:40vh">
         <table style="width:100%;font-size:12px">
           <thead><tr>
             <th style="width:30px">#</th>
             <th>Insumo</th>
-            <th style="text-align:right;width:60px">Cant.</th>
+            <th style="text-align:right;width:96px">Cant.</th>
             <th style="width:60px">Unidad</th>
             <th style="text-align:center;width:80px">Descartar</th>
           </tr></thead>

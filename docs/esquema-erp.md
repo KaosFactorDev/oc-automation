@@ -71,6 +71,24 @@ Dos excepciones:
   `sp_id`, porque el correo es la clave real. Con `sp_id`, reimportar después de
   que una persona cambia de fila choca contra `usuarios_email_key`.
 
+### Roles de usuario
+
+Desde `20261020120000_roles_usuarios.sql` los roles son datos: el catálogo
+`erp.roles` (admin, compras, aprobador, almacén, pagos, consulta) y
+`erp.usuario_roles` (varios por persona, llave foránea al catálogo). La
+columna `erp.usuarios.rol` quedó **obsoleta** —el código ya no la lee— y se
+borra en una migración posterior; no se borró en la misma porque el deploy
+migra antes de reconstruir la imagen y la versión anterior la seguía leyendo.
+
+Hoy solo **admin** restringe: usuarios, configuración de la empresa
+(`POST /config/*`), papelera y corregir. Los demás roles están asignados pero
+todavía no limitan acciones.
+
+La sesión (SQLite) solo guarda el correo. Si la cuenta sigue activa y sus roles
+se leen de `erp.usuarios` en cada petición (caché de 15 s, invalidada al
+cambiar el usuario desde la consola); desactivar a alguien le cierra las
+sesiones al instante, y toda sesión vence a las 12 h del login.
+
 ### Números de documento nulos, no vacíos
 
 `numero_oc` y `numero_os` admiten `NULL`. El número solo se asigna al aprobar;
