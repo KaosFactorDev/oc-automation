@@ -6,7 +6,7 @@
  *
  * Endpoints:
  *   GET  /               → UI principal
- *   POST /extraer        → recibe archivo, extrae precios con Gemini API
+ *   POST /extraer        → recibe archivo, extrae precios con IA (Gemini o Claude, ver iaClient.js)
  *   POST /confirmar      → guarda filas confirmadas en erp.historial_precios
  *   GET  /proveedores    → lista de proveedores activos para autocompletado
  *   GET  /insumos        → lista de insumos históricos para autocompletado
@@ -46,8 +46,7 @@ const bitacora         = require('./bitacora');
 const repoBitacora     = require('./repo/historial');
 const correcciones     = require('./correcciones');
 const repoPapelera     = require('./repo/papelera');
-const geminiModelos    = require('./geminiModelos');
-const geminiClient     = require('./geminiClient');
+const ia               = require('./iaClient');
 
 // ── Requerimientos: adaptadores a la forma de SharePoint ─────────────────────
 // El código accede a reqItem.fields.X en decenas de lugares. repo/requerimientos
@@ -651,7 +650,6 @@ async function ctxSharePoint() {
 }
 
 const PORT         = process.env.PUERTO_COTIZACIONES || 3001;
-const GEMINI_KEY   = process.env.GEMINI_API_KEY || '';
 const TEMP_DIR     = path.join(__dirname, '../temp/cotizaciones');
 const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`;
 
@@ -764,12 +762,11 @@ async function agregarFilasCompras(filas) {
   return repoHistorial.agregar(aInsertar);
 }
 
-// ── Extracción con Gemini API ─────────────────────────────────────────────────
+// ── Extracción con IA ─────────────────────────────────────────────────────────
 
-// El transporte (POST, SSE, timeout, reintentos y salto al modelo de respaldo) vive
-// en src/geminiClient.js. Antes habia una copia de postGemini aca y otra en
-// leerRequerimientoPDF.js, y ademas la URL se armaba en cada llamador con el modelo
-// ya interpolado — asi que el helper no podia cambiar de modelo aunque quisiera.
+// El proveedor (Gemini o Claude, segun IA_PROVEEDOR) y el transporte (POST, SSE,
+// timeout y reintentos) viven en src/iaClient.js y los clientes que usa. Aca solo se
+// arma el prompt y se parsea la respuesta.
 
 // Rescata objetos JSON completos de un texto que puede venir truncado (un array a
 // medio llegar, por ejemplo). Se construye una instancia nueva en cada llamada a
@@ -791,7 +788,7 @@ function contarItemsParciales(texto, campo) {
   return n;
 }
 
-function parsearJSONGemini(str) {
+function parsearJSONIA(str) {
   // 1. Parseo limpio (caso normal)
   try { return JSON.parse(str); } catch {}
 
@@ -810,19 +807,17 @@ function parsearJSONGemini(str) {
     } catch {}
   }
   if (items.length > 0) {
-    console.warn(`[extraerConGemini] JSON truncado — recuperados ${items.length} ítems parciales`);
+    console.warn(`[extraerConIA] JSON truncado — recuperados ${items.length} ítems parciales`);
     return items;
   }
 
-  console.warn('[extraerConGemini] JSON truncado sin recuperación. Fragmento:', str.slice(0, 200));
+  console.warn('[extraerConIA] JSON truncado sin recuperación. Fragmento:', str.slice(0, 200));
   return [];
 }
 
 // onProgreso(n) recibe el numero de items completos que han llegado hasta el momento.
 // Es opcional: sin el, la extraccion se comporta igual que antes de cara al llamador.
-async function extraerConGemini(contenidoBase64, mimeType, nombreArchivo, onProgreso) {
-  if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
-
+async function extraerConIA(contenidoBase64, mimeType, nombreArchivo, onProgreso) {
   const PROMPT = `Analiza este documento de cotización y extrae TODOS los ítems cotizados.
 Para cada ítem devuelve SOLO un JSON array con este formato exacto (sin texto adicional, sin markdown):
 [
@@ -846,42 +841,29 @@ Reglas:
 
   const esTexto = !mimeType.startsWith('image/') && mimeType !== 'application/pdf';
 
-  let partes;
-  if (esTexto) {
-    // Excel/CSV convertido a texto
-    const texto = Buffer.from(contenidoBase64, 'base64').toString('utf-8');
-    partes = [
-      { text: `Aquí está el contenido de la cotización "${nombreArchivo}":
+  // Excel/CSV llega convertido a texto y va dentro del prompt; PDF e imagen van adjuntos.
+  const prompt = esTexto
+    ? `Aquí está el contenido de la cotización "${nombreArchivo}":
 
-${texto}
+${Buffer.from(contenidoBase64, 'base64').toString('utf-8')}
 
-${PROMPT}` }
-    ];
-  } else {
-    // PDF o imagen — Gemini acepta inline_data con base64
-    partes = [
-      { inline_data: { mime_type: mimeType, data: contenidoBase64 } },
-      { text: PROMPT }
-    ];
-  }
-
-  const body = JSON.stringify({
-    contents: [{ parts: partes }],
-    generationConfig: {
-      temperature: 0,
-      maxOutputTokens: 32768,
-      // Extraer items de una tabla es copiar datos, no razonar. Los modelos 3.x
-      // razonan por defecto y eso solo agrega latencia: medido sobre una cotizacion
-      // de 45 items, "low" baja de ~31s a ~22s y de 6233 a 2371 tokens de
-      // razonamiento, con extraccion identica.
-      thinkingConfig: { thinkingLevel: 'low' },
-    },
-  });
+${PROMPT}`
+    : PROMPT;
+  const adjunto = esTexto ? null : { mimeType, base64: contenidoBase64 };
 
   // Se cuentan los items completos a medida que llegan y se avisa solo cuando el
   // numero cambia: son ~45 avisos en vez de los ~190 chunks que manda Gemini.
   let ultimoN = 0;
-  const texto = await geminiClient.pedirStream(body, {
+  const texto = await ia.extraer('cotizacion', {
+    prompt,
+    adjunto,
+    stream: true,
+    maxTokens: 32768,
+    // Extraer items de una tabla es copiar datos, no razonar. Los modelos 3.x de
+    // Gemini razonan por defecto y eso solo agrega latencia: medido sobre una
+    // cotizacion de 45 items, "low" baja de ~31s a ~22s y de 6233 a 2371 tokens de
+    // razonamiento, con extraccion identica.
+    razonamiento: 'bajo',
     // Es un timeout de silencio (se reinicia con cada trozo que llega), no del total.
     // 75s y no 120s: si un modelo no empieza a responder, el siguiente de la lista
     // todavia tiene otros 75s dentro del presupuesto.
@@ -889,7 +871,6 @@ ${PROMPT}` }
     // La consola aborta a los 180s: pasarse de ahi le muestra al usuario un timeout
     // generico en vez del error real.
     presupuestoMs: 150000,
-    etiqueta: '/extraer',
     onTexto: onProgreso ? (parcial) => {
       const n = contarItemsParciales(parcial, 'insumo');
       if (n !== ultimoN) { ultimoN = n; onProgreso(n); }
@@ -897,24 +878,14 @@ ${PROMPT}` }
   });
 
   const jsonLimpio = (texto || '[]').replace(/```json\n?/g, '').replace(/```/g, '').trim();
-  return parsearJSONGemini(jsonLimpio);
+  return parsearJSONIA(jsonLimpio);
 }
 
-// ── Gemini texto (prompt puro, sin documento adjunto) ─────────────────────────
-
-// presupuestoMs omitido = un solo intento, que es lo que quieren los llamadores
+// Las llamadas de texto (prompt puro, sin documento) van directo a ia.texto(). Con
+// presupuestoMs omitido hacen un solo intento, que es lo que quieren los llamadores
 // rapidos (autocompletado de precios, homologacion de insumos): se llaman N veces por
 // request y degradan a coincidencia por tokens, asi que alargarlos seria peor que
 // fallar. Los llamadores pesados lo piden explicito.
-async function geminiTexto(prompt, timeoutMs = 5000, extraConfig = {}, presupuestoMs) {
-  if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
-  const bodyStr = JSON.stringify({
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 4096, ...extraConfig },
-  });
-  const respuesta = await geminiClient.pedir(bodyStr, { timeoutMs, presupuestoMs, etiqueta: 'geminiTexto' });
-  return (respuesta.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
-}
 
 // ── OS helpers ────────────────────────────────────────────────────────────────
 
@@ -1064,7 +1035,7 @@ async function obtenerInsumosHistorial(ctx) {
 
 // Busca los mejores candidatos de homologación para un insumo sin historial,
 // buscando contra todos los nombres únicos del historial de precios.
-// Si GEMINI_KEY está disponible y el score del top candidato es bajo, usa Gemini para reordenar.
+// Si hay IA disponible y el score del top candidato es bajo, la usa para reordenar.
 async function sugerirHomologacionCSV(query) {
   const norm = (s) => String(s || '').toUpperCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -1097,12 +1068,12 @@ async function sugerirHomologacionCSV(query) {
   const top5 = scored.slice(0, 5);
   const mejorScore = top5[0]?.score || 0;
 
-  // Si hay clave Gemini y el mejor score es ambiguo, pedir reordenamiento (timeout 5 s)
-  if (GEMINI_KEY && mejorScore < 6 && scored.length > 1) {
+  // Si hay clave de IA y el mejor score es ambiguo, pedir reordenamiento (timeout 5 s)
+  if (ia.disponible('homologacion') && mejorScore < 6 && scored.length > 1) {
     try {
       const candidatos = scored.slice(0, 10).map(c => c.nombre);
       const prompt = `Dado el insumo de construcción "${query}", ¿cuál de estas opciones del catálogo de compras corresponde mejor? Devuelve SOLO un JSON array con los nombres reordenados del mejor al peor match (sin texto adicional, sin markdown):\n${JSON.stringify(candidatos)}`;
-      const texto = await geminiTexto(prompt, 5000);
+      const texto = await ia.texto('homologacion', prompt, { timeoutMs: 5000 });
       const reordenados = JSON.parse(texto.replace(/```json[\s\S]*?/g, '').replace(/```/g, '').trim());
       if (Array.isArray(reordenados) && reordenados.length) {
         return reordenados.slice(0, 5).map((nombre, i) => ({
@@ -1162,7 +1133,7 @@ const servidor = http.createServer(async (req, res) => {
   };
 
   // Respuesta en streaming: una linea JSON por evento (NDJSON). La usan los endpoints
-  // de extraccion para informar progreso mientras Gemini genera.
+  // de extraccion para informar progreso mientras la IA genera.
   //
   // OJO con la semantica de errores: al escribir la primera linea el status queda
   // fijado en 200, asi que un fallo posterior NO puede viajar como HTTP 500. Viaja
@@ -1498,23 +1469,23 @@ const servidor = http.createServer(async (req, res) => {
       const zonaDeProyecto = {};
       for (const p of proyectos) zonaDeProyecto[String(p.codigo || '').trim().toUpperCase()] = p.zona || '';
 
-      // — Matching semántico con Gemini —
+      // — Matching semántico con IA —
       const historial = await getHistorialPrecios(null);
       let nombresAprobados = null;
-      if (q && GEMINI_KEY && historial.length) {
+      if (q && ia.disponible('precios') && historial.length) {
         const nombresUnicos = [...new Set(historial.map(r => String(r.insumo || '').trim()).filter(Boolean))];
         try {
           const prompt = `Lista de suministros de construcción:\n${nombresUnicos.join('\n')}\n\nDevuelve SOLO los nombres de esa lista que correspondan, sean variantes, sinónimos, plural/singular o compuestos del término "${q}". JSON array de strings exactos de la lista. Si ninguno corresponde: [].`;
-          const respGemini = await geminiTexto(prompt, 10000);
-          const parsed = JSON.parse(respGemini.replace(/```json|```/g, '').trim());
+          const respIA = await ia.texto('precios', prompt, { timeoutMs: 10000 });
+          const parsed = JSON.parse(respIA.replace(/```json|```/g, '').trim());
           if (Array.isArray(parsed) && parsed.length) {
             const normSet = new Set(parsed.map(n => norm(n)));
             nombresAprobados = new Set(nombresUnicos.filter(n => normSet.has(norm(n))));
           }
-        } catch (e) { console.warn('[/precios/buscar] Gemini fallback:', e.message); }
+        } catch (e) { console.warn('[/precios/buscar] IA fallback:', e.message); }
       }
 
-      const matchesConGemini = s => {
+      const matchesConIA = s => {
         if (!q) return true;
         if (nombresAprobados) return nombresAprobados.has(s);
         return matches(s);
@@ -1532,7 +1503,7 @@ const servidor = http.createServer(async (req, res) => {
           const fecha     = String(fila.fecha           || '').trim();
           const zonaFila  = zonaDeProyecto[proyecto.toUpperCase()] || '';
 
-          if (!matchesConGemini(insumo)) continue;
+          if (!matchesConIA(insumo)) continue;
           if (zona && zonaFila && norm(zonaFila) !== norm(zona)) continue;
           if (provFilt && !norm(proveedor).includes(provFilt)) continue;
           resultados.push({ fuente: 'OC', insumo, proveedor, zona: zonaFila, precio, fecha, proyecto });
@@ -1556,14 +1527,14 @@ const servidor = http.createServer(async (req, res) => {
             for (const it of items) {
               const insumo   = String(it.descripcion || it.insumo || '').trim();
               const precioIt = parseFloat(it.precioUnitario || it.valorUnitario || it.valor) || precio;
-              if (!matchesConGemini(insumo)) continue;
+              if (!matchesConIA(insumo)) continue;
               if (zona && zonaFila && norm(zonaFila) !== norm(zona)) continue;
               if (provFilt && !norm(proveedor).includes(provFilt)) continue;
               resultados.push({ fuente: 'OS', insumo, proveedor, zona: zonaFila, precio: precioIt, fecha, proyecto, numeroOS });
             }
           } else {
             const insumo = String(os.tipoServicio || '').trim();
-            if (!matchesConGemini(insumo)) continue;
+            if (!matchesConIA(insumo)) continue;
             if (zona && zonaFila && norm(zonaFila) !== norm(zona)) continue;
             if (provFilt && !norm(proveedor).includes(provFilt)) continue;
             resultados.push({ fuente: 'OS', insumo, proveedor, zona: zonaFila, precio, fecha, proyecto, numeroOS });
@@ -2136,7 +2107,7 @@ const servidor = http.createServer(async (req, res) => {
                 proyectoAutoDetectado = proyectoParaAsunto;
               } catch {}
             }
-            // PDF: marcador especial; procesarCorreo.js usará cabecera.proyecto (Gemini)
+            // PDF: marcador especial; procesarCorreo.js usará cabecera.proyecto (IA)
             if (!proyectoParaAsunto) proyectoParaAsunto = '__AUTO__';
           }
 
@@ -3096,12 +3067,12 @@ const servidor = http.createServer(async (req, res) => {
         const quiereStream = new URLSearchParams(req.url.split('?')[1] || '').get('stream') === '1';
 
         if (!quiereStream) {
-          const items = await extraerConGemini(datos, mimeType, archivo.fileName);
+          const items = await extraerConIA(datos, mimeType, archivo.fileName);
           return json({ ok: true, items, archivo: archivo.fileName });
         }
 
         const flujo = abrirNdjson();
-        // Primera linea de inmediato, antes de hablar con Gemini: le da a la UI algo
+        // Primera linea de inmediato, antes de hablar con la IA: le da a la UI algo
         // que mostrar durante los ~12s de razonamiento, en los que no llega un dato.
         flujo.evento({ tipo: 'fase', fase: 'analizando' });
 
@@ -3115,7 +3086,7 @@ const servidor = http.createServer(async (req, res) => {
         }, 5000);
 
         try {
-          const items = await extraerConGemini(datos, mimeType, archivo.fileName, (n) => {
+          const items = await extraerConIA(datos, mimeType, archivo.fileName, (n) => {
             hayItems = true;
             flujo.evento({ tipo: 'progreso', items: n });
           });
@@ -3314,7 +3285,7 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── OS: extraer datos de cotización / oferta económica con Gemini ─────────────
+  // ── OS: extraer datos de cotización / oferta económica con IA ──────────────────
   if (req.method === 'POST' && url === '/os/extraer') {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -3351,8 +3322,6 @@ const servidor = http.createServer(async (req, res) => {
             mimeType = 'text/plain';
           } finally { try { require('fs').unlinkSync(tmpPath); } catch {} }
         }
-
-        if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY no configurada en .env');
 
         const PROMPT = `Analiza este documento que es una cotización o propuesta económica de servicios.
 Extrae los datos Y redacta el clausulado jurídico. Devuelve SOLO un JSON con este formato exacto (sin texto adicional, sin markdown, sin bloques de código):
@@ -3391,17 +3360,8 @@ Reglas para el clausulado (CRÍTICO — aplica todos sin excepción):
 - En el campo "clausulas" usa \\n\\n para separar cláusulas. NO uses **, *, # ni markdown.`;
 
         const esTexto = mimeType === 'text/plain';
-        const partes = esTexto
-          ? [{ text: `${Buffer.from(datos, 'base64').toString('utf-8')}\n\n${PROMPT}` }]
-          : [{ inline_data: { mime_type: mimeType, data: datos } }, { text: PROMPT }];
-
-        // Sin thinkingLevel "low" a proposito: a diferencia de /extraer, esta llamada
-        // ademas redacta el clausulado juridico, que si es una tarea de razonamiento.
-        // Recortarle el razonamiento abarataria latencia a costa de la calidad legal.
-        const gBody = JSON.stringify({
-          contents: [{ parts: partes }],
-          generationConfig: { temperature: 0, maxOutputTokens: 32768 },
-        });
+        const prompt  = esTexto ? `${Buffer.from(datos, 'base64').toString('utf-8')}\n\n${PROMPT}` : PROMPT;
+        const adjunto = esTexto ? null : { mimeType, base64: datos };
 
         const quiereStream = new URLSearchParams(req.url.split('?')[1] || '').get('stream') === '1';
         const flujo = quiereStream ? abrirNdjson() : null;
@@ -3436,12 +3396,18 @@ Reglas para el clausulado (CRÍTICO — aplica todos sin excepción):
         }
 
         try {
-          const raw = await geminiClient.pedirStream(gBody, {
+          const raw = await ia.extraer('os-extraer', {
+            prompt,
+            adjunto,
+            stream: true,
+            maxTokens: 32768,
+            // Sin razonamiento "bajo" a proposito: a diferencia de /extraer, esta llamada
+            // ademas redacta el clausulado juridico, que si es una tarea de razonamiento.
+            // Recortarle el razonamiento abarataria latencia a costa de la calidad legal.
             // Igual que /extraer: 75s de silencio, para que quepan dos modelos.
             timeoutMs: 75000,
             // Igual que /extraer: la consola aborta a los 180s.
             presupuestoMs: 150000,
-            etiqueta: '/os/extraer',
             onTexto: flujo ? senalar : undefined,
           });
           const clean = (raw || '{}').replace(/```json[\s\S]*?/g, '').replace(/```/g, '').trim();
@@ -3472,7 +3438,7 @@ Reglas para el clausulado (CRÍTICO — aplica todos sin excepción):
     return;
   }
 
-  // ── OS: generar cláusulas con Gemini ─────────────────────────────────────────
+  // ── OS: generar cláusulas con IA ─────────────────────────────────────────────
   if (req.method === 'POST' && url === '/os/generar-clausulas') {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -3510,10 +3476,12 @@ FORMATO:
 - Lenguaje jurídico colombiano formal, redacción en tercera persona
 - Sin viñetas ni markdown; usa solo párrafos de texto corrido bajo el título de cada cláusula
 - Devuelve SOLO el clausulado numerado, sin introducciones, encabezados ni comentarios adicionales`;
-        const clausulas = await geminiTexto(prompt, 30000, {
-          thinkingConfig: { thinkingBudget: 0 },
-          maxOutputTokens: 2048,
-        }, 90000);   // presupuesto: redactar el clausulado justifica insistir
+        const clausulas = await ia.texto('os-clausulas', prompt, {
+          timeoutMs: 30000,
+          presupuestoMs: 90000,   // redactar el clausulado justifica insistir
+          razonamiento: 'minimo',
+          maxTokens: 2048,
+        });
         json({ ok: true, clausulas });
       } catch (err) { json({ error: err.message }, 500); }
     });
@@ -4377,7 +4345,7 @@ FORMATO:
     return;
   }
 
-  // ── POST /inventario/analisis-ia → análisis Gemini vs APU ───────────────
+  // ── POST /inventario/analisis-ia → análisis IA vs APU ───────────────
   if (req.method === 'POST' && url === '/inventario/analisis-ia') {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -4422,7 +4390,7 @@ PREGUNTA DEL USUARIO: ${pregunta || 'Analiza los consumos y detecta posibles sob
 ${historial.length > 0 ? 'CONVERSACIÓN PREVIA:\n' + historial.map(h => `${h.role === 'user' ? 'Usuario' : 'Asistente'}: ${h.content}`).join('\n') + '\n' : ''}
 Responde en español, de forma concisa y práctica. Señala alertas de sobreconsumo, proyecciones y recomendaciones.`;
 
-        const respuesta = await geminiTexto(prompt, 15000, {}, 45000);
+        const respuesta = await ia.texto('inventario', prompt, { timeoutMs: 15000, presupuestoMs: 45000 });
         return json({ ok: true, respuesta });
       } catch (err) { return json({ error: err.message }, 500); }
     });
@@ -4607,11 +4575,10 @@ servidor.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT}`);
   console.log('  Abre esa URL en tu navegador para cargar cotizaciones.\n');
   require('./modoPrueba').avisar();
-  // Carga la lista de modelos de Gemini que publica Google y la deja en el log.
-  // No bloquea el arranque y nunca lanza: si Google no contesta, la primera
-  // peticion a Gemini vuelve a intentarlo.
-  geminiModelos.iniciar()
-    .catch(e => console.warn('[geminiModelos] No se pudo cargar la lista:', e.message));
+  // Deja en el log que proveedor de IA usa cada funcion y, si alguna sigue en Gemini,
+  // carga la lista de modelos que publica Google. No bloquea el arranque y nunca
+  // lanza: si Google no contesta, la primera peticion a Gemini vuelve a intentarlo.
+  ia.iniciar();
   // Crear admin inicial si la base de usuarios está vacía
   bootstrapAdmin()
     .catch(e => console.warn('[bootstrap]', e.message));
