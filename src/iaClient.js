@@ -5,11 +5,11 @@
  * funcion se identifica con un nombre corto y aca se decide, por configuracion y sin
  * redeploy, si va a Gemini (geminiClient.js) o a Claude (claudeClient.js).
  * Es la Fase 2 de docs/migracion-gemini-claude.md: Gemini sigue intacto detras del
- * selector hasta que la Fase 5 lo retire.
+ * selector hasta que la Fase 5 lo retire, y se vuelve a el con IA_PROVEEDOR=gemini.
  *
  * Configuracion (.env)
  * --------------------
- *   IA_PROVEEDOR=gemini|claude            para todas las funciones (por defecto gemini)
+ *   IA_PROVEEDOR=gemini|claude            para todas las funciones (por defecto claude)
  *   IA_PROVEEDOR_<FUNCION>=gemini|claude  pisa al anterior en una sola funcion
  *   ANTHROPIC_MODEL=claude-opus-5-5       modelo de Claude (por defecto claude-opus-5-5)
  *   ANTHROPIC_MODEL_<FUNCION>=...         pisa al anterior en una sola funcion
@@ -54,7 +54,7 @@ function validarFuncion(funcion) {
 /** 'gemini' | 'claude' para esta funcion. Lanza si la configuracion es invalida. */
 function proveedor(funcion) {
   validarFuncion(funcion);
-  const valor = (process.env[`IA_PROVEEDOR_${sufijo(funcion)}`] || process.env.IA_PROVEEDOR || 'gemini')
+  const valor = (process.env[`IA_PROVEEDOR_${sufijo(funcion)}`] || process.env.IA_PROVEEDOR || 'claude')
     .trim().toLowerCase();
   if (valor !== 'gemini' && valor !== 'claude') {
     throw new Error(`IA_PROVEEDOR inválido para "${funcion}": "${valor}". Usa gemini o claude.`);
