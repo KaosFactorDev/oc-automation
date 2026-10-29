@@ -33,6 +33,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "0.134.0",
     "better-sqlite3": "^12.10.0",
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
