@@ -5,7 +5,7 @@
 > verdad; este archivo es una copia del 2026-10-29 para tenerla junto al código.
 
 Responsable de implementar: Julian (Tecnología). Estado: Fase 2 en código (rama
-`feature/anthropic-ai-provider`); Gemini sigue siendo el proveedor por defecto.
+`feature/anthropic-ai-provider`). Desde 2026-10-29 Claude es el proveedor por defecto, porque Gemini se quedó sin saldo; Gemini sigue disponible con `IA_PROVEEDOR=gemini`.
 
 ## Resumen
 
