@@ -4,8 +4,8 @@
 > Tiene los diagramas, las tareas para ir marcando y los comentarios. Es la fuente de
 > verdad; este archivo es una copia del 2026-10-29 para tenerla junto al código.
 
-Responsable de implementar: Julian (Tecnología). Estado: exploración y plan; todavía
-no se cambió código.
+Responsable de implementar: Julian (Tecnología). Estado: Fase 2 en código (rama
+`feature/anthropic-ai-provider`); Gemini sigue siendo el proveedor por defecto.
 
 ## Resumen
 
@@ -26,7 +26,7 @@ prepagado agotado (HTTP 402). Hoy el ERP tiene unas 630 líneas
 | Qué | Decisión | Por qué |
 |---|---|---|
 | Proveedor | API de Claude (Anthropic) | IDs de modelo fijos, sin alias que Google mueva o retire |
-| Modelo | Claude Haiku 5.5 (`claude-haiku-5-5`) para las 7 funciones | Los datos vienen digitalizados en formatos; un modelo frontera sobra. La función que no alcance la calidad en la Fase 1 sube a Sonnet 5.5, solo esa |
+| Modelo | Claude Opus 5.5 (`claude-opus-5-5`) por defecto para las 7 funciones (cambio del 2026-10-29; antes era Haiku 5.5) | Decisión de Julian al implementar la Fase 2. Es configurable por función (`ANTHROPIC_MODEL_<FUNCION>`), así que la Fase 1 puede bajar a Sonnet 5.5 o Haiku 5.5 la función que no necesite Opus, en especial las de 5 y 10 s |
 | Cuenta | La administra Tecnología; responsable Julian | |
 | Volumen | Bajo: como máximo unas 70 peticiones en un día, entre 5 y 45 en días normales | Según el panel de uso de AI Studio (90 días, octubre de 2026), con reintentos y fallas incluidos. Con Haiku son centavos de dólar al día |
 
@@ -184,8 +184,8 @@ a menor impacto:
   Decisión: probar Claude.
 - [x] ¿Quién administra la cuenta y la facturación en Anthropic? Tecnología, con
   Julian como responsable.
-- [x] ¿Qué modelo? Uno sencillo, no frontera: Haiku 5.5 para las 7 funciones,
-  validado en la Fase 1.
+- [x] ¿Qué modelo? Opus 5.5 por defecto (2026-10-29; antes se había decidido Haiku
+  5.5), configurable por función y validado en la Fase 1.
 - [x] ¿Cuántas veces al día se usa cada función? Poco (ver Decisiones tomadas).
 - [ ] ¿Qué tope de gasto mensual se fija en la Consola? Con Haiku el costo esperado es
   bajo; el tope protege de un error que dispare llamadas.
@@ -235,17 +235,21 @@ y 3; las demás son configuración y limpieza.
 
 ### Fase 2 · Cliente de IA
 
-- [ ] Agregar `@anthropic-ai/sdk` a `package.json`
-- [ ] Crear `src/iaClient.js` con dos operaciones: extraer (documento, prompt y esquema
-  → JSON, con `onTexto` para el progreso) y texto (prompt → texto)
-- [ ] Leer la respuesta por tipo de bloque: puede empezar con un bloque `thinking` antes
+- [x] Agregar `@anthropic-ai/sdk` a `package.json` (0.134.0, versión fija)
+- [x] Crear `src/iaClient.js` con dos operaciones: extraer (documento y prompt → texto,
+  con `onTexto` para el progreso) y texto (prompt → texto). El transporte de Claude
+  vive en `src/claudeClient.js`. El esquema JSON queda para la Fase 3, función por
+  función, junto con la reescritura de cada prompt
+- [x] Leer la respuesta por tipo de bloque: puede empezar con un bloque `thinking` antes
   del texto
-- [ ] Variable `IA_PROVEEDOR` y modelo por función en configuración
-  (`claude-haiku-5-5` por defecto), no en el código
-- [ ] Tratar `stop_reason` `max_tokens` y `refusal` como errores claros, y el saldo
-  agotado con un mensaje para el usuario y aviso a Tecnología
-- [ ] Log por llamada: función, modelo, tokens, latencia y `stop_reason`
-- [ ] Dejar `geminiClient.js` intacto detrás del selector
+- [x] Variable `IA_PROVEEDOR` (y `IA_PROVEEDOR_<FUNCION>`) y modelo por función en
+  configuración (`ANTHROPIC_MODEL`, `claude-opus-5-5` por defecto), no en el código
+- [x] Tratar `stop_reason` `max_tokens` y `refusal` como errores claros, y el saldo
+  agotado con un mensaje para el usuario
+- [ ] Aviso a Tecnología cuando se agota el saldo: hoy solo queda `SALDO AGOTADO` en el
+  log; el ERP no tiene un canal de alertas
+- [x] Log por llamada: función, modelo, tokens, latencia y `stop_reason`
+- [x] Dejar `geminiClient.js` intacto detrás del selector
 
 ### Fase 3 · Migración por función
 
