@@ -78,6 +78,7 @@ Fuera de `graphStorage.js` no queda ni un `addListItem`, `updateListItem`,
 | [esquema-erp.md](esquema-erp.md) | Referencia del esquema: tablas, reglas y equivalencia lista → tabla |
 | [operacion-base-de-datos.md](operacion-base-de-datos.md) | Comandos, respaldos, restauración y problemas conocidos |
 | [conexion-kaos-proyectos.md](conexion-kaos-proyectos.md) | El catálogo de proyectos viene de KAOS: qué cambia, el corte y la operación |
+| [migracion-gemini-claude.md](migracion-gemini-claude.md) | Plan para pasar las funciones de IA de Gemini a Claude: inventario, riesgos y fases |
 
 ## Arranque rápido
 
