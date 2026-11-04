@@ -38,6 +38,8 @@
 - [ ] No `.env`, `data/local.db`, `node_modules/` or logs committed
 - [ ] No secrets left in the code (keys, tokens, passwords)
 - [ ] Tested the affected flow locally
+- [ ] Tenant is explicit in new code; no hard-coded production URLs
+- [ ] Migrations are reversible, tested locally, with a guard if they carry data for a single tenant
 
 ### Only for a hotfix into `main`
 
