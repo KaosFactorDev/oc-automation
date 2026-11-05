@@ -1,0 +1,148 @@
+name: Validar PR
+
+# Chequeo de cada PR hacia develop (T-130): linter, pruebas unitarias y prueba
+# de humo de /api contra un Postgres temporal. Antes de esto, un cambio llegaba
+# a main —que aplica migraciones y reconstruye los contenedores del VPS— sin
+# que nada lo probara.
+#
+# No despliega nada, no usa secrets y no habla con el VPS: la base es un
+# service container del runner que muere con el job. deploy.yml sigue igual.
+#
+# Sin filtro de `paths` a propósito: si `validar` se marca como chequeo
+# obligatorio en la protección de develop, un chequeo que no corre deja el PR
+# esperando para siempre.
+#
+# Para repetir lo mismo en local antes de abrir el PR: CONTRIBUTING.md,
+# «Validación de los PR».
+
+on:
+  pull_request:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validar-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validar:
+    name: validar
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # La misma imagen que el VPS (docker-compose.yml) y que el entorno local
+    # (docker-compose.dev.yml), con la misma configuración de initdb.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          TZ: America/Bogota
+          POSTGRES_DB: erp
+          POSTGRES_USER: postgres
+          # Igual a POSTGRES_PASSWORD de abajo. No es un secreto: la base nace
+          # vacía en cada corrida y solo se alcanza desde este runner.
+          POSTGRES_PASSWORD: ciadmin0local0only
+          POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C.UTF-8
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d erp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    # El perfil de .env.local.example: MODO_PRUEBA=1, base en 127.0.0.1:55432
+    # y TODAS las credenciales externas sin definir (Microsoft, buzón,
+    # tesorería, VPS, Gemini, kaos-api). La guarda del paso «Comprobar que la
+    # base es local» falla si alguna aparece.
+    env:
+      MODO_PRUEBA: '1'
+      PUERTO_COTIZACIONES: '3002'
+      TZ: America/Bogota
+      # Los PDF no se generan en el CI (no hay Chrome); el código los trata como
+      # best-effort y el documento se crea igual.
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+      # Administración (migraciones y db-clave-app.js).
+      POSTGRES_DB: erp
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ciadmin0local0only
+      PGHOST: 127.0.0.1
+      PGPORT: '55432'
+      PGUSER: postgres
+      # Rol de la aplicación (lo crea la migración de permisos).
+      ERP_DB_HOST: 127.0.0.1
+      ERP_DB_PORT: '55432'
+      ERP_DB_NAME: erp
+      ERP_DB_USER: erp_app
+      ERP_DB_PASSWORD: ciapp0local0only
+      # Llave de /api para la prueba de humo. Tampoco es un secreto: el servidor
+      # que la acepta vive solo durante este job.
+      RRHH_API_KEY: ci0local0api0key0not0secret
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      # Node 20, el del Dockerfile. Unificar la versión es T-132.
+      - name: Preparar Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        id: instalar
+        run: npm ci --no-audit --no-fund
+
+      # Desde acá cada paso corre aunque falle otro, para ver todos los errores
+      # del PR de una vez. El job falla si falla cualquiera.
+      #
+      # Los avisos que ya existían están en eslint-suppressions.json; falla con
+      # cualquier error nuevo (ver eslint.config.js).
+      - name: Linter
+        if: ${{ !cancelled() && steps.instalar.outcome == 'success' }}
+        run: npm run lint
+
+      - name: Pruebas unitarias
+        if: ${{ !cancelled() && steps.instalar.outcome == 'success' }}
+        run: npm test
+
+      # ── Prueba de humo de /api ────────────────────────────────────────────
+      # Cada paso depende del anterior: sin migraciones no hay rol erp_app, sin
+      # su clave la app no conecta, y sin el seed no hay proyecto.
+
+      # Antes de escribir en cualquier base: MODO_PRUEBA activo, PGHOST y
+      # ERP_DB_HOST en 127.0.0.1 y las credenciales externas vacías.
+      - name: Comprobar que la base es local
+        id: guarda
+        if: ${{ !cancelled() && steps.instalar.outcome == 'success' }}
+        run: node test/humo/entorno-local.js
+
+      # El mismo script que corre deploy.yml en el VPS, contra el contenedor de
+      # este job: si una migración no aplica sobre una base vacía, se ve acá y
+      # no en el deploy.
+      - name: Aplicar las migraciones
+        id: migraciones
+        if: ${{ !cancelled() && steps.guarda.outcome == 'success' }}
+        env:
+          DB_CONTAINER: ${{ job.services.postgres.id }}
+        run: bash deploy/aplicar-migraciones.sh
+
+      - name: Asignar la clave de erp_app
+        id: clave
+        if: ${{ !cancelled() && steps.migraciones.outcome == 'success' }}
+        run: node src/scripts/db-clave-app.js
+
+      # Un proyecto ficticio (LOCAL-P0) y el tope de aprobación de 500.000.
+      - name: Cargar el seed local
+        id: seed
+        if: ${{ !cancelled() && steps.clave.outcome == 'success' }}
+        env:
+          DB_CONTAINER: ${{ job.services.postgres.id }}
+        run: docker exec -i "$DB_CONTAINER" psql -X -U postgres -d erp -v ON_ERROR_STOP=1 < supabase/seeds/local-p0.sql
+
+      - name: Prueba de humo de /api
+        if: ${{ !cancelled() && steps.seed.outcome == 'success' }}
+        run: npm run test:humo
