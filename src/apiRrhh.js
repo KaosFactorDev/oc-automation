@@ -147,7 +147,7 @@ function calcularTotales(items) {
   for (const it of items) {
     const base = redondear(it.cantidad * it.precioUnitario);
     valor += base;
-    iva   += redondear(base * it.ivaPct / 100);
+    iva   += redondear(it.precioUnitario * it.ivaPct / 100);
   }
   valor = redondear(valor);
   iva   = redondear(iva);
