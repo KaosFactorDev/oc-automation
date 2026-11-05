@@ -9,7 +9,7 @@
     "correos": "node index.js",
     "correos:test": "node index.js --test",
     "lint": "eslint .",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test test/*.test.js",
     "revisar-listas": "node src/scripts/revisar-listas.js",
     "db:push": "node src/scripts/db-migrar.js",
     "db:up": "docker compose -f docker-compose.dev.yml up -d",
