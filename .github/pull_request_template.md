@@ -37,6 +37,7 @@
 - [ ] No commit or description mentions AI tools
 - [ ] No `.env`, `data/local.db`, `node_modules/` or logs committed
 - [ ] No secrets left in the code (keys, tokens, passwords)
+- [ ] `npm run lint` and `npm test` pass locally
 - [ ] Tested the affected flow locally
 - [ ] Tenant is explicit in new code; no hard-coded production URLs
 - [ ] Migrations are reversible, tested locally, with a guard if they carry data for a single tenant
