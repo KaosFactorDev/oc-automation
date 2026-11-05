@@ -8,7 +8,9 @@
     "dev": "node --watch src/servidor-cotizaciones.js",
     "correos": "node index.js",
     "correos:test": "node index.js --test",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "eslint .",
+    "test": "node --test test/*.test.js",
+    "test:humo": "node --test test/humo/*.test.js",
     "revisar-listas": "node src/scripts/revisar-listas.js",
     "db:push": "node src/scripts/db-migrar.js",
     "db:up": "docker compose -f docker-compose.dev.yml up -d",
@@ -42,6 +44,9 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
     "supabase": "^2.116.0"
   }
 }

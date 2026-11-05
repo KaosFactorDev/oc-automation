@@ -1,0 +1,129 @@
+{
+  "src/bitacora.js": {
+    "no-empty": {
+      "count": 1
+    }
+  },
+  "src/correcciones.js": {
+    "no-empty": {
+      "count": 3
+    }
+  },
+  "src/geminiClient.js": {
+    "no-empty": {
+      "count": 2
+    }
+  },
+  "src/geminiModelos.js": {
+    "no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/leerCorreos.js": {
+    "no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/leerRequerimiento.js": {
+    "preserve-caught-error": {
+      "count": 1
+    }
+  },
+  "src/leerRequerimientoPDF.js": {
+    "no-unused-vars": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 1
+    }
+  },
+  "src/ocTemplate.js": {
+    "no-unused-vars": {
+      "count": 4
+    }
+  },
+  "src/osTemplate.js": {
+    "no-empty": {
+      "count": 1
+    }
+  },
+  "src/parsearAsunto.js": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/pg.js": {
+    "no-empty": {
+      "count": 1
+    },
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/repo/ordenesCompra.js": {
+    "no-empty": {
+      "count": 1
+    }
+  },
+  "src/repo/ordenesServicio.js": {
+    "no-empty": {
+      "count": 1
+    }
+  },
+  "src/requerimientos.js": {
+    "no-empty": {
+      "count": 2
+    },
+    "no-unused-vars": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/scripts/backfill-pdf-ordenes-compra.js": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/scripts/backfill-pdf-ordenes-servicio.js": {
+    "no-empty": {
+      "count": 1
+    }
+  },
+  "src/scripts/corregir-listas.js": {
+    "no-empty": {
+      "count": 1
+    }
+  },
+  "src/scripts/importar-listas.js": {
+    "no-empty": {
+      "count": 5
+    },
+    "no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/scripts/revisar-proyectos.js": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/servidor-cotizaciones.js": {
+    "no-empty": {
+      "count": 21
+    },
+    "no-unreachable": {
+      "count": 1
+    },
+    "no-unused-vars": {
+      "count": 29
+    },
+    "no-useless-assignment": {
+      "count": 7
+    },
+    "no-useless-escape": {
+      "count": 32
+    }
+  }
+}

@@ -15,6 +15,7 @@ Reglas de trabajo para el repositorio. Léelas antes del primer PR: **un merge a
 | Mensajes de commit | Conventional Commits: `type: description`, en inglés |
 | Quién abre los PR | **Siempre una persona, a mano, desde GitHub.** Nunca una herramienta |
 | Despliegue | Automático al hacer merge a `main` |
+| Chequeo de los PR | [validar-pr.yml](.github/workflows/validar-pr.yml) en cada PR a `develop`: linter, pruebas y prueba de humo de `/api` |
 | Menciones a IA | Prohibidas en commits y PRs |
 
 ---
@@ -146,7 +147,72 @@ Antes de pedir revisión, verifica:
 - [ ] Ningún commit menciona herramientas de IA.
 - [ ] No se subió `.env`, `data/local.db`, `node_modules/` ni logs.
 - [ ] Ningún secreto quedó escrito en el código (claves, tokens, contraseñas).
+- [ ] `npm run lint` y `npm test` pasan en local.
 - [ ] Probaste el flujo afectado en local.
+
+---
+
+## Validación de los PR
+
+Cada PR hacia `develop` corre [validar-pr.yml](.github/workflows/validar-pr.yml) (chequeo `validar`). El PR queda en rojo si falla cualquiera de estos pasos:
+
+| Paso | Comando | Qué revisa |
+|---|---|---|
+| Linter | `npm run lint` | ESLint con las reglas recomendadas: errores, no formato |
+| Pruebas unitarias | `npm test` | `apiRrhh` y el cálculo de totales de la API, la OC y la OS, sin base de datos (`test/*.test.js`) |
+| Prueba de humo | `npm run test:humo` | El servidor real, con `MODO_PRUEBA=1`, contra un Postgres temporal: llave de `/api`, orden de servicio aprobada y en borrador, idempotencia y requerimiento (`test/humo/`) |
+
+Antes de la prueba de humo, el workflow:
+
+1. comprueba que la base sea local (`node test/humo/entorno-local.js`);
+2. aplica las migraciones con `deploy/aplicar-migraciones.sh`, el mismo script del deploy;
+3. asigna la clave de `erp_app`;
+4. carga `supabase/seeds/local-p0.sql`.
+
+La base es un contenedor del runner que muere con el job. El workflow no usa secrets ni toca el VPS.
+
+### Correrlo en local
+
+`npm run lint` y `npm test` no necesitan base: córrelos antes de abrir el PR.
+
+La prueba de humo escribe en Postgres, así que va contra una base desechable y no contra la tuya de desarrollo. En una terminal de Git Bash aparte, desde la raíz del repo:
+
+```bash
+# 1. Postgres desechable en 127.0.0.1:55433, sin volumen con nombre
+docker run -d --name oc-automation-db-ci -e POSTGRES_DB=erp -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=ciadmin0local0only -e POSTGRES_INITDB_ARGS="--encoding=UTF8 --locale=C.UTF-8" \
+  -p 127.0.0.1:55433:5432 postgres:17-alpine
+
+# 2. El entorno del workflow, con el puerto 55433 (no son secretos: la base es desechable)
+export MODO_PRUEBA=1 PUERTO_COTIZACIONES=3002 POSTGRES_DB=erp POSTGRES_PASSWORD=ciadmin0local0only \
+  PGHOST=127.0.0.1 PGPORT=55433 PGUSER=postgres ERP_DB_HOST=127.0.0.1 ERP_DB_PORT=55433 \
+  ERP_DB_NAME=erp ERP_DB_USER=erp_app ERP_DB_PASSWORD=ciapp0local0only \
+  RRHH_API_KEY=ci0local0api0key0not0secret
+
+# 3. Los pasos del workflow (db-esperar.js reemplaza el healthcheck del CI)
+node test/humo/entorno-local.js
+node src/scripts/db-esperar.js
+DB_CONTAINER=oc-automation-db-ci bash deploy/aplicar-migraciones.sh
+node src/scripts/db-clave-app.js
+docker exec -i oc-automation-db-ci psql -X -U postgres -d erp -v ON_ERROR_STOP=1 < supabase/seeds/local-p0.sql
+npm run test:humo
+
+# 4. Borrar la base
+docker rm -fv oc-automation-db-ci
+```
+
+- La guarda aborta antes de escribir si `MODO_PRUEBA` no está activo, si `PGHOST` o `ERP_DB_HOST` no son `127.0.0.1` o `localhost`, si hay alguna credencial externa definida o si un `.env` en la carpeta inyectaría variables.
+- La prueba de humo no arranca si ya hay algo escuchando en `PUERTO_COTIZACIONES`, por ejemplo tu servidor de desarrollo.
+- En Windows hace falta Node 22.12 o superior: `better-sqlite3` no publica binario de Node 20 para Windows. El CI usa Node 20, el del Dockerfile.
+
+### Errores de lint que ya existían
+
+Cuando se creó el chequeo, el código ya tenía 125 avisos de ESLint. Están en `eslint-suppressions.json`: el linter los tolera y falla con cualquier error nuevo.
+
+- Si tu PR agrega un error, arréglalo. No lo agregues a la lista.
+- Si arreglas avisos que ya estaban, el linter también falla hasta que bajes la lista: corre `npx eslint . --prune-suppressions` y commitea el archivo.
+- Si mueves o renombras un archivo con avisos conocidos, cambia su ruta en la lista.
+- La meta es vaciarla.
 
 ---
 
@@ -166,6 +232,9 @@ Scripts disponibles:
 | `npm start` | Consola web sin watch (es lo que corre el contenedor) |
 | `npm run correos` | Procesa el buzón una vez |
 | `npm run correos:test` | Modo prueba, sin conectar al buzón |
+| `npm run lint` | Linter (ver «Validación de los PR») |
+| `npm test` | Pruebas unitarias, sin base de datos |
+| `npm run test:humo` | Prueba de humo de `/api`; necesita una base local preparada (ver «Validación de los PR») |
 
 **`AUTH_REDIRECT_URI` es distinta en cada entorno.** En local tiene que ser `http://localhost:3001/auth/callback`; con la URL de producción, el login te saca del localhost y la cookie de sesión se marca `Secure`, que el navegador descarta sobre `http://`. Esa URL además debe estar registrada en Azure AD (*App registration → Authentication → Web*), o Microsoft responde `AADSTS50011`.
 
@@ -177,7 +246,7 @@ La UI son HTML estáticos que el servidor lee del disco en cada petición: para 
 
 ## Estilo de código
 
-El repositorio no tiene linter. Sigue lo que ya está escrito:
+ESLint (`npm run lint`) revisa errores, no el formato. Para el estilo, sigue lo que ya está escrito:
 
 - `'use strict'` al inicio de cada módulo, CommonJS (`require`), 2 espacios de indentación.
 - Cabecera de bloque con `// ── Sección ─────`.
@@ -195,4 +264,4 @@ Cosas que ya costaron un incidente. Consérvalas:
 - **Postgres es la fuente de verdad.** Todo el SQL vive en `src/repo/`: fuera de ahí no se escribe SQL, y ahí adentro no se toman decisiones de negocio. El SQLite de `data/local.db` ya no es un caché — solo guarda las sesiones y el mapeo de tesorería.
 - **SharePoint quedó para archivos, correo y login.** Los PDF de respaldo van a su Drive; las once listas están congeladas desde el corte y ninguna operación de datos sale por Microsoft Graph. No vuelvas a leer de ellas.
 - **En desarrollo, `MODO_PRUEBA=1`.** La base es local, pero el buzón, el Drive y tesorería son los de producción: sin esta variable, probar el flujo completo sube archivos y responde correos de verdad.
-- **No hay pruebas automatizadas.** `npm test` es el stub por defecto. Prueba a mano el flujo que tocaste y descríbelo en el PR.
+- **Las pruebas automáticas cubren poco.** `npm test` y la prueba de humo cubren la API de RRHH y el cálculo de totales; la consola, el correo y los PDF siguen sin pruebas. Prueba a mano el flujo que tocaste y descríbelo en el PR. `src/test.js` no es parte de `npm test`: es un script manual que necesita la base.
