@@ -4,10 +4,12 @@
 -- su mismo uuid y código de KAOS, para que la API de RRHH (/api/*) lo encuentre
 -- por proyectoKaosId cuando crear-orden-erp local llame a este ERP.
 --
--- No lo aplica nada automáticamente: no es supabase/seed.sql (el que leería
--- `supabase db reset`), deploy/aplicar-migraciones.sh solo aplica
--- supabase/migrations/ y db:push no lleva --include-seed. Se aplica a mano,
--- solo contra el Postgres de docker-compose.dev.yml:
+-- Nada lo aplica en tu base ni en la del VPS: no es supabase/seed.sql (el que
+-- leería `supabase db reset`), deploy/aplicar-migraciones.sh solo aplica
+-- supabase/migrations/ y db:push no lleva --include-seed. La única excepción
+-- es el CI de los PR (.github/workflows/validar-pr.yml), que lo carga en su
+-- base temporal antes de la prueba de humo de /api. Se aplica a mano, solo
+-- contra el Postgres de docker-compose.dev.yml:
 --
 --   docker exec -i oc-automation-db-dev psql -U postgres -d erp -v ON_ERROR_STOP=1 < supabase/seeds/local-p0.sql
 --
