@@ -209,7 +209,7 @@ async function intentoStream(params, timeoutMs, onTexto) {
   stream.on('text', (delta) => {
     huboDatos = true;
     texto += delta;
-    if (onTexto) { try { onTexto(texto); } catch {} }
+    if (onTexto) { try { onTexto(texto); } catch { /* a failing progress callback must not break the stream */ } }
   });
 
   try {
