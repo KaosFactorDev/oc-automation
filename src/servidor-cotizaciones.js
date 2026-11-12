@@ -650,7 +650,14 @@ async function ctxSharePoint() {
 }
 
 const PORT         = process.env.PUERTO_COTIZACIONES || 3001;
-const TEMP_DIR     = path.join(__dirname, '../temp/cotizaciones');
+// Interfaz en la que escucha el servidor. Sin definir, 0.0.0.0: en el VPS la app
+// corre en un contenedor y el proxy le llega por la red de Docker, así que tiene
+// que escuchar en todas sus interfaces. En un equipo de desarrollo, .env.local
+// la fija en 127.0.0.1 para que el ERP no quede abierto a la red local. Las Edge
+// Functions de KAOS lo siguen alcanzando por host.docker.internal: Docker
+// Desktop entrega esas conexiones en el loopback del equipo.
+const HOST         = process.env.HOST_COTIZACIONES || '0.0.0.0';
+const TEMP_DIR    = path.join(__dirname, '../temp/cotizaciones');
 const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`;
 
 // Rutas que no requieren sesión activa
@@ -4571,8 +4578,8 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
 
 });
 
-servidor.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT}`);
+servidor.listen(PORT, HOST, () => {
+  console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT} (escucha en ${HOST})`);
   console.log('  Abre esa URL en tu navegador para cargar cotizaciones.\n');
   require('./modoPrueba').avisar();
   // Deja en el log que proveedor de IA usa cada funcion y, si alguna sigue en Gemini,
