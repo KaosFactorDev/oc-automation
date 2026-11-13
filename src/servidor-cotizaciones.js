@@ -42,6 +42,8 @@ const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
 const apiRrhh          = require('./apiRrhh');
+const pg               = require('./pg');
+const { revisarSalud } = require('./salud');
 const bitacora         = require('./bitacora');
 const repoBitacora     = require('./repo/historial');
 const correcciones     = require('./correcciones');
@@ -1167,6 +1169,17 @@ const servidor = http.createServer(async (req, res) => {
   if (req.method === 'GET' && MARCA[url]) {
     res.writeHead(200, { 'Content-Type': MARCA[url], 'Cache-Control': 'public, max-age=86400' });
     res.end(fs.readFileSync(path.join(__dirname, '../ui', url)));
+    return;
+  }
+
+  // ── GET /health → la app responde y la base también ──────────────────────
+  // Para el healthcheck del contenedor y el monitoreo: 200 si Postgres contesta
+  // un SELECT 1, 503 si no. Va antes del middleware de sesión porque Docker no
+  // tiene cookie, y no consulta usuarios. Ver src/salud.js.
+  if ((req.method === 'GET' || req.method === 'HEAD') && url === '/health') {
+    const { status, cuerpo } = await revisarSalud(() => pg.query('SELECT 1'));
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(req.method === 'HEAD' ? undefined : JSON.stringify(cuerpo));
     return;
   }
 

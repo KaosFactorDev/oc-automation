@@ -74,8 +74,10 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    # /health responde 200 solo si Postgres contesta (src/salud.js). Antes era
+    # «/», que sirve la consola aunque la base esté caída.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:3001/"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/health"]
       interval: 30s
       timeout: 5s
       retries: 3

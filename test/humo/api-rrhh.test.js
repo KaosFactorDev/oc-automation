@@ -129,6 +129,12 @@ describe('humo: /api contra el Postgres local', () => {
     await esperar(() => log.includes('MODO_PRUEBA activo'), 5000, 'el aviso de MODO_PRUEBA');
   });
 
+  caso('GET /health sin sesión ni llave → 200, la base responde', async () => {
+    const r = await pedir('GET', '/health', { llave: '' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { estado: 'ok', base: 'ok' });
+  });
+
   caso('sin llave → 401', async () => {
     const r = await pedir('GET', `/api/ordenes-servicio?origenSolicitudId=${solicitud}`, { llave: '' });
     assert.equal(r.status, 401);
