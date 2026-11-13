@@ -14,6 +14,8 @@
  *     de costos muestra por JOIN, así que pisarlo reescribiría el pasado.
  *   · Proyectos de KAOS que no están → entran como nuevos, con `origen='kaos'`.
  *   · Filas `origen='local'` (centros de costo) y `'huerfano'` → no se tocan.
+ *   · Proyectos borrados en KAOS (marcados por `kaos:sync -- --todo`) → quedan
+ *     inactivos, como historial; sus documentos siguen apuntándoles (T-124).
  *
  * Correr `npm run kaos:sync` antes: esto lee del espejo, no de la API.
  */
@@ -47,10 +49,18 @@ function seccion(t) { console.log(`\n${t}\n${'─'.repeat(t.length)}`); }
     console.log(APLICAR ? 'Aplicado sobre el catálogo:' : 'Se haría (nada aplicado todavía):');
     console.log(`  ${r.actualizados} proyectos ya ligados se actualizarían desde KAOS`);
     console.log(`  ${r.insertados.length} proyectos de KAOS entrarían como nuevos`);
+    console.log(`  ${r.desactivados.length} proyectos borrados en KAOS quedarían inactivos`);
 
     if (r.insertados.length) {
       seccion('Entrarían como nuevos');
       for (const x of r.insertados) console.log(`  ${x.kaos_code}  ${x.codigo}`);
+    }
+
+    if (r.desactivados.length) {
+      seccion('Borrados en KAOS — quedan inactivos');
+      for (const x of r.desactivados) console.log(`  ${x.project_code}  ${x.codigo}`);
+      console.log('\n  Siguen en el catálogo como historial, con sus documentos. Si se');
+      console.log('  borraron por error, se restauran en KAOS y vuelven solos.');
     }
 
     if (r.duplicadosKaos && r.duplicadosKaos.length) {

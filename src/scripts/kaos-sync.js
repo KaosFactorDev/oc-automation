@@ -3,7 +3,8 @@
  * kaos-sync.js — Trae los proyectos de KAOS al espejo local, y mide la brecha.
  *
  *   npm run kaos:sync              incremental: solo lo modificado desde la última vez
- *   npm run kaos:sync -- --todo    reconciliación completa (detecta bajas)
+ *   npm run kaos:sync -- --todo    reconciliación completa (detecta y marca bajas)
+ *   npm run kaos:sync -- --todo --forzar-bajas   marca las bajas aunque pasen el freno
  *   npm run kaos:diff              solo el informe, sin traer nada
  *
  * NO CAMBIA NADA del catálogo. Llena `erp.proyectos_kaos` y muestra en qué se
@@ -14,6 +15,13 @@
  * proyecto borrado en KAOS simplemente deja de aparecer, así que el incremental
  * nunca se entera. Con `--todo` se refresca `visto_en` de todo lo que sigue
  * vivo, y lo que quede con una marca vieja es lo que se fue.
+ *
+ * Lo que se fue se MARCA en el espejo (`eliminado_en`, T-124); antes solo se
+ * imprimía, y el proyecto seguía activo en el catálogo para siempre. Marcar sigue
+ * sin tocar el catálogo: es `kaos-aplicar` el que, al leer la marca, deja la fila
+ * inactiva. Y no se marca a ciegas: si KAOS respondió vacío o recortado, el freno
+ * de src/kaosBajas.js no marca nada y la corrida sale con error, para que el cron
+ * no aplique.
  */
 
 require('dotenv').config();
@@ -21,6 +29,7 @@ require('dotenv').config();
 const kaos = require('../kaosClient');
 const repo = require('../repo/proyectosKaos');
 const pg   = require('../pg');
+const { decidirBajas } = require('../kaosBajas');
 
 // Se traen TODOS los proyectos, activos e inactivos.
 //
@@ -41,6 +50,7 @@ const pg   = require('../pg');
 
 const TODO = process.argv.includes('--todo');
 const SOLO_INFORME = process.argv.includes('--solo-informe');
+const FORZAR_BAJAS = process.argv.includes('--forzar-bajas');
 
 const n = (x) => String(x).padStart(3);
 
@@ -125,14 +135,29 @@ async function informe() {
       console.log(`Traídos ${guardados} proyectos.`);
 
       if (TODO) {
-        const idos = await pg.rows(
-          `SELECT project_code, nombre FROM erp.proyectos_kaos
-            WHERE visto_en < $1 ORDER BY nombre`, [inicio]);
+        // Solo las bajas NUEVAS: los ya marcados en una corrida anterior no
+        // vuelven a listarse ni cuentan para el freno.
+        const idos = await repo.noVistosDesde(inicio);
         if (idos.length) {
           seccion('Ya no están en KAOS');
           for (const r of idos) console.log(`  ${r.project_code}  ${r.nombre}`);
-          console.log('\n  Se borraron: la API no lista los borrados, y los inactivos sí llegan.');
-          console.log('  No se tocan acá; el espejo no decide bajas.');
+
+          const decision = decidirBajas({
+            recibidos: proyectos.length,
+            vivos: await repo.vivosEnEspejo(),
+            bajas: idos.length,
+            forzar: FORZAR_BAJAS,
+          });
+          if (decision.marcar) {
+            console.log('\n  Se borraron: la API no lista los borrados, y los inactivos sí llegan.');
+            const marcados = await repo.marcarEliminados(inicio);
+            console.log(`  Se marcaron ${marcados} como borrados en el espejo. kaos:aplicar los deja`);
+            console.log('  inactivos en el catálogo; sus documentos no se tocan.');
+          } else {
+            // Salir con error es lo que frena al cron: `kaos-sync && kaos-aplicar`.
+            console.error(`\n  No se marcó ninguno. ${decision.motivo}`);
+            process.exitCode = 1;
+          }
         }
       }
     }
