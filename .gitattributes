@@ -31,3 +31,6 @@ deploy/crontab text eol=lf
 *.xlsx  binary
 *.xls   binary
 *.db    binary
+
+# Ganchos de git: siempre con LF, o sh falla al leerlos (T-264).
+.githooks/* text eol=lf
