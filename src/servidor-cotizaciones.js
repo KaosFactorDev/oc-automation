@@ -42,6 +42,7 @@ const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
 const apiRrhh          = require('./apiRrhh');
+const apiKaosConnect   = require('./apiKaosConnect');
 const pg               = require('./pg');
 const { revisarSalud } = require('./salud');
 const bitacora         = require('./bitacora');
@@ -721,6 +722,18 @@ function invalidarUsuario(email) {
 
 const esAdminSesion = (req) => !!req._sesion?.roles?.includes('admin');
 
+/**
+ * ¿La cabecera x-api-key coincide con la llave esperada? timingSafeEqual y no
+ * ===: comparar strings filtra información por el tiempo de respuesta. Las
+ * longitudes primero, porque si difieren lanza. La usan /api/* (RRHH) y
+ * /api/kaos-connect/* (KAOS Connect), cada una con su llave.
+ */
+function llaveValida(req, esperada) {
+  const a = Buffer.from(String(req.headers['x-api-key'] || ''));
+  const b = Buffer.from(esperada);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 // Tope de ítems al crear un requerimiento digitándolo en la consola
 const MAX_ITEMS_REQ_MANUAL = 100;
 
@@ -1183,6 +1196,21 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── /api/kaos-connect/* → lectura para KAOS Connect, con su propia llave ──
+  // Va ANTES del bloque de RRHH, que atiende todo /api/*. Llave aparte
+  // (KAOS_CONNECT_API_KEY): la de RRHH no abre esta API ni esta la de RRHH. Sin
+  // la variable, /api/kaos-connect/* no existe (404). Solo lectura, y cada
+  // llamada trae el correo de una cuenta activa. Ver src/apiKaosConnect.js.
+  if (url.startsWith('/api/kaos-connect/')) {
+    const esperada = String(process.env.KAOS_CONNECT_API_KEY || '').trim();
+    if (!esperada) return json({ error: 'not_found' }, 404);
+    if (!llaveValida(req, esperada)) {
+      console.warn('[api-kaos-connect]', JSON.stringify({ metodo: req.method, ruta: url, status: 401 }));
+      return json({ error: 'unauthorized' }, 401);
+    }
+    return apiKaosConnect.atender(req, res, url);
+  }
+
   // ── /api/* → rutas de máquina, con llave en vez de cookie de sesión ──────
   // Las usa RRHH (KAOS) desde su servidor. Es un tercer camino, no una
   // excepción a RUTAS_PUBLICAS: /api/* no es pública, exige la llave.
@@ -1191,12 +1219,7 @@ const servidor = http.createServer(async (req, res) => {
   if (url === '/api' || url.startsWith('/api/')) {
     const esperada = String(process.env.RRHH_API_KEY || '').trim();
     if (!esperada) return json({ error: 'not_found' }, 404);
-
-    // timingSafeEqual y no ===: comparar strings filtra información por el
-    // tiempo de respuesta. Las longitudes primero, porque si difieren lanza.
-    const a = Buffer.from(String(req.headers['x-api-key'] || ''));
-    const b = Buffer.from(esperada);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    if (!llaveValida(req, esperada)) {
       console.warn('[api]', JSON.stringify({ metodo: req.method, ruta: url, status: 401 }));
       return json({ error: 'unauthorized' }, 401);
     }
