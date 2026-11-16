@@ -32,4 +32,13 @@ module.exports = [
       globals:     globals.node,
     },
   },
+  // Scripts en módulo ES de Node, como scripts/verificar-secretos.mjs (T-264).
+  {
+    files: ['**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType:  'module',
+      globals:     globals.node,
+    },
+  },
 ];
