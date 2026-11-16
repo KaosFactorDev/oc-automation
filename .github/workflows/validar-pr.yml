@@ -92,6 +92,11 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
+      # Que no entre un .env, una llave ni un dato real en una plantilla. No necesita
+      # dependencias, así que va antes de instalarlas. Ver scripts/verificar-secretos.mjs.
+      - name: Secretos y archivos sensibles
+        run: node scripts/verificar-secretos.mjs
+
       - name: Instalar dependencias
         id: instalar
         run: npm ci --no-audit --no-fund

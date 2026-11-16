@@ -118,6 +118,26 @@ El commit lo firma la persona que lo hace. Si usas un asistente, el resultado es
 
 También fuera: `wip`, `cambios`, `arreglos`, `.` y cualquier mensaje que no diga qué cambió.
 
+### Nada sensible en el repositorio
+
+`scripts/verificar-secretos.mjs` revisa tres cosas:
+
+- **Archivos que no se versionan:** ningún `.env` (fuera de las plantillas `*.example`), llave ni certificado.
+- **Plantillas:** solo nombres y marcadores `<...>`. Nada de secretos, correos, UUID, JWT, dominios ni IP reales.
+- **Contenido:** ninguna llave privada ni clave de API con prefijo conocido.
+
+Corre en cada PR (paso «Secretos y archivos sensibles» de `validar-pr.yml`) y, en tu máquina, antes de cada commit, con el gancho de `.githooks/`. El gancho se activa una vez por clon:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Si salta, el mensaje dice archivo, línea y motivo, nunca el valor:
+
+- **El valor real** va en tu `.env` local o en el `.env` del VPS. En la plantilla queda `CLAVE=<qué va acá>`.
+- **Si un secreto ya se subió**, avisa al líder para rotarlo: borrarlo del archivo no lo saca del historial.
+- **Si el hallazgo es legítimo** (un valor de prueba sin riesgo), va en `.secretos-permitidos` con un comentario que diga por qué. Se revisa en el PR.
+
 ---
 
 ## Pull Requests
