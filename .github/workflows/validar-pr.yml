@@ -80,6 +80,9 @@ jobs:
       # Llave de /api para la prueba de humo. Tampoco es un secreto: el servidor
       # que la acepta vive solo durante este job.
       RRHH_API_KEY: ci0local0api0key0not0secret
+      # Llave de /api/kaos-connect para su prueba de humo. Distinta de la de RRHH:
+      # la prueba comprueba que ninguna de las dos abre la API de la otra.
+      KAOS_CONNECT_API_KEY: ci0local0kaos0connect0key0not0secret
 
     steps:
       - name: Checkout del código

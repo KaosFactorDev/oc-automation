@@ -159,8 +159,8 @@ Cada PR hacia `develop` corre [validar-pr.yml](.github/workflows/validar-pr.yml)
 | Paso | Comando | Qué revisa |
 |---|---|---|
 | Linter | `npm run lint` | ESLint con las reglas recomendadas: errores, no formato |
-| Pruebas unitarias | `npm test` | `apiRrhh` y el cálculo de totales de la API, la OC y la OS, sin base de datos (`test/*.test.js`) |
-| Prueba de humo | `npm run test:humo` | El servidor real, con `MODO_PRUEBA=1`, contra un Postgres temporal: llave de `/api`, orden de servicio aprobada y en borrador, idempotencia y requerimiento (`test/humo/`) |
+| Pruebas unitarias | `npm test` | `apiRrhh`, `apiKaosConnect` y el cálculo de totales de la API, la OC y la OS, sin base de datos (`test/*.test.js`) |
+| Prueba de humo | `npm run test:humo` | El servidor real, con `MODO_PRUEBA=1`, contra un Postgres temporal: llave de `/api`, orden de servicio aprobada y en borrador, idempotencia y requerimiento; y la lectura de `/api/kaos-connect` en su propio puerto (`test/humo/`) |
 
 Antes de la prueba de humo, el workflow:
 
@@ -187,7 +187,7 @@ docker run -d --name oc-automation-db-ci -e POSTGRES_DB=erp -e POSTGRES_USER=pos
 export MODO_PRUEBA=1 PUERTO_COTIZACIONES=3002 POSTGRES_DB=erp POSTGRES_PASSWORD=ciadmin0local0only \
   PGHOST=127.0.0.1 PGPORT=55433 PGUSER=postgres ERP_DB_HOST=127.0.0.1 ERP_DB_PORT=55433 \
   ERP_DB_NAME=erp ERP_DB_USER=erp_app ERP_DB_PASSWORD=ciapp0local0only \
-  RRHH_API_KEY=ci0local0api0key0not0secret
+  RRHH_API_KEY=ci0local0api0key0not0secret KAOS_CONNECT_API_KEY=ci0local0kaos0connect0key0not0secret
 
 # 3. Los pasos del workflow (db-esperar.js reemplaza el healthcheck del CI)
 node test/humo/entorno-local.js
