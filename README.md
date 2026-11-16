@@ -752,7 +752,7 @@ Postgres intacto.
 - **Scripts de `src/scripts/`**: son de una sola ejecución y varios son destructivos. No correrlos contra producción sin entender qué borran.
 - **Los tres CSV se retiraron.** Quedan archivados en `data/_archivo-csv-2026/` como referencia histórica de la carga inicial; ningún módulo los lee y el deploy ni siquiera los sube al VPS.
 - **Postgres es la fuente de verdad**, y todo el SQL vive en `src/repo/`. Una escritura nueva se hace ahí, no repartida por el servidor, y no hay que reflejarla en ningún otro lado: no queda una segunda copia que pueda mentir.
-- **No hay pruebas automatizadas.** `npm test` no está implementado y `src/test.js` es un script suelto de exploración. Los cambios se validan a mano contra la consola.
+- **Las pruebas automáticas cubren poco.** Cada PR a `develop` corre linter, pruebas unitarias (`npm test`: la API de RRHH y el cálculo de totales) y una prueba de humo de `/api` contra un Postgres temporal (ver `CONTRIBUTING.md`, «Validación de los PR»). La consola, el correo y los PDF se siguen validando a mano. `src/test.js` es un script suelto de exploración y no es parte de `npm test`.
 
 ---
 

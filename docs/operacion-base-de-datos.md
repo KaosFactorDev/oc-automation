@@ -42,7 +42,7 @@ corriendo mientras se despliega, y numeradas por encima de la última de `main`.
 | Comando | Qué hace |
 |---|---|
 | `npm run kaos:sync` | Trae de `kaos-api` lo modificado desde la última corrida |
-| `npm run kaos:sync -- --todo` | Reconciliación completa. **La única que detecta borrados** |
+| `npm run kaos:sync -- --todo` | Reconciliación completa. **La única que detecta borrados**: los marca, y `kaos:aplicar` los deja inactivos. Con un freno si se iría más del 20 % (`-- --todo --forzar-bajas` para saltarlo) |
 | `npm run kaos:diff` | Solo el informe de diferencias, sin traer nada |
 | `npm run kaos:ligar` | Ata una fila del ERP a su proyecto de KAOS cuando el nombre es idéntico |
 | `npm run kaos:aplicar` | Vuelca el espejo sobre `erp.proyectos`. Acá KAOS pasa a mandar |

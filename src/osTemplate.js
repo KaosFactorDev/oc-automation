@@ -549,4 +549,5 @@ async function generarExcelBuffer(os, cfg) {
   return wb.xlsx.writeBuffer();
 }
 
-module.exports = { generarHTML, generarExcelBuffer };
+// calcularTotales se exporta para las pruebas (test/calcular-totales.test.js).
+module.exports = { calcularTotales, generarHTML, generarExcelBuffer };

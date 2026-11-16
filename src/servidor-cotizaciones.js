@@ -42,6 +42,9 @@ const auth             = require('./authService');
 const pdfGenerator     = require('./pdfGenerator');
 const tesoreria        = require('./tesoreriaClient');
 const apiRrhh          = require('./apiRrhh');
+const apiKaosConnect   = require('./apiKaosConnect');
+const pg               = require('./pg');
+const { revisarSalud } = require('./salud');
 const bitacora         = require('./bitacora');
 const repoBitacora     = require('./repo/historial');
 const correcciones     = require('./correcciones');
@@ -650,7 +653,14 @@ async function ctxSharePoint() {
 }
 
 const PORT         = process.env.PUERTO_COTIZACIONES || 3001;
-const TEMP_DIR     = path.join(__dirname, '../temp/cotizaciones');
+// Interfaz en la que escucha el servidor. Sin definir, 0.0.0.0: en el VPS la app
+// corre en un contenedor y el proxy le llega por la red de Docker, así que tiene
+// que escuchar en todas sus interfaces. En un equipo de desarrollo, .env.local
+// la fija en 127.0.0.1 para que el ERP no quede abierto a la red local. Las Edge
+// Functions de KAOS lo siguen alcanzando por host.docker.internal: Docker
+// Desktop entrega esas conexiones en el loopback del equipo.
+const HOST         = process.env.HOST_COTIZACIONES || '0.0.0.0';
+const TEMP_DIR    = path.join(__dirname, '../temp/cotizaciones');
 const AUTH_REDIRECT_URI = process.env.AUTH_REDIRECT_URI || `http://localhost:${PORT}/auth/callback`;
 
 // Rutas que no requieren sesión activa
@@ -711,6 +721,18 @@ function invalidarUsuario(email) {
 }
 
 const esAdminSesion = (req) => !!req._sesion?.roles?.includes('admin');
+
+/**
+ * ¿La cabecera x-api-key coincide con la llave esperada? timingSafeEqual y no
+ * ===: comparar strings filtra información por el tiempo de respuesta. Las
+ * longitudes primero, porque si difieren lanza. La usan /api/* (RRHH) y
+ * /api/kaos-connect/* (KAOS Connect), cada una con su llave.
+ */
+function llaveValida(req, esperada) {
+  const a = Buffer.from(String(req.headers['x-api-key'] || ''));
+  const b = Buffer.from(esperada);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 // Tope de ítems al crear un requerimiento digitándolo en la consola
 const MAX_ITEMS_REQ_MANUAL = 100;
@@ -1163,6 +1185,32 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GET /health → la app responde y la base también ──────────────────────
+  // Para el healthcheck del contenedor y el monitoreo: 200 si Postgres contesta
+  // un SELECT 1, 503 si no. Va antes del middleware de sesión porque Docker no
+  // tiene cookie, y no consulta usuarios. Ver src/salud.js.
+  if ((req.method === 'GET' || req.method === 'HEAD') && url === '/health') {
+    const { status, cuerpo } = await revisarSalud(() => pg.query('SELECT 1'));
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(req.method === 'HEAD' ? undefined : JSON.stringify(cuerpo));
+    return;
+  }
+
+  // ── /api/kaos-connect/* → lectura para KAOS Connect, con su propia llave ──
+  // Va ANTES del bloque de RRHH, que atiende todo /api/*. Llave aparte
+  // (KAOS_CONNECT_API_KEY): la de RRHH no abre esta API ni esta la de RRHH. Sin
+  // la variable, /api/kaos-connect/* no existe (404). Solo lectura, y cada
+  // llamada trae el correo de una cuenta activa. Ver src/apiKaosConnect.js.
+  if (url.startsWith('/api/kaos-connect/')) {
+    const esperada = String(process.env.KAOS_CONNECT_API_KEY || '').trim();
+    if (!esperada) return json({ error: 'not_found' }, 404);
+    if (!llaveValida(req, esperada)) {
+      console.warn('[api-kaos-connect]', JSON.stringify({ metodo: req.method, ruta: url, status: 401 }));
+      return json({ error: 'unauthorized' }, 401);
+    }
+    return apiKaosConnect.atender(req, res, url);
+  }
+
   // ── /api/* → rutas de máquina, con llave en vez de cookie de sesión ──────
   // Las usa RRHH (KAOS) desde su servidor. Es un tercer camino, no una
   // excepción a RUTAS_PUBLICAS: /api/* no es pública, exige la llave.
@@ -1171,12 +1219,7 @@ const servidor = http.createServer(async (req, res) => {
   if (url === '/api' || url.startsWith('/api/')) {
     const esperada = String(process.env.RRHH_API_KEY || '').trim();
     if (!esperada) return json({ error: 'not_found' }, 404);
-
-    // timingSafeEqual y no ===: comparar strings filtra información por el
-    // tiempo de respuesta. Las longitudes primero, porque si difieren lanza.
-    const a = Buffer.from(String(req.headers['x-api-key'] || ''));
-    const b = Buffer.from(esperada);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    if (!llaveValida(req, esperada)) {
       console.warn('[api]', JSON.stringify({ metodo: req.method, ruta: url, status: 401 }));
       return json({ error: 'unauthorized' }, 401);
     }
@@ -4571,8 +4614,8 @@ Responde en español, de forma concisa y práctica. Señala alertas de sobrecons
 
 });
 
-servidor.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT}`);
+servidor.listen(PORT, HOST, () => {
+  console.log(`\n✓ App de cotizaciones corriendo en http://localhost:${PORT} (escucha en ${HOST})`);
   console.log('  Abre esa URL en tu navegador para cargar cotizaciones.\n');
   require('./modoPrueba').avisar();
   // Deja en el log que proveedor de IA usa cada funcion y, si alguna sigue en Gemini,

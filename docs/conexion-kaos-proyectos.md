@@ -222,7 +222,8 @@ contenedor —p. ej. `docker exec oc-automation-app node src/scripts/kaos-sync.j
 | Comando | Cuándo |
 |---|---|
 | `kaos-sync.js` | lo corre el cron; a mano solo para forzar |
-| `kaos-sync.js --todo` | lo corre el cron de madrugada; detecta borrados |
+| `kaos-sync.js --todo` | lo corre el cron de madrugada; detecta y marca los borrados |
+| `kaos-sync.js --todo --forzar-bajas` | a mano, si el freno de bajas paró una limpieza real en KAOS |
 | `kaos-aplicar.js --si` | lo corre el cron después de cada sync |
 | `kaos-ligar.js --si` | a mano, si aparece en KAOS una obra que ya existía acá |
 
@@ -230,6 +231,22 @@ contenedor —p. ej. `docker exec oc-automation-app node src/scripts/kaos-sync.j
 proyecto borrado en KAOS simplemente deja de aparecer, así que el incremental
 nunca se entera. `--todo` refresca `visto_en` de todo lo vivo, y lo que quede con
 marca vieja es lo que se fue.
+
+**Qué pasa con lo que se fue (T-124).** `--todo` lo marca en el espejo
+(`erp.proyectos_kaos.eliminado_en`) y el `kaos-aplicar` que corre enseguida deja
+la fila del catálogo **inactiva**, como cualquier obra cerrada en KAOS:
+
+- Sus documentos no se tocan: siguen apuntándole y se consultan como historial.
+  No se borra ni se manda a la bandeja.
+- Tesorería deja de ofrecerla para solicitudes nuevas.
+- Si en KAOS la restauran, vuelve a llegar: la marca se borra y el siguiente
+  aplicar la reactiva.
+
+**El freno.** Si KAOS responde vacío, o si de una corrida a otra se iría más del
+20 % de los proyectos vivos, `--todo` no marca nada y sale con error, así que el
+cron no corre `kaos-aplicar`. Es para que una falla de KAOS no apague el catálogo
+de madrugada. Si la limpieza en KAOS fue real, se revisa la lista que imprime y se
+corre a mano con `--forzar-bajas`. La regla está en `src/kaosBajas.js`.
 
 ---
 

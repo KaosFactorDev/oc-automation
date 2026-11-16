@@ -1,0 +1,5 @@
+#!/bin/sh
+# Frena el commit si lleva un .env, una llave, un dato real en una plantilla o una
+# clave de API. Se activa una vez por clon:  git config core.hooksPath .githooks
+# Ver scripts/verificar-secretos.mjs.
+exec node scripts/verificar-secretos.mjs --staged

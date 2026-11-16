@@ -480,11 +480,12 @@ El valor lo estimó RRHH y puede cambiar; por eso es configuración y no código
 
 ### 6.4 Queda registrado el humano real
 
-Hoy el ERP escribe `process.env.USUARIO_EMAIL || 'sistema'` en los campos de auditoría (por ejemplo, en `/os/crear` y al aprobar), y en los datos reales se ven órdenes con `'sistema'`.
+Cuando se escribió este contrato, el ERP escribía `process.env.USUARIO_EMAIL || 'sistema'` en los campos de auditoría (por ejemplo, en `/os/crear` y al aprobar), y en los datos reales se ven órdenes con `'sistema'`.
 
-**Estas rutas no deben heredar eso.** `creado_por` y `aprobado_por` llevan `origenSolicitadoPor`, que viene de la sesión real de la persona en RRHH. Su nombre va en `origen_solicitado_por_nombre` y en `observaciones`. Así, si un precio se ve raro, compras sabe a quién llamar.
+*(Resuelto el 2026-10-16, PR #69 y #70; registrado como T-135 el 2026-11-13.)* Las rutas de la consola ya toman la persona de la sesión con `bitacora.quien(req)` (`src/bitacora.js`): la bitácora de documentos y los campos de quién crea, aprueba y paga. `'sistema'` queda solo para los procesos sin persona detrás, como la lectura del buzón o el cron. `USUARIO_EMAIL` solo se usa para crear el primer administrador cuando la base está vacía. Las órdenes viejas que ya quedaron con `'sistema'` no se corrigen: no hay forma de saber quién las hizo.
 
-> No hace falta arreglar los demás sitios en este trabajo. Pero el código nuevo ya viene haciéndolo bien: `solicitudTesoreriaPor` usa `req._sesion?.email` (`:2497`).
+**Estas rutas tampoco usan la sesión de la consola, porque no la tienen.** `creado_por` y `aprobado_por` llevan `origenSolicitadoPor`, que viene de la sesión real de la persona en RRHH. Su nombre va en `origen_solicitado_por_nombre` y en `observaciones`. Así, si un precio se ve raro, compras sabe a quién llamar.
+
 
 ---
 
@@ -628,7 +629,7 @@ npm run dev                 # http://localhost:3001
 | Leer datos de RRHH desde el ERP | KAOS manda lo que el ERP necesita |
 | Clausulado por IA | Ver §3 |
 | UI nueva, salvo el campo del tope en Configuración | Los documentos aparecen en los registros normales de OS y de requerimientos |
-| Arreglar los demás `USUARIO_EMAIL` | Deuda preexistente. Estas rutas solo se abstienen de sumarle |
+| Arreglar los demás `USUARIO_EMAIL` | Ya resuelto en la consola (PR #69 y #70, T-135). Ver §6.4 |
 | Avisar a KAOS cuando cambie un estado | **Opcional, y para después.** KAOS consulta bajo demanda con §5. Si algún día se quiere, sería con una llave de integración que emita KAOS, no con usuario y contraseña |
 
 ---

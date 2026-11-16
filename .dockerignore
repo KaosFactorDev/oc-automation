@@ -33,3 +33,8 @@ _archivo/
 
 # Documentación (no hace falta en la imagen)
 *.md
+
+# Pruebas y linter (los usa el CI de los PR, no la app)
+test/
+eslint.config.js
+eslint-suppressions.json

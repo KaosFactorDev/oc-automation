@@ -14,6 +14,9 @@ const pg = require('../pg');
  * `visto_en` se refresca SIEMPRE, incluso si nada más cambió. Es lo que permite
  * detectar bajas después de una reconciliación completa: lo que no se vio en
  * esta corrida, KAOS ya no lo entrega.
+ *
+ * Y `eliminado_en` se limpia: si KAOS lo vuelve a entregar, no está borrado. Un
+ * proyecto restaurado allá recupera su estado acá en el siguiente aplicar.
  */
 async function volcar(proyectos) {
   if (!proyectos.length) return 0;
@@ -37,7 +40,8 @@ async function volcar(proyectos) {
            zona             = EXCLUDED.zona,
            kaos_creado      = EXCLUDED.kaos_creado,
            kaos_actualizado = EXCLUDED.kaos_actualizado,
-           visto_en         = now()`,
+           visto_en         = now(),
+           eliminado_en     = NULL`,
         [
           p.id, p.project_code, p.name || '', p.description ?? null, p.estado ?? null,
           p.ciudad ?? null, p.departamento ?? null, p.pais ?? null, p.zona ?? null,
@@ -62,6 +66,39 @@ async function guardarMarca(marca, resultado) {
             ultima_corrida = now(),
             ultimo_resultado = $2
       WHERE id = 1`, [marca, resultado || null]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bajas: lo que una reconciliación completa ya no recibió
+// ─────────────────────────────────────────────────────────────────────────────
+// Acá solo se cuenta y se marca. Si conviene marcar —el freno contra una
+// respuesta vacía o recortada de KAOS— lo decide src/kaosBajas.js.
+
+/**
+ * Los proyectos del espejo que la corrida que empezó en `inicio` no refrescó y
+ * que todavía no estaban marcados como eliminados. Son las bajas nuevas.
+ */
+async function noVistosDesde(inicio) {
+  return pg.rows(
+    `SELECT kaos_id::text AS kaos_id, project_code, nombre
+       FROM erp.proyectos_kaos
+      WHERE visto_en < $1 AND eliminado_en IS NULL
+      ORDER BY nombre`, [inicio]);
+}
+
+/** Cuántos proyectos del espejo siguen vivos (sin marca de eliminado). */
+async function vivosEnEspejo() {
+  const r = await pg.one(
+    'SELECT count(*)::int AS n FROM erp.proyectos_kaos WHERE eliminado_en IS NULL');
+  return r ? r.n : 0;
+}
+
+/** Marca como eliminados los que esa corrida no refrescó. Devuelve cuántos. */
+async function marcarEliminados(inicio) {
+  const r = await pg.query(
+    `UPDATE erp.proyectos_kaos SET eliminado_en = now()
+      WHERE visto_en < $1 AND eliminado_en IS NULL`, [inicio]);
+  return r.rowCount;
 }
 
 /**
@@ -131,7 +168,10 @@ async function discrepancias() {
 //     ERP no rompería la llave foránea. Lo que no calce queda en NULL.
 //
 //  3. `activo` sale del `estado` de KAOS. Es el dueño del catálogo: si allá la
-//     obra se cerró, acá deja de ofrecerse para documentos nuevos.
+//     obra se cerró, acá deja de ofrecerse para documentos nuevos. Y si allá la
+//     BORRARON (`eliminado_en`), también: la fila queda inactiva, como historial,
+//     y sus documentos siguen apuntándole. No se borra ni se manda a la bandeja,
+//     porque eso les quitaría el proyecto a documentos que sí lo tenían.
 
 const CAMPOS_DESDE_KAOS = `
   nombre       = k.nombre,
@@ -139,7 +179,7 @@ const CAMPOS_DESDE_KAOS = `
   departamento = k.departamento,
   zona         = (SELECT z.zona FROM erp.zonas z
                    WHERE erp.norm(z.zona) = erp.norm(k.zona)),
-  activo       = (k.estado = 'Activo'),
+  activo       = (k.estado = 'Activo' AND k.eliminado_en IS NULL),
   updated_at   = now()`;
 
 /**
@@ -149,6 +189,15 @@ const CAMPOS_DESDE_KAOS = `
  */
 async function aplicar({ aplicar: hacerlo = false } = {}) {
   return pg.tx(async (c) => {
+    // Los que este aplicar va a desactivar porque KAOS los borró. Se miden ANTES
+    // del UPDATE: después ya están inactivos y no se distinguen de los demás.
+    const desactivados = await c.query(
+      `SELECT p.codigo, k.project_code
+         FROM erp.proyectos p
+         JOIN erp.proyectos_kaos k ON k.kaos_id = p.kaos_id
+        WHERE p.origen = 'kaos' AND p.activo AND k.eliminado_en IS NOT NULL
+        ORDER BY p.codigo`);
+
     // Los ya ligados: se actualizan. `codigo` queda intacto.
     const upd = await c.query(
       `UPDATE erp.proyectos p SET ${CAMPOS_DESDE_KAOS}
@@ -182,7 +231,8 @@ async function aplicar({ aplicar: hacerlo = false } = {}) {
               (SELECT z.zona FROM erp.zonas z WHERE erp.norm(z.zona) = erp.norm(k.zona)),
               (k.estado = 'Activo'), 'kaos', k.kaos_id, k.project_code
          FROM erp.proyectos_kaos k
-        WHERE NOT EXISTS (SELECT 1 FROM erp.proyectos p WHERE p.kaos_id = k.kaos_id)
+        WHERE k.eliminado_en IS NULL
+          AND NOT EXISTS (SELECT 1 FROM erp.proyectos p WHERE p.kaos_id = k.kaos_id)
           AND NOT EXISTS (SELECT 1 FROM erp.proyectos p
                            WHERE erp.norm(p.codigo) = erp.norm(k.nombre))
         ORDER BY erp.norm(k.nombre), k.kaos_actualizado DESC, k.project_code
@@ -196,17 +246,18 @@ async function aplicar({ aplicar: hacerlo = false } = {}) {
       `SELECT k.project_code, k.nombre, p.codigo AS fila_erp, p.activo
          FROM erp.proyectos_kaos k
          JOIN erp.proyectos p ON erp.norm(p.codigo) = erp.norm(k.nombre)
-        WHERE p.kaos_id IS NULL
+        WHERE p.kaos_id IS NULL AND k.eliminado_en IS NULL
         ORDER BY k.nombre`);
 
     // Duplicados dentro del propio KAOS: dos proyectos con el mismo nombre. Solo
     // entra uno, así que el otro hay que verlo.
     const duplicadosKaos = await c.query(
       `SELECT erp.norm(nombre) AS nombre, string_agg(project_code, ' + ' ORDER BY project_code) AS codigos
-         FROM erp.proyectos_kaos GROUP BY 1 HAVING count(*) > 1 ORDER BY 1`);
+         FROM erp.proyectos_kaos WHERE eliminado_en IS NULL
+        GROUP BY 1 HAVING count(*) > 1 ORDER BY 1`);
 
     const resumen = {
-      actualizados: upd.rowCount, insertados: ins.rows,
+      actualizados: upd.rowCount, insertados: ins.rows, desactivados: desactivados.rows,
       choques: choques.rows, duplicadosKaos: duplicadosKaos.rows,
     };
     if (!hacerlo) throw new SimulacionTerminada(resumen);
@@ -226,7 +277,9 @@ class SimulacionTerminada extends Error {
 
 // Solo los ACTIVOS en KAOS se pueden usar para una solicitud nueva. Uno inactivo
 // es historial: se consulta en tesorería, pero para cargarle un pago nuevo hay
-// que reactivarlo en KAOS. Es la misma regla que aplica Cash_Flow.
+// que reactivarlo en KAOS. Es la misma regla que aplica Cash_Flow. Uno BORRADO
+// en KAOS (`eliminado_en`) conserva su último estado en el espejo, así que se
+// excluye aparte: si no, se seguiría ofreciendo como activo.
 const ESTADO_ACTIVO = 'Activo';
 
 /** Los proyectos ACTIVOS de KAOS, ordenados por nombre. `id` es el kaos_id. */
@@ -234,14 +287,15 @@ async function paraTesoreria() {
   return pg.rows(
     `SELECT kaos_id::text AS id, nombre AS name, project_code AS codigo, estado
        FROM erp.proyectos_kaos
-      WHERE estado = $1
+      WHERE estado = $1 AND eliminado_en IS NULL
       ORDER BY nombre`, [ESTADO_ACTIVO]);
 }
 
 /** true si el kaos_id existe en el espejo y está activo en KAOS. */
 async function activoParaTesoreria(kaosId) {
   const r = await pg.one(
-    `SELECT 1 FROM erp.proyectos_kaos WHERE kaos_id::text = $1 AND estado = $2`,
+    `SELECT 1 FROM erp.proyectos_kaos
+      WHERE kaos_id::text = $1 AND estado = $2 AND eliminado_en IS NULL`,
     [String(kaosId || ''), ESTADO_ACTIVO]);
   return !!r;
 }
@@ -262,5 +316,6 @@ async function deProyectoErp(codigo) {
 
 module.exports = {
   volcar, marcaGuardada, guardarMarca, discrepancias, aplicar, SimulacionTerminada,
+  noVistosDesde, vivosEnEspejo, marcarEliminados,
   paraTesoreria, activoParaTesoreria, deProyectoErp,
 };
